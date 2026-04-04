@@ -40,6 +40,9 @@ firebase-sa.json
 *.json.bak
 .env
 
+# Docker runtime
+docker/config/host_key
+
 # OS
 .DS_Store
 Thumbs.db

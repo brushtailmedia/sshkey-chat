@@ -1,0 +1,12 @@
+.git
+.gitignore
+*.md
+LICENSE
+testdata
+docker/config/host_key
+sshkey-server
+sshkey-ctl
+*.db
+*.db-wal
+*.db-shm
+*.log

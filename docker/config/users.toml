@@ -1,0 +1,19 @@
+# Add users here. Each user needs an Ed25519 SSH public key.
+#
+# Example:
+# [alice]
+# key = "ssh-ed25519 AAAA... alice@laptop"
+# display_name = "Alice"
+# rooms = ["general"]
+#
+# To get a user's public key:
+#   cat ~/.ssh/id_ed25519.pub
+#
+# To approve a pending user:
+#   docker exec sshkey-server sshkey-ctl pending
+#   Then add their key here and the server will hot-reload.
+
+[admin]
+key = "REPLACE_WITH_YOUR_ED25519_PUBLIC_KEY"
+display_name = "Admin"
+rooms = ["general"]

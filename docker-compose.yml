@@ -1,0 +1,13 @@
+services:
+  sshkey-server:
+    build: .
+    container_name: sshkey-server
+    ports:
+      - "2222:2222"
+    volumes:
+      - ./docker/config:/etc/sshkey-chat
+      - sshkey-data:/var/sshkey-chat
+    restart: unless-stopped
+
+volumes:
+  sshkey-data:

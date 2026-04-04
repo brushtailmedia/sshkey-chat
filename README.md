@@ -55,11 +55,46 @@ Only Ed25519 SSH keys are supported. The server rejects RSA, ECDSA, and other ke
 
 ## Quick start
 
-### Requirements
+### Docker (recommended)
+
+```bash
+# 1. Edit docker/config/users.toml — add your Ed25519 public key
+#    cat ~/.ssh/id_ed25519.pub
+
+# 2. Start the server
+docker compose up -d
+
+# 3. Connect with the terminal client
+sshkey-chat --host localhost --key ~/.ssh/id_ed25519
+```
+
+Manage users:
+
+```bash
+# View pending key requests
+docker exec sshkey-server sshkey-ctl pending
+
+# List users
+docker exec sshkey-server sshkey-ctl list-users
+
+# Approve a user (add to docker/config/users.toml — server hot-reloads)
+
+# Revoke a device
+docker exec sshkey-server sshkey-ctl revoke-device --user alice --device dev_x
+
+# View logs
+docker logs -f sshkey-server
+```
+
+Config files are in `docker/config/` (volume-mounted). Edit them directly — the server watches for changes and reloads automatically.
+
+### Build from source
+
+#### Requirements
 
 - Go 1.25 or later
 
-### Build
+#### Build
 
 ```bash
 go build -o sshkey-server ./cmd/sshkey-server
