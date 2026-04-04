@@ -16,6 +16,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/brushtailmedia/sshkey/internal/config"
+	"github.com/brushtailmedia/sshkey/internal/protocol"
 	"github.com/brushtailmedia/sshkey/internal/store"
 )
 
@@ -24,6 +25,7 @@ type Server struct {
 	cfg      *config.Config
 	store    *store.Store
 	epochs   *epochManager
+	limiter  *rateLimiter
 	sshCfg   *ssh.ServerConfig
 	hostKey  ssh.Signer
 	logger   *slog.Logger
@@ -39,6 +41,7 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		cfg:     cfg,
 		logger:  logger,
 		epochs:  newEpochManager(),
+		limiter: newRateLimiter(),
 		clients: make(map[string]*Client),
 	}
 
@@ -89,8 +92,19 @@ func (s *Server) ListenAndServe() error {
 	}
 }
 
-// Close shuts down the server.
+// Close shuts down the server gracefully.
 func (s *Server) Close() error {
+	// Broadcast shutdown to all connected clients
+	s.mu.RLock()
+	for _, client := range s.clients {
+		client.Encoder.Encode(protocol.ServerShutdown{
+			Type:        "server_shutdown",
+			Message:     "Server shutting down",
+			ReconnectIn: 10,
+		})
+	}
+	s.mu.RUnlock()
+
 	var firstErr error
 	if s.listener != nil {
 		ln := s.listener

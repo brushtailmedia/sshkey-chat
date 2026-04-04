@@ -150,6 +150,11 @@ func (s *Store) ConvDB(convID string) (*sql.DB, error) {
 	return db, nil
 }
 
+// UsersDB returns the users database for direct queries.
+func (s *Store) UsersDB() *sql.DB {
+	return s.usersDB
+}
+
 // initUsersDB creates the users.db schema.
 func (s *Store) initUsersDB() error {
 	_, err := s.usersDB.Exec(`

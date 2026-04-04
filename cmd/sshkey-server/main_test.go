@@ -164,15 +164,21 @@ func (tc *testClient) drainUntil(expected string) (json.RawMessage, []json.RawMe
 
 func (tc *testClient) readMessage() (string, json.RawMessage) {
 	tc.t.Helper()
-	var raw json.RawMessage
-	if err := tc.dec.Decode(&raw); err != nil {
-		tc.t.Fatalf("read message: %v", err)
+	for {
+		var raw json.RawMessage
+		if err := tc.dec.Decode(&raw); err != nil {
+			tc.t.Fatalf("read message: %v", err)
+		}
+		msgType, err := protocol.TypeOf(raw)
+		if err != nil {
+			tc.t.Fatalf("extract type: %v", err)
+		}
+		// Skip presence and typing -- these are async and can arrive between any messages
+		if msgType == "presence" || msgType == "typing" {
+			continue
+		}
+		return msgType, raw
 	}
-	msgType, err := protocol.TypeOf(raw)
-	if err != nil {
-		tc.t.Fatalf("extract type: %v", err)
-	}
-	return msgType, raw
 }
 
 func TestHandshake(t *testing.T) {

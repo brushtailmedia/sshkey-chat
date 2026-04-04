@@ -179,8 +179,15 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 	// Send current epoch keys for rooms
 	s.sendEpochKeys(client)
 
+	// Send pinned messages per room
+	s.sendPins(client)
+
 	// Send sync batches (catch-up after reconnect)
 	s.sendSync(client, clientHello.LastSyncedAt)
+
+	// Broadcast online presence
+	s.broadcastPresence(username, "online")
+	defer s.broadcastPresence(username, "offline")
 
 	// Main message loop
 	s.messageLoop(client)
@@ -362,6 +369,18 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 		s.handleLeaveConversation(c, raw)
 	case "history":
 		s.handleHistory(c, raw)
+	case "react":
+		s.handleReact(c, raw)
+	case "unreact":
+		s.handleUnreact(c, raw)
+	case "pin":
+		s.handlePin(c, raw)
+	case "unpin":
+		s.handleUnpin(c, raw)
+	case "set_profile":
+		s.handleSetProfile(c, raw)
+	case "set_status":
+		s.handleSetStatus(c, raw)
 	case "typing":
 		s.handleTyping(c, raw)
 	case "read":
@@ -373,6 +392,12 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 
 // handleSend processes a room message.
 func (s *Server) handleSend(c *Client, raw json.RawMessage) {
+	// Rate limit
+	if !s.limiter.allow("msg:"+c.Username, float64(s.cfg.Server.RateLimits.MessagesPerSecond)) {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Message rate limit exceeded"})
+		return
+	}
+
 	var msg protocol.Send
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed send"})
@@ -520,7 +545,7 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 	s.broadcastToConversation(msg.Conversation, outMsg)
 }
 
-// handleTyping broadcasts a typing indicator.
+// handleTyping broadcasts a typing indicator to others (not the sender).
 func (s *Server) handleTyping(c *Client, raw json.RawMessage) {
 	var msg protocol.Typing
 	if err := json.Unmarshal(raw, &msg); err != nil {
@@ -535,9 +560,10 @@ func (s *Server) handleTyping(c *Client, raw json.RawMessage) {
 	}
 
 	if msg.Room != "" {
-		s.broadcastToRoom(msg.Room, out)
+		s.broadcastToRoomExcept(msg.Room, c.DeviceID, out)
+	} else if msg.Conversation != "" {
+		s.broadcastToConversationExcept(msg.Conversation, c.DeviceID, out)
 	}
-	// TODO: broadcast to conversation members for DMs
 }
 
 // handleRead broadcasts a read receipt.
@@ -556,9 +582,190 @@ func (s *Server) handleRead(c *Client, raw json.RawMessage) {
 	}
 
 	if msg.Room != "" {
-		s.broadcastToRoom(msg.Room, out)
+		s.broadcastToRoomExcept(msg.Room, c.DeviceID, out)
+	} else if msg.Conversation != "" {
+		s.broadcastToConversationExcept(msg.Conversation, c.DeviceID, out)
 	}
-	// TODO: broadcast to conversation members for DMs
+}
+
+// handleReact processes a reaction.
+func (s *Server) handleReact(c *Client, raw json.RawMessage) {
+	var msg protocol.React
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed react"})
+		return
+	}
+
+	reactionID := generateID("react_")
+
+	reaction := protocol.Reaction{
+		Type:         "reaction",
+		ReactionID:   reactionID,
+		ID:           msg.ID,
+		Room:         msg.Room,
+		Conversation: msg.Conversation,
+		User:         c.Username,
+		TS:           time.Now().Unix(),
+		Epoch:        msg.Epoch,
+		WrappedKeys:  msg.WrappedKeys,
+		Payload:      msg.Payload,
+		Signature:    msg.Signature,
+	}
+
+	// Store in the appropriate DB
+	if s.store != nil {
+		if msg.Room != "" {
+			db, err := s.store.RoomDB(msg.Room)
+			if err == nil {
+				db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, epoch, payload, signature)
+					VALUES (?, ?, ?, ?, ?, ?, ?)`,
+					reactionID, msg.ID, c.Username, reaction.TS, msg.Epoch, msg.Payload, msg.Signature)
+			}
+		} else if msg.Conversation != "" {
+			db, err := s.store.ConvDB(msg.Conversation)
+			if err == nil {
+				wrappedKeys := ""
+				if len(msg.WrappedKeys) > 0 {
+					data, _ := json.Marshal(msg.WrappedKeys)
+					wrappedKeys = string(data)
+				}
+				db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, epoch, payload, signature, wrapped_keys)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+					reactionID, msg.ID, c.Username, reaction.TS, msg.Epoch, msg.Payload, msg.Signature, wrappedKeys)
+			}
+		}
+	}
+
+	// Broadcast
+	if msg.Room != "" {
+		s.broadcastToRoom(msg.Room, reaction)
+	} else if msg.Conversation != "" {
+		s.broadcastToConversation(msg.Conversation, reaction)
+	}
+}
+
+// handleUnreact processes a reaction removal.
+func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
+	var msg protocol.Unreact
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+
+	// Look up the reaction to find its target and room/conversation
+	if s.store == nil {
+		return
+	}
+
+	// Search room DBs and conv DBs for this reaction
+	// For now, we need the room/conversation context to broadcast the removal.
+	// The client should include this context. Let's search for it.
+	var targetID, room, conversation, user string
+	var found bool
+
+	s.mu.RLock()
+	s.cfg.RLock()
+	rooms := s.cfg.Users[c.Username].Rooms
+	s.cfg.RUnlock()
+	s.mu.RUnlock()
+
+	for _, r := range rooms {
+		db, err := s.store.RoomDB(r)
+		if err != nil {
+			continue
+		}
+		err = db.QueryRow(`SELECT message_id, user FROM reactions WHERE reaction_id = ?`, msg.ReactionID).
+			Scan(&targetID, &user)
+		if err == nil && user == c.Username {
+			room = r
+			found = true
+			db.Exec(`DELETE FROM reactions WHERE reaction_id = ?`, msg.ReactionID)
+			break
+		}
+	}
+
+	if !found {
+		convs, err := s.store.GetUserConversations(c.Username)
+		if err == nil {
+			for _, conv := range convs {
+				db, err := s.store.ConvDB(conv.ID)
+				if err != nil {
+					continue
+				}
+				err = db.QueryRow(`SELECT message_id, user FROM reactions WHERE reaction_id = ?`, msg.ReactionID).
+					Scan(&targetID, &user)
+				if err == nil && user == c.Username {
+					conversation = conv.ID
+					found = true
+					db.Exec(`DELETE FROM reactions WHERE reaction_id = ?`, msg.ReactionID)
+					break
+				}
+			}
+		}
+	}
+
+	if !found {
+		return
+	}
+
+	removed := protocol.ReactionRemoved{
+		Type:         "reaction_removed",
+		ReactionID:   msg.ReactionID,
+		ID:           targetID,
+		Room:         room,
+		Conversation: conversation,
+		User:         c.Username,
+	}
+
+	if room != "" {
+		s.broadcastToRoom(room, removed)
+	} else if conversation != "" {
+		s.broadcastToConversation(conversation, removed)
+	}
+}
+
+// handlePin processes a pin request.
+func (s *Server) handlePin(c *Client, raw json.RawMessage) {
+	var msg protocol.Pin
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+
+	if s.store != nil {
+		db, err := s.store.RoomDB(msg.Room)
+		if err == nil {
+			db.Exec(`INSERT OR IGNORE INTO pins (message_id, pinned_by, ts) VALUES (?, ?, ?)`,
+				msg.ID, c.Username, time.Now().Unix())
+		}
+	}
+
+	s.broadcastToRoom(msg.Room, protocol.Pinned{
+		Type:     "pinned",
+		Room:     msg.Room,
+		ID:       msg.ID,
+		PinnedBy: c.Username,
+		TS:       time.Now().Unix(),
+	})
+}
+
+// handleUnpin processes an unpin request.
+func (s *Server) handleUnpin(c *Client, raw json.RawMessage) {
+	var msg protocol.Unpin
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+
+	if s.store != nil {
+		db, err := s.store.RoomDB(msg.Room)
+		if err == nil {
+			db.Exec(`DELETE FROM pins WHERE message_id = ?`, msg.ID)
+		}
+	}
+
+	s.broadcastToRoom(msg.Room, protocol.Unpinned{
+		Type: "unpinned",
+		Room: msg.Room,
+		ID:   msg.ID,
+	})
 }
 
 // handleCreateDM creates a new DM conversation.
@@ -617,9 +824,102 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// TODO: look up message to determine room/conversation and verify permissions
-	// For now, this is a placeholder that will be completed with proper message lookup
-	s.logger.Debug("delete requested", "user", c.Username, "message", msg.ID)
+	if s.store == nil {
+		return
+	}
+
+	// Check if user is admin (admins can delete any room message)
+	s.cfg.RLock()
+	isAdmin := false
+	for _, a := range s.cfg.Server.Server.Admins {
+		if a == c.Username {
+			isAdmin = true
+			break
+		}
+	}
+	rooms := s.cfg.Users[c.Username].Rooms
+	s.cfg.RUnlock()
+
+	// Search room DBs for the message
+	for _, room := range rooms {
+		db, err := s.store.RoomDB(room)
+		if err != nil {
+			continue
+		}
+		var sender string
+		err = db.QueryRow(`SELECT sender FROM messages WHERE id = ? AND deleted = 0`, msg.ID).Scan(&sender)
+		if err != nil {
+			continue
+		}
+
+		// Permission check: own messages or admin
+		if sender != c.Username && !isAdmin {
+			c.Encoder.Encode(protocol.Error{
+				Type:    "error",
+				Code:    protocol.ErrNotAuthorized,
+				Message: "You can only delete your own messages",
+				Ref:     msg.ID,
+			})
+			return
+		}
+
+		if err := s.store.DeleteRoomMessage(room, msg.ID, c.Username); err != nil {
+			s.logger.Error("delete failed", "room", room, "id", msg.ID, "error", err)
+			return
+		}
+
+		s.broadcastToRoom(room, protocol.Deleted{
+			Type:      "deleted",
+			ID:        msg.ID,
+			DeletedBy: c.Username,
+			TS:        time.Now().Unix(),
+			Room:      room,
+		})
+		return
+	}
+
+	// Search conversation DBs
+	convs, err := s.store.GetUserConversations(c.Username)
+	if err != nil {
+		return
+	}
+
+	for _, conv := range convs {
+		db, err := s.store.ConvDB(conv.ID)
+		if err != nil {
+			continue
+		}
+		var sender string
+		err = db.QueryRow(`SELECT sender FROM messages WHERE id = ? AND deleted = 0`, msg.ID).Scan(&sender)
+		if err != nil {
+			continue
+		}
+
+		// DMs: own messages only, no admin override
+		if sender != c.Username {
+			c.Encoder.Encode(protocol.Error{
+				Type:    "error",
+				Code:    protocol.ErrNotAuthorized,
+				Message: "You can only delete your own messages in DMs",
+				Ref:     msg.ID,
+			})
+			return
+		}
+
+		if err := s.store.DeleteConvMessage(conv.ID, msg.ID, c.Username); err != nil {
+			s.logger.Error("delete failed", "conversation", conv.ID, "id", msg.ID, "error", err)
+			return
+		}
+
+		s.broadcastToConversation(conv.ID, protocol.Deleted{
+			Type:         "deleted",
+			ID:           msg.ID,
+			DeletedBy:    c.Username,
+			TS:           time.Now().Unix(),
+			Conversation: conv.ID,
+		})
+		return
+	}
 }
 
 // handleLeaveConversation removes a user from a DM conversation.
@@ -648,6 +948,64 @@ func (s *Server) handleLeaveConversation(c *Client, raw json.RawMessage) {
 		"user", c.Username,
 		"conversation", msg.Conversation,
 	)
+}
+
+// handleSetProfile updates a user's profile and broadcasts.
+func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
+	var msg protocol.SetProfile
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+
+	// Update in store
+	if s.store != nil {
+		s.store.UsersDB().Exec(`
+			INSERT INTO profiles (user, display_name, avatar_id) VALUES (?, ?, ?)
+			ON CONFLICT (user) DO UPDATE SET display_name = excluded.display_name, avatar_id = excluded.avatar_id`,
+			c.Username, msg.DisplayName, msg.AvatarID)
+	}
+
+	// Build profile message with pubkey
+	s.cfg.RLock()
+	user := s.cfg.Users[c.Username]
+	s.cfg.RUnlock()
+
+	parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(user.Key))
+	if err != nil {
+		return
+	}
+
+	profile := protocol.Profile{
+		Type:           "profile",
+		User:           c.Username,
+		DisplayName:    msg.DisplayName,
+		AvatarID:       msg.AvatarID,
+		PubKey:         user.Key,
+		KeyFingerprint: ssh.FingerprintSHA256(parsed),
+	}
+
+	// Broadcast to all users who can see this user
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, client := range s.clients {
+		client.Encoder.Encode(profile)
+	}
+}
+
+// handleSetStatus updates a user's status text.
+func (s *Server) handleSetStatus(c *Client, raw json.RawMessage) {
+	var msg protocol.SetStatus
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+
+	if s.store != nil {
+		s.store.UsersDB().Exec(`
+			INSERT INTO profiles (user, status_text) VALUES (?, ?)
+			ON CONFLICT (user) DO UPDATE SET status_text = excluded.status_text`,
+			c.Username, msg.Text)
+	}
 }
 
 // broadcastToRoom sends a message to all connected clients in a room.
@@ -690,6 +1048,57 @@ func (s *Server) broadcastToConversation(convID string, msg any) {
 	defer s.mu.RUnlock()
 
 	for _, client := range s.clients {
+		if memberSet[client.Username] {
+			client.Encoder.Encode(msg)
+		}
+	}
+}
+
+// broadcastToRoomExcept sends to all room members except the given device.
+func (s *Server) broadcastToRoomExcept(room, excludeDevice string, msg any) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	s.cfg.RLock()
+	defer s.cfg.RUnlock()
+
+	for _, client := range s.clients {
+		if client.DeviceID == excludeDevice {
+			continue
+		}
+		user := s.cfg.Users[client.Username]
+		for _, r := range user.Rooms {
+			if r == room {
+				client.Encoder.Encode(msg)
+				break
+			}
+		}
+	}
+}
+
+// broadcastToConversationExcept sends to all conversation members except the given device.
+func (s *Server) broadcastToConversationExcept(convID, excludeDevice string, msg any) {
+	if s.store == nil {
+		return
+	}
+
+	members, err := s.store.GetConversationMembers(convID)
+	if err != nil {
+		return
+	}
+
+	memberSet := make(map[string]bool, len(members))
+	for _, m := range members {
+		memberSet[m] = true
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, client := range s.clients {
+		if client.DeviceID == excludeDevice {
+			continue
+		}
 		if memberSet[client.Username] {
 			client.Encoder.Encode(msg)
 		}
