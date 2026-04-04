@@ -554,8 +554,13 @@ func TestDMConversations(t *testing.T) {
 		t.Fatalf("alice expected dm, got %s", msgType)
 	}
 
-	// Bob receives the DM
+	// Bob receives dm_created (from server push) then the DM
+	// Drain dm_created if it comes first
 	msgType, raw = bob.readMessage()
+	if msgType == "dm_created" {
+		t.Log("bob received dm_created push")
+		msgType, raw = bob.readMessage()
+	}
 	if msgType != "dm" {
 		t.Fatalf("bob expected dm, got %s", msgType)
 	}

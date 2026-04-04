@@ -924,12 +924,31 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 		}
 	}
 
-	c.Encoder.Encode(protocol.DMCreated{
+	created := protocol.DMCreated{
 		Type:         "dm_created",
 		Conversation: convID,
 		Members:      allMembers,
 		Name:         msg.Name,
-	})
+	}
+
+	// Send dm_created to the creator
+	c.Encoder.Encode(created)
+
+	// Also notify all other online members so they know the conversation exists
+	s.mu.RLock()
+	memberSet := make(map[string]bool, len(allMembers))
+	for _, m := range allMembers {
+		memberSet[m] = true
+	}
+	for _, client := range s.clients {
+		if client.DeviceID == c.DeviceID {
+			continue // already sent to creator
+		}
+		if memberSet[client.Username] {
+			client.Encoder.Encode(created)
+		}
+	}
+	s.mu.RUnlock()
 
 	s.logger.Info("conversation created",
 		"conversation", convID,
