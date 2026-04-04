@@ -1,4 +1,4 @@
-# sshkey
+# sshkey-chat
 
 **[sshkey.chat](https://sshkey.chat)**
 

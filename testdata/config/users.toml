@@ -7,3 +7,8 @@ rooms = ["general", "engineering"]
 key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPRAbUFuMYE6xPqs13jvVb5hMtXpkWeGD93ayZY2lmqj bob@test"
 display_name = "Bob"
 rooms = ["general"]
+
+[carol]
+key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOgdoNpun6JCDfucZGBYbIxiMkNOpREmLc4NwA3PUv29 carol@test"
+display_name = "Carol"
+rooms = ["general"]

@@ -1,4 +1,4 @@
-# sshkey
+# sshkey-chat
 
 Private messaging server over SSH with end-to-end encryption. No accounts, no passwords -- identity is your SSH key.
 
@@ -344,7 +344,7 @@ project_id = "sshkey-chat"
 ## Project structure
 
 ```
-sshkey/
+sshkey-chat/
 ├── cmd/
 │   ├── sshkey-server/     # server entry point
 │   └── sshkey-ctl/        # admin CLI tool
@@ -364,7 +364,7 @@ sshkey/
 
 | Repo | Description |
 |---|---|
-| [sshkey](https://github.com/brushtailmedia/sshkey) | Server + admin tool + Go core library (this repo) |
+| [sshkey-chat](https://github.com/brushtailmedia/sshkey) | Server + admin tool + Go core library (this repo) |
 | [sshkey-term](https://github.com/brushtailmedia/sshkey-term) | Terminal client (Go + Bubble Tea + libghostty) |
 | [sshkey-app](https://github.com/brushtailmedia/sshkey-app) | Desktop + mobile GUI client (Rust + egui) |
 
