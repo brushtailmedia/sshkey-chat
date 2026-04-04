@@ -84,7 +84,7 @@ SSH connect (:2222)
     └── Key not recognised
         ├── Log to pending-keys.log (fingerprint, timestamp, attempt count)
         ├── Notify connected admin clients: {"type":"admin_notify","event":"pending_key",...}
-        ├── Server sends: "Your key is not authorised. The admin has been notified."
+        ├── Server sends: "Your key has been received. Access is awaiting approval -- an admin has been notified. Please try again soon."
         └── disconnect
 ```
 
@@ -240,7 +240,7 @@ Features are individually negotiated, not tied to a protocol version number. Ser
 {"type":"client_hello","protocol":"sshkey-chat","version":1,"client":"terminal","client_version":"0.1.0","device_id":"dev_V1StGXR8_Z5jdHi6B-myT","last_synced_at":"2026-04-01T00:00:00Z","capabilities":["typing","reactions","file_transfer"]}
 
 // Server -> Client (confirmed active set for this session)
-{"type":"welcome","user":"alice","display_name":"Alice Chen","rooms":["general","engineering"],"conversations":["conv_xK9mQ2pR","conv_yL0nR3qS"],"pending_sync":true,"active_capabilities":["typing","reactions","file_transfer"]}
+{"type":"welcome","user":"alice","display_name":"Alice Chen","admin":true,"rooms":["general","engineering"],"conversations":["conv_xK9mQ2pR","conv_yL0nR3qS"],"pending_sync":true,"active_capabilities":["typing","reactions","file_transfer"]}
 ```
 
 **Rules:**

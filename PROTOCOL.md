@@ -23,7 +23,7 @@ Client opens session channel (Channel 1)
 
   Client -> {"type":"client_hello","protocol":"sshkey-chat","version":1,"client":"my-client","client_version":"0.1.0","device_id":"dev_V1StGXR8_Z5jdHi6B-myT","last_synced_at":"2026-04-01T00:00:00Z","capabilities":["typing","reactions","signatures"]}
 
-  Server -> {"type":"welcome","user":"alice","display_name":"Alice Chen","rooms":["general","engineering"],"conversations":["conv_xK9mQ2pR"],"pending_sync":true,"active_capabilities":["typing","reactions","signatures"]}
+  Server -> {"type":"welcome","user":"alice","display_name":"Alice Chen","admin":true,"rooms":["general","engineering"],"conversations":["conv_xK9mQ2pR"],"pending_sync":true,"active_capabilities":["typing","reactions","signatures"]}
 ```
 
 The client must respond within 2 seconds or the server disconnects with an install banner.

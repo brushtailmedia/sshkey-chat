@@ -29,6 +29,7 @@ type Welcome struct {
 	Type               string   `json:"type"`                // "welcome"
 	User               string   `json:"user"`                // authenticated username
 	DisplayName        string   `json:"display_name"`        // display name from config
+	Admin              bool     `json:"admin"`               // true if user is a server admin
 	Rooms              []string `json:"rooms"`               // rooms the user has access to
 	Conversations      []string `json:"conversations"`       // DM conversation IDs
 	PendingSync        bool     `json:"pending_sync"`        // true if sync batches follow

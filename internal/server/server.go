@@ -241,10 +241,21 @@ func (s *Server) authenticateKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh
 }
 
 // logPendingKey stores a pending key in the DB, logs to file, and notifies admins.
+// Only notifies the admin on the first attempt — repeat attempts just update the counter.
 func (s *Server) logPendingKey(fingerprint, remote string) {
-	// Store in DB for tracking attempts
-	attempts := 1
+	isFirstAttempt := true
+
 	if s.store != nil {
+		// Check if this key has been seen before
+		var existing int
+		s.store.UsersDB().QueryRow(
+			`SELECT attempts FROM pending_keys WHERE fingerprint = ?`,
+			fingerprint).Scan(&existing)
+		if existing > 0 {
+			isFirstAttempt = false
+		}
+
+		// Upsert — increment attempt counter
 		s.store.UsersDB().Exec(`
 			INSERT INTO pending_keys (fingerprint, remote_addr)
 			VALUES (?, ?)
@@ -254,34 +265,33 @@ func (s *Server) logPendingKey(fingerprint, remote string) {
 				remote_addr = excluded.remote_addr`,
 			fingerprint, remote)
 
-		var count int
-		var firstSeen string
-		s.store.UsersDB().QueryRow(
-			`SELECT attempts, first_seen FROM pending_keys WHERE fingerprint = ?`,
-			fingerprint).Scan(&count, &firstSeen)
-		if count > 0 {
-			attempts = count
-			// Notify connected admin clients
+		// Only notify admin on first attempt
+		if isFirstAttempt {
+			var firstSeen string
+			s.store.UsersDB().QueryRow(
+				`SELECT first_seen FROM pending_keys WHERE fingerprint = ?`,
+				fingerprint).Scan(&firstSeen)
+
 			s.notifyAdmins(protocol.AdminNotify{
 				Type:        "admin_notify",
 				Event:       "pending_key",
 				Fingerprint: fingerprint,
-				Attempts:    attempts,
+				Attempts:    1,
 				FirstSeen:   firstSeen,
 			})
+
+			// Append to flat log file only on first attempt
+			dataDir := filepath.Join(filepath.Dir(s.cfg.Dir), "data")
+			logPath := filepath.Join(dataDir, "pending-keys.log")
+			f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
+			if err != nil {
+				s.logger.Error("failed to open pending-keys.log", "error", err)
+				return
+			}
+			defer f.Close()
+			fmt.Fprintf(f, "fingerprint=%s remote=%s\n", fingerprint, remote)
 		}
 	}
-
-	// Also append to flat log file
-	dataDir := filepath.Join(filepath.Dir(s.cfg.Dir), "data")
-	logPath := filepath.Join(dataDir, "pending-keys.log")
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
-	if err != nil {
-		s.logger.Error("failed to open pending-keys.log", "error", err)
-		return
-	}
-	defer f.Close()
-	fmt.Fprintf(f, "fingerprint=%s remote=%s attempts=%d\n", fingerprint, remote, attempts)
 }
 
 // notifyAdmins sends a message to all connected admin clients.

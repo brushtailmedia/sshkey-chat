@@ -107,6 +107,13 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 	s.cfg.RLock()
 	user := s.cfg.Users[username]
 	rooms := user.Rooms
+	isAdmin := false
+	for _, a := range s.cfg.Server.Server.Admins {
+		if a == username {
+			isAdmin = true
+			break
+		}
+	}
 	s.cfg.RUnlock()
 
 	// TODO: load conversation list from DB
@@ -118,6 +125,7 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 		Type:               "welcome",
 		User:               username,
 		DisplayName:        user.DisplayName,
+		Admin:              isAdmin,
 		Rooms:              rooms,
 		Conversations:      conversations,
 		PendingSync:        pendingSync,
