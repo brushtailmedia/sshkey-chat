@@ -163,11 +163,15 @@ sudo journalctl -u sshkey-server -f   # follow logs
 
 ```bash
 sshkey-ctl pending                                    # view pending key requests
+sshkey-ctl approve --fingerprint FP --name NAME --rooms general  # approve a user
+sshkey-ctl reject --fingerprint FP                    # reject a pending key
 sshkey-ctl list-users                                 # list all users
 sshkey-ctl remove-user carol                          # remove a user
 sshkey-ctl revoke-device --user alice --device dev_x  # revoke a stolen device
 sshkey-ctl restore-device --user alice --device dev_x # re-authorize a device
 sshkey-ctl host-key                                   # print server host key fingerprint
+sshkey-ctl purge --older-than 5y                      # delete old messages + vacuum
+sshkey-ctl purge --older-than 1y --dry-run            # preview what would be deleted
 ```
 
 ## Protocol
@@ -242,8 +246,9 @@ CREATE TABLE epoch_keys (
 -- DM conversations
 CREATE TABLE conversations (id TEXT PRIMARY KEY, created_at TEXT);
 CREATE TABLE conversation_members (
-    conversation_id TEXT, user TEXT,
-    PRIMARY KEY (conversation_id, user)
+    conversation_id TEXT, user TEXT, joined_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (conversation_id, user),
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id)
 );
 
 -- User room join tracking (first_seen / first_epoch filtering)
@@ -261,7 +266,8 @@ CREATE TABLE read_positions (
 
 -- Push notification tokens
 CREATE TABLE push_tokens (
-    user TEXT, device_id TEXT, platform TEXT, token TEXT, active INTEGER,
+    user TEXT, device_id TEXT, platform TEXT, token TEXT,
+    updated_at TEXT DEFAULT (datetime('now')), active INTEGER DEFAULT 1,
     PRIMARY KEY (user, device_id)
 );
 
@@ -342,6 +348,7 @@ sshkey/
 ├── cmd/
 │   ├── sshkey-server/     # server entry point
 │   └── sshkey-ctl/        # admin CLI tool
+├── init/                  # systemd service file
 ├── internal/
 │   ├── config/            # TOML config parsing + validation
 │   ├── protocol/          # wire format message types + NDJSON codec
