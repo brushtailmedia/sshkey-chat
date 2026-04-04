@@ -1,0 +1,9 @@
+[alice]
+key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJPpG4hFrxw7JOAppGdh0JrkNDNGxypfmwJxNFCWXnpG test@sshkey"
+display_name = "Alice Chen"
+rooms = ["general", "engineering"]
+
+[bob]
+key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPRAbUFuMYE6xPqs13jvVb5hMtXpkWeGD93ayZY2lmqj bob@test"
+display_name = "Bob"
+rooms = ["general"]

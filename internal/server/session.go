@@ -1,0 +1,697 @@
+package server
+
+import (
+	"encoding/json"
+	"io"
+	"time"
+
+	"golang.org/x/crypto/ssh"
+
+	"github.com/brushtailmedia/sshkey/internal/protocol"
+	"github.com/brushtailmedia/sshkey/internal/store"
+)
+
+// allCapabilities is the full set of capabilities the server supports.
+var allCapabilities = []string{
+	"typing",
+	"reactions",
+	"read_receipts",
+	"file_transfer",
+	"link_previews",
+	"presence",
+	"pins",
+	"mentions",
+	"unread",
+	"status",
+	"signatures",
+}
+
+// handleSession runs the protocol session on an accepted SSH channel.
+func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Channel) {
+	defer ch.Close()
+
+	enc := protocol.NewEncoder(ch)
+	dec := protocol.NewDecoder(ch)
+
+	// Step 1: Send server_hello
+	err := enc.Encode(protocol.ServerHello{
+		Type:         "server_hello",
+		Protocol:     "sshkey-chat",
+		Version:      1,
+		ServerID:     s.cfg.Server.Server.Bind,
+		Capabilities: allCapabilities,
+	})
+	if err != nil {
+		s.logger.Error("failed to send server_hello", "user", username, "error", err)
+		return
+	}
+
+	// Step 2: Wait for client_hello (2 second timeout)
+	type helloResult struct {
+		hello protocol.ClientHello
+		err   error
+	}
+	helloCh := make(chan helloResult, 1)
+	go func() {
+		var raw json.RawMessage
+		raw, err := dec.DecodeRaw()
+		if err != nil {
+			helloCh <- helloResult{err: err}
+			return
+		}
+		msgType, err := protocol.TypeOf(raw)
+		if err != nil || msgType != "client_hello" {
+			helloCh <- helloResult{err: io.ErrUnexpectedEOF}
+			return
+		}
+		var hello protocol.ClientHello
+		if err := json.Unmarshal(raw, &hello); err != nil {
+			helloCh <- helloResult{err: err}
+			return
+		}
+		helloCh <- helloResult{hello: hello}
+	}()
+
+	var clientHello protocol.ClientHello
+	select {
+	case result := <-helloCh:
+		if result.err != nil {
+			// Not a protocol client -- send install banner
+			s.sendInstallBanner(enc)
+			return
+		}
+		clientHello = result.hello
+	case <-time.After(2 * time.Second):
+		// Timeout -- not a protocol client
+		s.sendInstallBanner(enc)
+		return
+	}
+
+	// Validate client_hello
+	if clientHello.Protocol != "sshkey-chat" || clientHello.Version != 1 {
+		s.logger.Warn("invalid client_hello",
+			"user", username,
+			"protocol", clientHello.Protocol,
+			"version", clientHello.Version,
+		)
+		s.sendInstallBanner(enc)
+		return
+	}
+
+	// Negotiate capabilities
+	active := negotiateCapabilities(clientHello.Capabilities)
+
+	// Build room and conversation lists for this user
+	s.cfg.RLock()
+	user := s.cfg.Users[username]
+	rooms := user.Rooms
+	s.cfg.RUnlock()
+
+	// TODO: load conversation list from DB
+	var conversations []string
+
+	// Step 3: Send welcome
+	err = enc.Encode(protocol.Welcome{
+		Type:               "welcome",
+		User:               username,
+		DisplayName:        user.DisplayName,
+		Rooms:              rooms,
+		Conversations:      conversations,
+		PendingSync:        false, // TODO: check if sync needed
+		ActiveCapabilities: active,
+	})
+	if err != nil {
+		s.logger.Error("failed to send welcome", "user", username, "error", err)
+		return
+	}
+
+	s.logger.Info("handshake complete",
+		"user", username,
+		"device", clientHello.DeviceID,
+		"capabilities", active,
+	)
+
+	// Register device in store
+	if s.store != nil {
+		deviceCount, err := s.store.UpsertDevice(username, clientHello.DeviceID)
+		if err != nil {
+			s.logger.Error("device registration failed", "user", username, "error", err)
+		} else if deviceCount > s.cfg.Server.Devices.MaxPerUser {
+			enc.Encode(protocol.Error{
+				Type:    "error",
+				Code:    protocol.ErrDeviceLimitExceeded,
+				Message: "Too many devices registered. Revoke an old device to continue.",
+			})
+			return
+		}
+	}
+
+	// Register client
+	client := &Client{
+		Username:     username,
+		DeviceID:     clientHello.DeviceID,
+		Encoder:      enc,
+		Decoder:      dec,
+		Channel:      ch,
+		Conn:         conn,
+		Capabilities: active,
+	}
+
+	s.mu.Lock()
+	s.clients[clientHello.DeviceID] = client
+	s.mu.Unlock()
+
+	defer func() {
+		s.mu.Lock()
+		delete(s.clients, clientHello.DeviceID)
+		s.mu.Unlock()
+	}()
+
+	// Send room list
+	s.sendRoomList(client)
+
+	// Send conversation list (DMs)
+	s.sendConversationList(client)
+
+	// Send profiles for visible users
+	s.sendProfiles(client)
+
+	// Send current epoch keys for rooms
+	s.sendEpochKeys(client)
+
+	// Send sync batches (catch-up after reconnect)
+	s.sendSync(client, clientHello.LastSyncedAt)
+
+	// Main message loop
+	s.messageLoop(client)
+}
+
+// sendInstallBanner sends the install instructions and closes.
+func (s *Server) sendInstallBanner(enc *protocol.Encoder) {
+	enc.Encode(map[string]string{"type": "error", "code": "client_required", "message": "This server requires the sshkey-chat client. Install: https://sshkey.chat"})
+}
+
+// negotiateCapabilities returns the intersection of server and client capabilities.
+func negotiateCapabilities(requested []string) []string {
+	serverSet := make(map[string]bool, len(allCapabilities))
+	for _, c := range allCapabilities {
+		serverSet[c] = true
+	}
+
+	var active []string
+	for _, c := range requested {
+		if serverSet[c] {
+			active = append(active, c)
+		}
+	}
+	return active
+}
+
+// sendRoomList sends the room_list message to the client.
+func (s *Server) sendRoomList(c *Client) {
+	s.cfg.RLock()
+	defer s.cfg.RUnlock()
+
+	var rooms []protocol.RoomInfo
+	for _, roomName := range s.cfg.Users[c.Username].Rooms {
+		room := s.cfg.Rooms[roomName]
+		// Count members in this room
+		memberCount := 0
+		for _, u := range s.cfg.Users {
+			for _, r := range u.Rooms {
+				if r == roomName {
+					memberCount++
+					break
+				}
+			}
+		}
+		rooms = append(rooms, protocol.RoomInfo{
+			Name:    roomName,
+			Topic:   room.Topic,
+			Members: memberCount,
+		})
+	}
+
+	c.Encoder.Encode(protocol.RoomList{
+		Type:  "room_list",
+		Rooms: rooms,
+	})
+}
+
+// sendConversationList sends the conversation_list message to the client.
+func (s *Server) sendConversationList(c *Client) {
+	if s.store == nil {
+		return
+	}
+
+	convs, err := s.store.GetUserConversations(c.Username)
+	if err != nil {
+		s.logger.Error("failed to get conversations", "user", c.Username, "error", err)
+		return
+	}
+
+	if len(convs) == 0 {
+		return
+	}
+
+	var convInfos []protocol.ConversationInfo
+	for _, conv := range convs {
+		convInfos = append(convInfos, protocol.ConversationInfo{
+			ID:      conv.ID,
+			Members: conv.Members,
+		})
+	}
+
+	c.Encoder.Encode(protocol.ConversationList{
+		Type:          "conversation_list",
+		Conversations: convInfos,
+	})
+}
+
+// sendProfiles sends profile messages for all users visible to this client
+// (shared rooms + shared DM conversations).
+func (s *Server) sendProfiles(c *Client) {
+	// Collect all visible usernames
+	visible := make(map[string]bool)
+
+	s.cfg.RLock()
+	clientRooms := make(map[string]bool)
+	for _, r := range s.cfg.Users[c.Username].Rooms {
+		clientRooms[r] = true
+	}
+	for username, user := range s.cfg.Users {
+		for _, r := range user.Rooms {
+			if clientRooms[r] {
+				visible[username] = true
+				break
+			}
+		}
+	}
+	s.cfg.RUnlock()
+
+	// Also include DM conversation members
+	if s.store != nil {
+		convs, err := s.store.GetUserConversations(c.Username)
+		if err == nil {
+			for _, conv := range convs {
+				for _, m := range conv.Members {
+					visible[m] = true
+				}
+			}
+		}
+	}
+
+	// Send profiles
+	s.cfg.RLock()
+	defer s.cfg.RUnlock()
+
+	for username := range visible {
+		user, ok := s.cfg.Users[username]
+		if !ok {
+			continue
+		}
+		parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(user.Key))
+		if err != nil {
+			continue
+		}
+		c.Encoder.Encode(protocol.Profile{
+			Type:           "profile",
+			User:           username,
+			DisplayName:    user.DisplayName,
+			PubKey:         user.Key,
+			KeyFingerprint: ssh.FingerprintSHA256(parsed),
+		})
+	}
+}
+
+// messageLoop reads and dispatches messages from the client.
+func (s *Server) messageLoop(c *Client) {
+	for {
+		raw, err := c.Decoder.DecodeRaw()
+		if err != nil {
+			if err != io.EOF {
+				s.logger.Error("read error", "user", c.Username, "error", err)
+			}
+			return
+		}
+
+		msgType, err := protocol.TypeOf(raw)
+		if err != nil {
+			s.logger.Warn("invalid message", "user", c.Username, "error", err)
+			continue
+		}
+
+		s.handleMessage(c, msgType, raw)
+	}
+}
+
+// handleMessage dispatches a decoded message by type.
+func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
+	switch msgType {
+	case "send":
+		s.handleSend(c, raw)
+	case "send_dm":
+		s.handleSendDM(c, raw)
+	case "create_dm":
+		s.handleCreateDM(c, raw)
+	case "epoch_rotate":
+		s.handleEpochRotate(c, raw)
+	case "delete":
+		s.handleDelete(c, raw)
+	case "leave_conversation":
+		s.handleLeaveConversation(c, raw)
+	case "history":
+		s.handleHistory(c, raw)
+	case "typing":
+		s.handleTyping(c, raw)
+	case "read":
+		s.handleRead(c, raw)
+	default:
+		s.logger.Debug("unhandled message type", "user", c.Username, "type", msgType)
+	}
+}
+
+// handleSend processes a room message.
+func (s *Server) handleSend(c *Client, raw json.RawMessage) {
+	var msg protocol.Send
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed send"})
+		return
+	}
+
+	// Verify user is in this room
+	s.cfg.RLock()
+	user := s.cfg.Users[c.Username]
+	s.cfg.RUnlock()
+
+	inRoom := false
+	for _, r := range user.Rooms {
+		if r == msg.Room {
+			inRoom = true
+			break
+		}
+	}
+	if !inRoom {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrNotAuthorized,
+			Message: "You don't have access to room: " + msg.Room,
+		})
+		return
+	}
+
+	// Assign server-generated ID and timestamp
+	outMsg := protocol.Message{
+		Type:      "message",
+		ID:        generateID("msg_"),
+		From:      c.Username,
+		Room:      msg.Room,
+		TS:        time.Now().Unix(),
+		Epoch:     msg.Epoch,
+		Payload:   msg.Payload,
+		FileIDs:   msg.FileIDs,
+		Signature: msg.Signature,
+	}
+
+	// Store in room DB
+	if s.store != nil {
+		err := s.store.InsertRoomMessage(msg.Room, store.StoredMessage{
+			ID:        outMsg.ID,
+			Sender:    outMsg.From,
+			TS:        outMsg.TS,
+			Epoch:     outMsg.Epoch,
+			Payload:   outMsg.Payload,
+			FileIDs:   outMsg.FileIDs,
+			Signature: outMsg.Signature,
+		})
+		if err != nil {
+			s.logger.Error("failed to store message", "room", msg.Room, "error", err)
+		}
+	}
+
+	// Broadcast to all connected clients in this room
+	s.broadcastToRoom(msg.Room, outMsg)
+
+	// Check if rotation is needed
+	s.checkRotationNeeded(c, msg.Room)
+}
+
+// handleSendDM processes a direct message.
+func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
+	var msg protocol.SendDM
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed send_dm"})
+		return
+	}
+
+	// Validate conversation exists and user is a member
+	if s.store != nil {
+		isMember, err := s.store.IsConversationMember(msg.Conversation, c.Username)
+		if err != nil || !isMember {
+			c.Encoder.Encode(protocol.Error{
+				Type:    "error",
+				Code:    protocol.ErrUnknownConversation,
+				Message: "You are not a member of this conversation",
+			})
+			return
+		}
+
+		// Validate wrapped_keys match conversation member list
+		members, err := s.store.GetConversationMembers(msg.Conversation)
+		if err == nil {
+			memberSet := make(map[string]bool, len(members))
+			for _, m := range members {
+				memberSet[m] = true
+			}
+			wrappedSet := make(map[string]bool, len(msg.WrappedKeys))
+			for k := range msg.WrappedKeys {
+				wrappedSet[k] = true
+			}
+			if len(memberSet) != len(wrappedSet) {
+				c.Encoder.Encode(protocol.Error{
+					Type:    "error",
+					Code:    protocol.ErrInvalidWrappedKeys,
+					Message: "wrapped_keys must match conversation member list",
+				})
+				return
+			}
+			for m := range memberSet {
+				if !wrappedSet[m] {
+					c.Encoder.Encode(protocol.Error{
+						Type:    "error",
+						Code:    protocol.ErrInvalidWrappedKeys,
+						Message: "wrapped_keys must match conversation member list",
+					})
+					return
+				}
+			}
+		}
+	}
+
+	outMsg := protocol.DM{
+		Type:         "dm",
+		ID:           generateID("msg_"),
+		From:         c.Username,
+		Conversation: msg.Conversation,
+		TS:           time.Now().Unix(),
+		WrappedKeys:  msg.WrappedKeys,
+		Payload:      msg.Payload,
+		FileIDs:      msg.FileIDs,
+		Signature:    msg.Signature,
+	}
+
+	// Store in conversation DB
+	if s.store != nil {
+		err := s.store.InsertConvMessage(msg.Conversation, store.StoredMessage{
+			ID:          outMsg.ID,
+			Sender:      outMsg.From,
+			TS:          outMsg.TS,
+			Payload:     outMsg.Payload,
+			FileIDs:     outMsg.FileIDs,
+			Signature:   outMsg.Signature,
+			WrappedKeys: outMsg.WrappedKeys,
+		})
+		if err != nil {
+			s.logger.Error("failed to store DM", "conversation", msg.Conversation, "error", err)
+		}
+	}
+
+	// Broadcast to all connected clients in this conversation
+	s.broadcastToConversation(msg.Conversation, outMsg)
+}
+
+// handleTyping broadcasts a typing indicator.
+func (s *Server) handleTyping(c *Client, raw json.RawMessage) {
+	var msg protocol.Typing
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+
+	out := protocol.Typing{
+		Type:         "typing",
+		Room:         msg.Room,
+		Conversation: msg.Conversation,
+		User:         c.Username,
+	}
+
+	if msg.Room != "" {
+		s.broadcastToRoom(msg.Room, out)
+	}
+	// TODO: broadcast to conversation members for DMs
+}
+
+// handleRead broadcasts a read receipt.
+func (s *Server) handleRead(c *Client, raw json.RawMessage) {
+	var msg protocol.Read
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+
+	out := protocol.Read{
+		Type:         "read",
+		Room:         msg.Room,
+		Conversation: msg.Conversation,
+		User:         c.Username,
+		LastRead:     msg.LastRead,
+	}
+
+	if msg.Room != "" {
+		s.broadcastToRoom(msg.Room, out)
+	}
+	// TODO: broadcast to conversation members for DMs
+}
+
+// handleCreateDM creates a new DM conversation.
+func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
+	var msg protocol.CreateDM
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed create_dm"})
+		return
+	}
+
+	// Add sender to members
+	allMembers := append([]string{c.Username}, msg.Members...)
+
+	// Deduplicate 1:1 conversations
+	if len(msg.Members) == 1 && s.store != nil {
+		existing, err := s.store.FindOneOnOneConversation(c.Username, msg.Members[0])
+		if err == nil && existing != "" {
+			// Return existing conversation
+			members, _ := s.store.GetConversationMembers(existing)
+			c.Encoder.Encode(protocol.DMCreated{
+				Type:         "dm_created",
+				Conversation: existing,
+				Members:      members,
+			})
+			return
+		}
+	}
+
+	convID := generateID("conv_")
+
+	if s.store != nil {
+		if err := s.store.CreateConversation(convID, allMembers); err != nil {
+			s.logger.Error("failed to create conversation", "error", err)
+			c.Encoder.Encode(protocol.Error{Type: "error", Code: "internal", Message: "failed to create conversation"})
+			return
+		}
+	}
+
+	c.Encoder.Encode(protocol.DMCreated{
+		Type:         "dm_created",
+		Conversation: convID,
+		Members:      allMembers,
+	})
+
+	s.logger.Info("conversation created",
+		"conversation", convID,
+		"created_by", c.Username,
+		"members", allMembers,
+	)
+}
+
+// handleDelete processes a message deletion.
+func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
+	var msg protocol.Delete
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+
+	// TODO: look up message to determine room/conversation and verify permissions
+	// For now, this is a placeholder that will be completed with proper message lookup
+	s.logger.Debug("delete requested", "user", c.Username, "message", msg.ID)
+}
+
+// handleLeaveConversation removes a user from a DM conversation.
+func (s *Server) handleLeaveConversation(c *Client, raw json.RawMessage) {
+	var msg protocol.LeaveConversation
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+
+	if s.store != nil {
+		if err := s.store.RemoveConversationMember(msg.Conversation, c.Username); err != nil {
+			s.logger.Error("failed to leave conversation", "user", c.Username, "error", err)
+			return
+		}
+	}
+
+	// Notify remaining members
+	s.broadcastToConversation(msg.Conversation, protocol.ConversationEvent{
+		Type:         "conversation_event",
+		Conversation: msg.Conversation,
+		Event:        "leave",
+		User:         c.Username,
+	})
+
+	s.logger.Info("conversation leave",
+		"user", c.Username,
+		"conversation", msg.Conversation,
+	)
+}
+
+// broadcastToRoom sends a message to all connected clients in a room.
+func (s *Server) broadcastToRoom(room string, msg any) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	s.cfg.RLock()
+	defer s.cfg.RUnlock()
+
+	for _, client := range s.clients {
+		user := s.cfg.Users[client.Username]
+		for _, r := range user.Rooms {
+			if r == room {
+				client.Encoder.Encode(msg)
+				break
+			}
+		}
+	}
+}
+
+// broadcastToConversation sends a message to all connected clients in a conversation.
+func (s *Server) broadcastToConversation(convID string, msg any) {
+	if s.store == nil {
+		return
+	}
+
+	members, err := s.store.GetConversationMembers(convID)
+	if err != nil {
+		s.logger.Error("failed to get conversation members", "conversation", convID, "error", err)
+		return
+	}
+
+	memberSet := make(map[string]bool, len(members))
+	for _, m := range members {
+		memberSet[m] = true
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, client := range s.clients {
+		if memberSet[client.Username] {
+			client.Encoder.Encode(msg)
+		}
+	}
+}
