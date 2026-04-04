@@ -173,8 +173,9 @@ func (tc *testClient) readMessage() (string, json.RawMessage) {
 		if err != nil {
 			tc.t.Fatalf("extract type: %v", err)
 		}
-		// Skip presence and typing -- these are async and can arrive between any messages
-		if msgType == "presence" || msgType == "typing" {
+		// Skip async messages that can arrive between any protocol messages
+		switch msgType {
+		case "presence", "typing", "epoch_trigger", "epoch_key", "epoch_confirmed":
 			continue
 		}
 		return msgType, raw

@@ -213,6 +213,19 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 	s.broadcastPresence(username, "online")
 	defer s.broadcastPresence(username, "offline")
 
+	// Trigger initial epoch rotation for fresh rooms (after message loop can handle responses)
+	go func() {
+		s.cfg.RLock()
+		rooms := s.cfg.Users[username].Rooms
+		s.cfg.RUnlock()
+
+		for _, room := range rooms {
+			if s.epochs.currentEpochNum(room) == 0 {
+				s.triggerEpochRotation(client, room, "initial")
+			}
+		}
+	}()
+
 	// Main message loop
 	s.messageLoop(client)
 }

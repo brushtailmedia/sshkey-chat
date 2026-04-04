@@ -201,7 +201,11 @@ func (s *Server) sendEpochKeys(c *Client) {
 			}
 		}
 		if epoch == 0 {
-			continue // no epoch keys yet
+			// Fresh room with no epoch — mark for initial rotation after message loop starts.
+			// Don't trigger here — the message loop hasn't started yet, so the client
+			// can't respond to epoch_trigger. Store a flag and trigger on first message.
+			s.epochs.getOrCreate(room, 0)
+			continue
 		}
 
 		wrappedKey, err := s.store.GetEpochKey(room, epoch, c.Username)
