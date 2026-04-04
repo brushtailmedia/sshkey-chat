@@ -51,6 +51,47 @@ func (s *Server) broadcastPresence(username, status string) {
 	}
 }
 
+// sendUnreadCounts sends unread counts for each room and conversation on connect.
+func (s *Server) sendUnreadCounts(c *Client) {
+	if s.store == nil {
+		return
+	}
+
+	s.cfg.RLock()
+	rooms := s.cfg.Users[c.Username].Rooms
+	s.cfg.RUnlock()
+
+	for _, room := range rooms {
+		count, lastRead, err := s.store.GetRoomUnreadCount(room, c.Username, c.DeviceID)
+		if err != nil || count == 0 {
+			continue
+		}
+		c.Encoder.Encode(protocol.Unread{
+			Type:     "unread",
+			Room:     room,
+			Count:    count,
+			LastRead: lastRead,
+		})
+	}
+
+	convs, err := s.store.GetUserConversations(c.Username)
+	if err != nil {
+		return
+	}
+	for _, conv := range convs {
+		count, lastRead, err := s.store.GetConvUnreadCount(conv.ID, c.Username, c.DeviceID)
+		if err != nil || count == 0 {
+			continue
+		}
+		c.Encoder.Encode(protocol.Unread{
+			Type:         "unread",
+			Conversation: conv.ID,
+			Count:        count,
+			LastRead:     lastRead,
+		})
+	}
+}
+
 // sendPins sends pinned message lists for each room on connect.
 func (s *Server) sendPins(c *Client) {
 	if s.store == nil {

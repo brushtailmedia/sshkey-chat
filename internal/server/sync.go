@@ -71,10 +71,27 @@ func (s *Server) sendSync(c *Client, lastSyncedAt string) {
 
 // syncRoom sends a sync batch for a single room.
 func (s *Server) syncRoom(c *Client, room string, sinceTS int64, limit int) {
+	// Apply first_seen filter — new users only see post-join messages
+	firstSeen, firstEpoch, _ := s.store.GetUserRoom(c.Username, room)
+	if firstSeen > 0 && firstSeen > sinceTS {
+		sinceTS = firstSeen
+	}
+
 	msgs, err := s.store.GetRoomMessagesSince(room, sinceTS, limit)
 	if err != nil {
 		s.logger.Error("sync room failed", "room", room, "error", err)
 		return
+	}
+
+	// Filter out messages from epochs before the user's first_epoch
+	if firstEpoch > 0 {
+		filtered := msgs[:0]
+		for _, m := range msgs {
+			if m.Epoch >= firstEpoch || m.Deleted {
+				filtered = append(filtered, m)
+			}
+		}
+		msgs = filtered
 	}
 
 	if len(msgs) == 0 {
@@ -136,6 +153,11 @@ func (s *Server) syncConversation(c *Client, convID string, sinceTS int64, limit
 
 // handleHistory processes a history (scroll-back) request.
 func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
+	if !s.limiter.allowPerMinute("history:"+c.Username, s.cfg.Server.RateLimits.HistoryPerMinute) {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "History rate limit exceeded"})
+		return
+	}
+
 	var req protocol.History
 	if err := json.Unmarshal(raw, &req); err != nil {
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed history"})
@@ -178,6 +200,22 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 		if err != nil {
 			s.logger.Error("history failed", "room", req.Room, "error", err)
 			return
+		}
+
+		// Apply first_seen/first_epoch filter
+		firstSeen, firstEpoch, _ := s.store.GetUserRoom(c.Username, req.Room)
+		if firstSeen > 0 || firstEpoch > 0 {
+			filtered := msgs[:0]
+			for _, m := range msgs {
+				if firstSeen > 0 && m.TS < firstSeen {
+					continue
+				}
+				if firstEpoch > 0 && m.Epoch < firstEpoch && !m.Deleted {
+					continue
+				}
+				filtered = append(filtered, m)
+			}
+			msgs = filtered
 		}
 
 		hasMore := len(msgs) > limit

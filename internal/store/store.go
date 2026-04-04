@@ -194,6 +194,32 @@ func (s *Store) initUsersDB() error {
 			status_text  TEXT
 		);
 
+		CREATE TABLE IF NOT EXISTS user_rooms (
+			user        TEXT NOT NULL,
+			room        TEXT NOT NULL,
+			first_seen  INTEGER NOT NULL,
+			first_epoch INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (user, room)
+		);
+
+		CREATE TABLE IF NOT EXISTS read_positions (
+			user            TEXT NOT NULL,
+			device_id       TEXT NOT NULL,
+			room            TEXT NOT NULL DEFAULT '',
+			conversation_id TEXT NOT NULL DEFAULT '',
+			last_read       TEXT NOT NULL,
+			ts              INTEGER NOT NULL,
+			PRIMARY KEY (user, device_id, room, conversation_id)
+		);
+
+		CREATE TABLE IF NOT EXISTS revoked_devices (
+			user        TEXT NOT NULL,
+			device_id   TEXT NOT NULL,
+			revoked_at  TEXT NOT NULL DEFAULT (datetime('now')),
+			reason      TEXT,
+			PRIMARY KEY (user, device_id)
+		);
+
 		CREATE TABLE IF NOT EXISTS pending_keys (
 			fingerprint TEXT NOT NULL,
 			remote_addr TEXT,

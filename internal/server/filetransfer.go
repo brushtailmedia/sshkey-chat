@@ -42,6 +42,11 @@ func newFileManager(dataDir string) *fileManager {
 
 // handleUploadStart processes an upload_start request on Channel 1.
 func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
+	if !s.limiter.allowPerMinute("upload:"+c.Username, s.cfg.Server.RateLimits.UploadsPerMinute) {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Upload rate limit exceeded"})
+		return
+	}
+
 	var msg protocol.UploadStart
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed upload_start"})

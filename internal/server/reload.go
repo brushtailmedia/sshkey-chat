@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"path/filepath"
 	"time"
 
@@ -138,6 +139,7 @@ func (s *Server) reloadUsers() {
 
 	// Send updated room_list to users whose rooms changed
 	affectedUsers := make(map[string]bool)
+	rotationRooms := make(map[string]string) // room -> reason ("join" or "leave")
 	for _, rc := range roomChanges {
 		affectedUsers[rc.user] = true
 
@@ -149,15 +151,65 @@ func (s *Server) reloadUsers() {
 			User:  rc.user,
 		}
 		s.broadcastToRoom(rc.room, event)
+
+		// Mark room for epoch rotation
+		rotationRooms[rc.room] = rc.event
 	}
 
 	for _, username := range added {
 		affectedUsers[username] = true
+		// New users joining rooms need epoch rotation for each room
+		if newUser, ok := newUsers[username]; ok {
+			for _, room := range newUser.Rooms {
+				rotationRooms[room] = "join"
+			}
+		}
 	}
 
 	for _, client := range s.clients {
 		if affectedUsers[client.Username] {
 			s.sendRoomList(client)
+		}
+	}
+
+	// Trigger epoch rotation for rooms with membership changes
+	// For joins: the joining user should trigger rotation
+	// For leaves: next sender triggers (mark rotation pending)
+	for room, reason := range rotationRooms {
+		if reason == "join" {
+			// Find the joining user's connected client and trigger
+			for _, rc := range roomChanges {
+				if rc.room == room && rc.event == "join" {
+					for _, client := range s.clients {
+						if client.Username == rc.user {
+							s.triggerEpochRotation(client, room, "member_join")
+							break
+						}
+					}
+					break
+				}
+			}
+			// Also check newly added users
+			for _, username := range added {
+				for _, client := range s.clients {
+					if client.Username == username {
+						if newUser, ok := newUsers[username]; ok {
+							for _, r := range newUser.Rooms {
+								if r == room {
+									s.triggerEpochRotation(client, room, "member_join")
+								}
+							}
+						}
+						break
+					}
+				}
+			}
+		} else {
+			// Leave: mark rotation pending, next sender triggers
+			s.epochs.getOrCreate(room, s.epochs.currentEpochNum(room))
+			s.logger.Info("epoch rotation pending (member left)",
+				"room", room,
+			)
 		}
 	}
 
@@ -173,6 +225,10 @@ func (s *Server) reloadUsers() {
 				client.Channel.Close()
 			}
 		}
+	}
+
+	if s.audit != nil {
+		s.audit.Log("server", "reload", fmt.Sprintf("file=users.toml added=%d removed=%d room_changes=%d", len(added), len(removed), len(roomChanges)))
 	}
 
 	s.logger.Info("users.toml reloaded",

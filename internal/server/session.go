@@ -11,6 +11,8 @@ import (
 	"github.com/brushtailmedia/sshkey/internal/store"
 )
 
+const maxPayloadBytes = 16 * 1024 // 16KB max message body
+
 // allCapabilities is the full set of capabilities the server supports.
 var allCapabilities = []string{
 	"typing",
@@ -111,13 +113,14 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 	var conversations []string
 
 	// Step 3: Send welcome
+	pendingSync := clientHello.LastSyncedAt != "" // sync follows if client has a last_synced_at
 	err = enc.Encode(protocol.Welcome{
 		Type:               "welcome",
 		User:               username,
 		DisplayName:        user.DisplayName,
 		Rooms:              rooms,
 		Conversations:      conversations,
-		PendingSync:        false, // TODO: check if sync needed
+		PendingSync:        pendingSync,
 		ActiveCapabilities: active,
 	})
 	if err != nil {
@@ -131,8 +134,18 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 		"capabilities", active,
 	)
 
-	// Register device in store
+	// Check device revocation and register
 	if s.store != nil {
+		revoked, err := s.store.IsDeviceRevoked(username, clientHello.DeviceID)
+		if err == nil && revoked {
+			enc.Encode(protocol.DeviceRevoked{
+				Type:     "device_revoked",
+				DeviceID: clientHello.DeviceID,
+				Reason:   "admin_action",
+			})
+			return
+		}
+
 		deviceCount, err := s.store.UpsertDevice(username, clientHello.DeviceID)
 		if err != nil {
 			s.logger.Error("device registration failed", "user", username, "error", err)
@@ -178,6 +191,9 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 
 	// Send current epoch keys for rooms
 	s.sendEpochKeys(client)
+
+	// Send unread counts
+	s.sendUnreadCounts(client)
 
 	// Send pinned messages per room
 	s.sendPins(client)
@@ -406,6 +422,12 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	// Check payload size (raw JSON includes overhead, but payload is the bulk)
+	if len(raw) > maxPayloadBytes {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrMessageTooLarge, Message: "Message exceeds 16KB limit"})
+		return
+	}
+
 	var msg protocol.Send
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed send"})
@@ -429,6 +451,17 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 			Type:    "error",
 			Code:    protocol.ErrNotAuthorized,
 			Message: "You don't have access to room: " + msg.Room,
+		})
+		return
+	}
+
+	// Validate epoch (two-epoch grace window: current or previous only)
+	currentEpoch := s.epochs.currentEpochNum(msg.Room)
+	if currentEpoch > 0 && msg.Epoch < currentEpoch-1 {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrInvalidEpoch,
+			Message: "Epoch too old (outside grace window)",
 		})
 		return
 	}
@@ -471,6 +504,11 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 
 // handleSendDM processes a direct message.
 func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
+	if len(raw) > maxPayloadBytes {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrMessageTooLarge, Message: "Message exceeds 16KB limit"})
+		return
+	}
+
 	var msg protocol.SendDM
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed send_dm"})
@@ -555,10 +593,17 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 
 // handleTyping broadcasts a typing indicator to others (not the sender).
 func (s *Server) handleTyping(c *Client, raw json.RawMessage) {
+	if !s.limiter.allow("typing:"+c.Username, float64(s.cfg.Server.RateLimits.TypingPerSecond)) {
+		return // silently dropped per spec
+	}
+
 	var msg protocol.Typing
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
 	}
+
+	// Track typing for server-side expiry
+	s.typing.Touch(c.Username, msg.Room, msg.Conversation)
 
 	out := protocol.Typing{
 		Type:         "typing",
@@ -574,11 +619,16 @@ func (s *Server) handleTyping(c *Client, raw json.RawMessage) {
 	}
 }
 
-// handleRead broadcasts a read receipt.
+// handleRead broadcasts a read receipt and stores the position.
 func (s *Server) handleRead(c *Client, raw json.RawMessage) {
 	var msg protocol.Read
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
+	}
+
+	// Store read position
+	if s.store != nil {
+		s.store.SetReadPosition(c.Username, c.DeviceID, msg.Room, msg.Conversation, msg.LastRead)
 	}
 
 	out := protocol.Read{

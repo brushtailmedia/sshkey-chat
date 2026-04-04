@@ -7,7 +7,10 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"golang.org/x/crypto/ssh"
+
 	"github.com/brushtailmedia/sshkey/internal/config"
+	"github.com/brushtailmedia/sshkey/internal/store"
 )
 
 func main() {
@@ -58,9 +61,9 @@ func run() error {
 	case "remove-user":
 		return cmdRemoveUser(configDir, cmdArgs)
 	case "revoke-device":
-		return cmdRevokeDevice(configDir, cmdArgs)
+		return cmdRevokeDevice(dataDir, cmdArgs)
 	case "restore-device":
-		return cmdRestoreDevice(configDir, cmdArgs)
+		return cmdRestoreDevice(dataDir, cmdArgs)
 	case "host-key":
 		return cmdHostKey(configDir)
 	case "purge-archives":
@@ -200,7 +203,7 @@ func cmdRemoveUser(configDir string, args []string) error {
 	return writeTOMLFile(usersPath, users)
 }
 
-func cmdRevokeDevice(configDir string, args []string) error {
+func cmdRevokeDevice(dataDir string, args []string) error {
 	var user, device string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -213,13 +216,21 @@ func cmdRevokeDevice(configDir string, args []string) error {
 	if user == "" || device == "" {
 		return fmt.Errorf("usage: revoke-device --user USER --device DEVICE")
 	}
-	fmt.Printf("Device %s for user %s marked for revocation.\n", device, user)
-	fmt.Println("The server will reject this device on next connection attempt.")
-	// TODO: write to a revoked-devices file that the server reads
+
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	if err := st.RevokeDevice(user, device, "admin_action"); err != nil {
+		return fmt.Errorf("revoke device: %w", err)
+	}
+	fmt.Printf("Device %s for user %s revoked.\n", device, user)
 	return nil
 }
 
-func cmdRestoreDevice(configDir string, args []string) error {
+func cmdRestoreDevice(dataDir string, args []string) error {
 	var user, device string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -232,6 +243,16 @@ func cmdRestoreDevice(configDir string, args []string) error {
 	if user == "" || device == "" {
 		return fmt.Errorf("usage: restore-device --user USER --device DEVICE")
 	}
+
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	if err := st.RestoreDevice(user, device); err != nil {
+		return fmt.Errorf("restore device: %w", err)
+	}
 	fmt.Printf("Device %s for user %s restored.\n", device, user)
 	return nil
 }
@@ -243,11 +264,14 @@ func cmdHostKey(configDir string) error {
 		return fmt.Errorf("no host key found at %s: %w", keyPath, err)
 	}
 
-	// Parse to get fingerprint
-	// Use ssh.ParsePrivateKey for this
-	fmt.Printf("Host key path: %s\n", keyPath)
-	fmt.Printf("Key data: %d bytes\n", len(data))
-	fmt.Println("(Use `ssh-keygen -l -f` to see the fingerprint)")
+	signer, err := ssh.ParsePrivateKey(data)
+	if err != nil {
+		return fmt.Errorf("failed to parse host key: %w", err)
+	}
+
+	fmt.Printf("Host key fingerprint: %s\n", ssh.FingerprintSHA256(signer.PublicKey()))
+	fmt.Printf("Key type: %s\n", signer.PublicKey().Type())
+	fmt.Printf("Path: %s\n", keyPath)
 	return nil
 }
 

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -27,6 +28,8 @@ type Server struct {
 	epochs   *epochManager
 	limiter  *rateLimiter
 	files    *fileManager
+	audit    *auditLog
+	typing   *typingTracker
 	sshCfg   *ssh.ServerConfig
 	hostKey  ssh.Signer
 	logger   *slog.Logger
@@ -61,7 +64,12 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		}
 		s.store = st
 		s.files = newFileManager(dir)
+		s.audit = newAuditLog(dir)
 	}
+
+	// Typing tracker doesn't need expiry broadcast for now — the client handles display timeout.
+	// Server-side expiry is informational only.
+	s.typing = newTypingTracker(nil)
 
 	hostKey, err := s.loadOrGenerateHostKey()
 	if err != nil {
@@ -106,6 +114,14 @@ func (s *Server) ListenAndServe() error {
 
 // Close shuts down the server gracefully.
 func (s *Server) Close() error {
+	// Audit
+	if s.audit != nil {
+		s.mu.RLock()
+		clientCount := len(s.clients)
+		s.mu.RUnlock()
+		s.audit.Log("server", "shutdown", fmt.Sprintf("clients=%d", clientCount))
+	}
+
 	// Broadcast shutdown to all connected clients
 	s.mu.RLock()
 	for _, client := range s.clients {
@@ -258,8 +274,26 @@ func (s *Server) handleConnection(conn net.Conn) {
 		"remote", sshConn.RemoteAddr().String(),
 	)
 
-	// Discard global requests (keepalive, etc.)
-	go ssh.DiscardRequests(reqs)
+	// Handle global requests (respond to keepalive, discard others)
+	go func() {
+		for req := range reqs {
+			if req.WantReply {
+				req.Reply(false, nil) // respond to keepalives
+			}
+		}
+	}()
+
+	// Start server-side keepalive (detect dead connections)
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			_, _, err := sshConn.SendRequest("keepalive@sshkey-chat", true, nil)
+			if err != nil {
+				return // connection dead
+			}
+		}
+	}()
 
 	// Handle channels: Channel 1 = NDJSON protocol, Channel 2 = binary file transfer
 	channelNum := 0

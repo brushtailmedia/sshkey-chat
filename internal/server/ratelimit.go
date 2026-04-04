@@ -32,9 +32,14 @@ func (rl *rateLimiter) allow(key string, maxRate float64) bool {
 
 	b, ok := rl.buckets[key]
 	if !ok {
+		// Start with enough tokens for a burst (at least 1, up to the rate)
+		initial := maxRate
+		if initial < 1 {
+			initial = 1
+		}
 		b = &bucket{
-			tokens:     maxRate, // start full
-			maxTokens:  maxRate,
+			tokens:     initial,
+			maxTokens:  initial,
 			refillRate: maxRate,
 			lastRefill: time.Now(),
 		}
