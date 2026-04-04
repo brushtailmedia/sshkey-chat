@@ -1,4 +1,4 @@
-# sshkey Protocol Reference
+# Protocol Reference
 
 Everything you need to build a client for the sshkey chat server.
 
