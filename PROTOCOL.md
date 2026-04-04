@@ -370,13 +370,15 @@ Rooms only. DMs do not support pins.
 // Server -> Client
 {"type":"pinned","room":"general","id":"msg_abc123","pinned_by":"alice","ts":1712345681}
 
-// Server -> Client (on connect)
-{"type":"pins","room":"general","messages":["msg_abc123","msg_def456"]}
+// Server -> Client (on connect -- includes full message envelopes for decryption)
+{"type":"pins","room":"general","messages":["msg_abc123","msg_def456"],"message_data":[{"type":"message","id":"msg_abc123","from":"alice","room":"general","ts":1712345678,"epoch":3,"payload":"base64...","signature":"base64..."}]}
 
 // Unpin
 {"type":"unpin","room":"general","id":"msg_abc123"}
 {"type":"unpinned","room":"general","id":"msg_abc123"}
 ```
+
+The server filters pins by the user's `first_epoch` -- new members only see pins from messages they can decrypt. `message_data` includes the full encrypted message envelopes so clients can decrypt and show pin previews without scrolling back.
 
 ### Profiles
 

@@ -586,11 +586,13 @@ Reactions use the same encryption model as the conversation they belong to: epoc
 // Server -> Client
 {"type":"unpinned","room":"general","id":"msg_abc123"}
 
-// Server -> Client (on connect, list of pinned messages per room)
-{"type":"pins","room":"general","messages":["msg_abc123","msg_def456"]}
+// Server -> Client (on connect, pinned messages with full envelopes for decryption)
+{"type":"pins","room":"general","messages":["msg_abc123","msg_def456"],"message_data":[{"type":"message","id":"msg_abc123","from":"alice","room":"general","ts":1712345678,"epoch":3,"payload":"base64...","signature":"base64..."}]}
 ```
 
 Pinning is rooms only. DMs and group DMs do not support pinned messages -- with small member counts and per-message keys, pinning adds complexity (who has pin permission in a group DM?) for little value. Users can star/bookmark messages locally in the client if needed.
+
+**Pin filtering for new members:** the server filters pins by the user's `first_epoch` and `first_seen`. New members only see pins from messages they can decrypt -- pins from before they joined are not sent. The `message_data` field includes full encrypted message envelopes so clients can decrypt and show pin previews immediately without scrolling back through history.
 
 #### User Profile
 
@@ -1586,9 +1588,9 @@ Two reference client apps in two languages. The server protocol is well-document
 
 ### Terminal Client (Go)
 
-- Go + embedded libghostty (Zig, via cgo) + Bubble Tea for UI chrome
-- Ghostty handles terminal rendering, image protocols (sixel/kitty/iterm2), scrollback
-- Bubble Tea provides sidebar, room list, input bar around the embedded terminal pane
+- Go + Bubble Tea for TUI + rasterm for inline images
+- rasterm handles image protocols (sixel/kitty/iterm2) for inline image rendering
+- Bubble Tea provides sidebar, room list, input bar, message stream, overlays
 - Go core library: `x/crypto/ssh`, `modernc.org/sqlite`, protocol implementation
 
 ### GUI Client (Rust) -- Desktop + Mobile
