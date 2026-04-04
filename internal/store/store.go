@@ -220,6 +220,16 @@ func (s *Store) initUsersDB() error {
 			PRIMARY KEY (user, device_id)
 		);
 
+		CREATE TABLE IF NOT EXISTS push_tokens (
+			user        TEXT NOT NULL,
+			device_id   TEXT NOT NULL,
+			platform    TEXT NOT NULL,
+			token       TEXT NOT NULL,
+			updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+			active      INTEGER NOT NULL DEFAULT 1,
+			PRIMARY KEY (user, device_id)
+		);
+
 		CREATE TABLE IF NOT EXISTS pending_keys (
 			fingerprint TEXT NOT NULL,
 			remote_addr TEXT,

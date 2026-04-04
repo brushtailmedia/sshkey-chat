@@ -18,6 +18,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey/internal/config"
 	"github.com/brushtailmedia/sshkey/internal/protocol"
+	"github.com/brushtailmedia/sshkey/internal/push"
 	"github.com/brushtailmedia/sshkey/internal/store"
 )
 
@@ -30,6 +31,7 @@ type Server struct {
 	files    *fileManager
 	audit    *auditLog
 	typing   *typingTracker
+	push     *push.Relay
 	sshCfg   *ssh.ServerConfig
 	hostKey  ssh.Signer
 	logger   *slog.Logger
@@ -66,6 +68,9 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		s.files = newFileManager(dir)
 		s.audit = newAuditLog(dir)
 	}
+
+	// Initialize push relay (nil if not configured)
+	s.push = push.NewRelay(cfg.Server.Push, logger)
 
 	// Typing tracker doesn't need expiry broadcast for now — the client handles display timeout.
 	// Server-side expiry is informational only.

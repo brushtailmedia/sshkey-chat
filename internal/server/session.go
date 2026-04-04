@@ -405,6 +405,8 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 		s.handleUploadStart(c, raw)
 	case "download":
 		s.handleDownload(c, raw)
+	case "push_register":
+		s.handlePushRegister(c, raw)
 	case "typing":
 		s.handleTyping(c, raw)
 	case "read":
@@ -500,6 +502,9 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 
 	// Check if rotation is needed
 	s.checkRotationNeeded(c, msg.Room)
+
+	// Notify offline room members via push
+	go s.notifyOfflineUsers(s.getRoomMembers(msg.Room))
 }
 
 // handleSendDM processes a direct message.
@@ -589,6 +594,14 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 
 	// Broadcast to all connected clients in this conversation
 	s.broadcastToConversation(msg.Conversation, outMsg)
+
+	// Notify offline conversation members via push
+	if s.store != nil {
+		members, err := s.store.GetConversationMembers(msg.Conversation)
+		if err == nil {
+			go s.notifyOfflineUsers(members)
+		}
+	}
 }
 
 // handleTyping broadcasts a typing indicator to others (not the sender).

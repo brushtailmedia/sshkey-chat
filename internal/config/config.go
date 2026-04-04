@@ -13,15 +13,16 @@ import (
 
 // ServerConfig represents server.toml.
 type ServerConfig struct {
-	Server   ServerSection   `toml:"server"`
-	Messages MessagesSection `toml:"messages"`
-	Retention RetentionSection `toml:"retention"`
-	Sync     SyncSection     `toml:"sync"`
-	Files    FilesSection    `toml:"files"`
-	Devices  DevicesSection  `toml:"devices"`
+	Server     ServerSection     `toml:"server"`
+	Messages   MessagesSection   `toml:"messages"`
+	Retention  RetentionSection  `toml:"retention"`
+	Sync       SyncSection       `toml:"sync"`
+	Files      FilesSection      `toml:"files"`
+	Devices    DevicesSection    `toml:"devices"`
 	RateLimits RateLimitsSection `toml:"rate_limits"`
-	Shutdown ShutdownSection `toml:"shutdown"`
-	Logging  LoggingSection  `toml:"logging"`
+	Shutdown   ShutdownSection   `toml:"shutdown"`
+	Logging    LoggingSection    `toml:"logging"`
+	Push       PushSection       `toml:"push"`
 }
 
 type ServerSection struct {
@@ -75,6 +76,26 @@ type LoggingSection struct {
 	MaxSizeMB int    `toml:"max_size_mb"`
 	MaxFiles  int    `toml:"max_files"`
 	Format    string `toml:"format"`
+}
+
+type PushSection struct {
+	APNs APNsConfig `toml:"apns"`
+	FCM  FCMConfig  `toml:"fcm"`
+}
+
+type APNsConfig struct {
+	Enabled  bool   `toml:"enabled"`
+	KeyPath  string `toml:"key_path"`
+	KeyID    string `toml:"key_id"`
+	TeamID   string `toml:"team_id"`
+	BundleID string `toml:"bundle_id"`
+	Sandbox  bool   `toml:"sandbox"`
+}
+
+type FCMConfig struct {
+	Enabled         bool   `toml:"enabled"`
+	CredentialsPath string `toml:"credentials_path"`
+	ProjectID       string `toml:"project_id"`
 }
 
 // User represents a single user entry from users.toml.

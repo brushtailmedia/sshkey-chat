@@ -41,3 +41,16 @@ file = "/var/sshkey-chat/server.log"
 max_size_mb = 100
 max_files = 5
 format = "json"
+
+[push.apns]
+enabled = false
+key_path = ""
+key_id = ""
+team_id = ""
+bundle_id = ""
+sandbox = false
+
+[push.fcm]
+enabled = false
+credentials_path = ""
+project_id = ""
