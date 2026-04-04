@@ -82,14 +82,29 @@ type Message struct {
 // DM messages
 
 type CreateDM struct {
-	Type    string   `json:"type"`    // "create_dm"
-	Members []string `json:"members"` // other usernames (sender is implicit)
+	Type    string   `json:"type"`              // "create_dm"
+	Members []string `json:"members"`           // other usernames (sender is implicit)
+	Name    string   `json:"name,omitempty"`    // optional group name
 }
 
 type DMCreated struct {
 	Type         string   `json:"type"`         // "dm_created"
 	Conversation string   `json:"conversation"` // conv_ prefixed Nano ID
 	Members      []string `json:"members"`      // all members including sender
+	Name         string   `json:"name,omitempty"`
+}
+
+type RenameConversation struct {
+	Type         string `json:"type"`         // "rename_conversation"
+	Conversation string `json:"conversation"`
+	Name         string `json:"name"`         // new name (empty to clear)
+}
+
+type ConversationRenamed struct {
+	Type         string `json:"type"`         // "conversation_renamed"
+	Conversation string `json:"conversation"`
+	Name         string `json:"name"`
+	RenamedBy    string `json:"renamed_by"`
 }
 
 type SendDM struct {
@@ -315,6 +330,7 @@ type ConversationList struct {
 type ConversationInfo struct {
 	ID      string   `json:"id"`
 	Members []string `json:"members"`
+	Name    string   `json:"name,omitempty"`
 }
 
 // History (lazy scroll-back)

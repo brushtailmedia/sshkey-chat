@@ -282,6 +282,7 @@ func (s *Server) sendConversationList(c *Client) {
 		convInfos = append(convInfos, protocol.ConversationInfo{
 			ID:      conv.ID,
 			Members: conv.Members,
+			Name:    conv.Name,
 		})
 	}
 
@@ -383,6 +384,8 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 		s.handleDelete(c, raw)
 	case "leave_conversation":
 		s.handleLeaveConversation(c, raw)
+	case "rename_conversation":
+		s.handleRenameConversation(c, raw)
 	case "history":
 		s.handleHistory(c, raw)
 	case "react":
@@ -893,7 +896,7 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 	convID := generateID("conv_")
 
 	if s.store != nil {
-		if err := s.store.CreateConversation(convID, allMembers); err != nil {
+		if err := s.store.CreateConversation(convID, allMembers, msg.Name); err != nil {
 			s.logger.Error("failed to create conversation", "error", err)
 			c.Encoder.Encode(protocol.Error{Type: "error", Code: "internal", Message: "failed to create conversation"})
 			return
@@ -904,6 +907,7 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 		Type:         "dm_created",
 		Conversation: convID,
 		Members:      allMembers,
+		Name:         msg.Name,
 	})
 
 	s.logger.Info("conversation created",
@@ -1043,6 +1047,43 @@ func (s *Server) handleLeaveConversation(c *Client, raw json.RawMessage) {
 	s.logger.Info("conversation leave",
 		"user", c.Username,
 		"conversation", msg.Conversation,
+	)
+}
+
+// handleRenameConversation updates a conversation's name and broadcasts.
+func (s *Server) handleRenameConversation(c *Client, raw json.RawMessage) {
+	var msg protocol.RenameConversation
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+
+	if s.store != nil {
+		isMember, err := s.store.IsConversationMember(msg.Conversation, c.Username)
+		if err != nil || !isMember {
+			c.Encoder.Encode(protocol.Error{
+				Type: "error", Code: protocol.ErrUnknownConversation,
+				Message: "You are not a member of this conversation",
+			})
+			return
+		}
+
+		if err := s.store.RenameConversation(msg.Conversation, msg.Name); err != nil {
+			s.logger.Error("failed to rename conversation", "conversation", msg.Conversation, "error", err)
+			return
+		}
+	}
+
+	s.broadcastToConversation(msg.Conversation, protocol.ConversationRenamed{
+		Type:         "conversation_renamed",
+		Conversation: msg.Conversation,
+		Name:         msg.Name,
+		RenamedBy:    c.Username,
+	})
+
+	s.logger.Info("conversation renamed",
+		"conversation", msg.Conversation,
+		"name", msg.Name,
+		"renamed_by", c.Username,
 	)
 }
 

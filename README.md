@@ -197,7 +197,7 @@ Client connects via SSH with Ed25519 key
 |---|---|---|
 | **Handshake** | `client_hello` | `server_hello`, `welcome` |
 | **Rooms** | `send` | `message`, `room_list`, `room_event` |
-| **DMs** | `create_dm`, `send_dm`, `leave_conversation` | `dm`, `dm_created`, `conversation_list`, `conversation_event` |
+| **DMs** | `create_dm`, `send_dm`, `leave_conversation`, `rename_conversation` | `dm`, `dm_created`, `conversation_list`, `conversation_event`, `conversation_renamed` |
 | **Sync** | -- | `sync_batch`, `sync_complete` |
 | **History** | `history` | `history_result` |
 | **Epoch keys** | `epoch_rotate` | `epoch_trigger`, `epoch_key`, `epoch_confirmed` |

@@ -198,11 +198,11 @@ Message body limit: 16KB. `file_epoch` records which epoch key was used to encry
 ### Direct Messages
 
 ```json
-// Client -> Server (create conversation)
-{"type":"create_dm","members":["bob","carol"]}
+// Client -> Server (create conversation, name is optional)
+{"type":"create_dm","members":["bob","carol"],"name":"Project Alpha"}
 
 // Server -> Client
-{"type":"dm_created","conversation":"conv_xK9mQ2pR","members":["alice","bob","carol"]}
+{"type":"dm_created","conversation":"conv_xK9mQ2pR","members":["alice","bob","carol"],"name":"Project Alpha"}
 
 // Client -> Server (send -- per-message key, wrapped for each member)
 {"type":"send_dm","conversation":"conv_xK9mQ2pR","wrapped_keys":{"alice":"base64...","bob":"base64...","carol":"base64..."},"payload":"base64...","signature":"base64..."}
@@ -215,8 +215,15 @@ Message body limit: 16KB. `file_epoch` records which epoch key was used to encry
 - Group DMs: max 50 members. Beyond that, use a room.
 - `wrapped_keys` must include all conversation members. Server validates and rejects with `invalid_wrapped_keys` if mismatched.
 - Include yourself in `wrapped_keys` for multi-device decryption.
+- `name` is optional on `create_dm`. Groups without a name display as the member list (e.g., "Bob, Carol"). 1:1 DMs typically don't use names.
 
 ```json
+// Client -> Server (rename a group conversation)
+{"type":"rename_conversation","conversation":"conv_xK9mQ2pR","name":"New Name"}
+
+// Server -> Client (broadcast to all members)
+{"type":"conversation_renamed","conversation":"conv_xK9mQ2pR","name":"New Name","renamed_by":"alice"}
+
 // Client -> Server (leave)
 {"type":"leave_conversation","conversation":"conv_xK9mQ2pR"}
 
@@ -408,7 +415,7 @@ Capability: `presence`
 // Server -> Client (on connect)
 {"type":"room_list","rooms":[{"name":"general","topic":"General chat","members":12}]}
 
-{"type":"conversation_list","conversations":[{"id":"conv_xK9mQ2pR","members":["alice","bob"]}]}
+{"type":"conversation_list","conversations":[{"id":"conv_xK9mQ2pR","members":["alice","bob"]},{"id":"conv_yL0nR3qS","members":["alice","bob","carol"],"name":"Project Alpha"}]}
 
 // Server -> Client (membership changes)
 {"type":"room_event","room":"general","event":"join","user":"carol"}

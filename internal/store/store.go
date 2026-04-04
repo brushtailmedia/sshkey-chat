@@ -185,6 +185,7 @@ func (s *Store) initUsersDB() error {
 
 		CREATE TABLE IF NOT EXISTS conversations (
 			id          TEXT PRIMARY KEY,
+			name        TEXT NOT NULL DEFAULT '',
 			created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 		);
 

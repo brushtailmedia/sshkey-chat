@@ -426,11 +426,11 @@ All messages (rooms and DMs) are split into an **envelope** (plaintext, server-r
 DM conversations have a Nano ID (`conv_` prefix). A 1:1 DM is just a group DM with two members. All DMs reference a `conversation` ID, not a recipient username.
 
 ```json
-// Client -> Server (create a new DM conversation -- no keys, just members)
-{"type":"create_dm","members":["bob","carol"]}
+// Client -> Server (create a new DM conversation -- name is optional)
+{"type":"create_dm","members":["bob","carol"],"name":"Project Alpha"}
 
 // Server -> Client (conversation created)
-{"type":"dm_created","conversation":"conv_xK9mQ2pR","members":["alice","bob","carol"]}
+{"type":"dm_created","conversation":"conv_xK9mQ2pR","members":["alice","bob","carol"],"name":"Project Alpha"}
 
 // Client -> Server (per-message key, wrapped for each member inline)
 {"type":"send_dm","conversation":"conv_xK9mQ2pR","wrapped_keys":{"alice":"base64...","bob":"base64...","carol":"base64..."},"payload":"base64...encrypted","file_ids":["file_xyz"],"signature":"base64..."}
@@ -449,6 +449,19 @@ DM conversations have a Nano ID (`conv_` prefix). A 1:1 DM is just a group DM wi
 - Members are set at creation. To add someone, create a new conversation. Old conversation stays as-is (no retroactive access to history)
 - **Max group DM size: 50 members.** Beyond this, use a room -- epoch-based key rotation amortises the per-member wrapping cost. A 50-member group DM means 50 key wraps per message and per reaction, which is fine (microseconds each, ~5KB of wrapped keys). At 100+ members the overhead becomes noticeable and rooms are the better model.
 - Conversation list sent on connect alongside room list
+- **Group naming:** `create_dm` accepts an optional `name` field. Any member can rename via `rename_conversation`. Groups without a name display as the member list (e.g., "Bob, Carol"). 1:1 DMs typically don't use names — the client displays the other person's display_name.
+
+#### Rename Conversation
+
+```json
+// Client -> Server (any member can rename)
+{"type":"rename_conversation","conversation":"conv_xK9mQ2pR","name":"New Name"}
+
+// Server -> Client (broadcast to all members)
+{"type":"conversation_renamed","conversation":"conv_xK9mQ2pR","name":"New Name","renamed_by":"alice"}
+```
+
+Rename is a system message rendered inline: "alice renamed the group to 'New Name'". Send an empty `name` to clear it (reverts to member list display).
 
 #### Leave Conversation
 
@@ -756,7 +769,7 @@ The sender generates a fresh AES-256 key per message, encrypts the payload, wrap
 
 ```json
 // Server -> Client (on connect, list of DM conversations)
-{"type":"conversation_list","conversations":[{"id":"conv_xK9mQ2pR","members":["alice","bob"]},{"id":"conv_yL0nR3qS","members":["alice","bob","carol"]}]}
+{"type":"conversation_list","conversations":[{"id":"conv_xK9mQ2pR","members":["alice","bob"]},{"id":"conv_yL0nR3qS","members":["alice","bob","carol"],"name":"Project Alpha"}]}
 ```
 
 Member details (display names, avatars, key fingerprints) are delivered via `profile` messages on connect -- `conversation_list` only carries IDs and member usernames.

@@ -6,15 +6,20 @@ import (
 	"strings"
 )
 
-// CreateConversation creates a new DM conversation with the given members.
-func (s *Store) CreateConversation(id string, members []string) error {
+// CreateConversation creates a new DM conversation with the given members and optional name.
+func (s *Store) CreateConversation(id string, members []string, name ...string) error {
 	tx, err := s.usersDB.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	_, err = tx.Exec(`INSERT INTO conversations (id) VALUES (?)`, id)
+	convName := ""
+	if len(name) > 0 {
+		convName = name[0]
+	}
+
+	_, err = tx.Exec(`INSERT INTO conversations (id, name) VALUES (?, ?)`, id, convName)
 	if err != nil {
 		return err
 	}
@@ -51,12 +56,13 @@ func (s *Store) GetConversationMembers(convID string) ([]string, error) {
 	return members, rows.Err()
 }
 
-// GetUserConversations returns all conversation IDs and members for a user.
+// GetUserConversations returns all conversation IDs, members, and names for a user.
 func (s *Store) GetUserConversations(user string) ([]ConversationRecord, error) {
 	rows, err := s.usersDB.Query(`
-		SELECT cm.conversation_id, GROUP_CONCAT(cm2.user, ',')
+		SELECT cm.conversation_id, GROUP_CONCAT(cm2.user, ','), COALESCE(c.name, '')
 		FROM conversation_members cm
 		JOIN conversation_members cm2 ON cm.conversation_id = cm2.conversation_id
+		JOIN conversations c ON c.id = cm.conversation_id
 		WHERE cm.user = ?
 		GROUP BY cm.conversation_id
 		ORDER BY cm.conversation_id`,
@@ -71,7 +77,7 @@ func (s *Store) GetUserConversations(user string) ([]ConversationRecord, error) 
 	for rows.Next() {
 		var c ConversationRecord
 		var membersStr string
-		if err := rows.Scan(&c.ID, &membersStr); err != nil {
+		if err := rows.Scan(&c.ID, &membersStr, &c.Name); err != nil {
 			return nil, err
 		}
 		c.Members = strings.Split(membersStr, ",")
@@ -81,10 +87,17 @@ func (s *Store) GetUserConversations(user string) ([]ConversationRecord, error) 
 	return convs, rows.Err()
 }
 
-// ConversationRecord holds a conversation ID and its members.
+// ConversationRecord holds a conversation ID, its members, and optional name.
 type ConversationRecord struct {
 	ID      string
 	Members []string
+	Name    string
+}
+
+// RenameConversation updates the name of a conversation.
+func (s *Store) RenameConversation(convID, name string) error {
+	_, err := s.usersDB.Exec(`UPDATE conversations SET name = ? WHERE id = ?`, name, convID)
+	return err
 }
 
 // FindOneOnOneConversation finds an existing 1:1 conversation between two users.
