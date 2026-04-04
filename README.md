@@ -376,6 +376,10 @@ go test ./...
 
 Tests cover the full handshake, room messaging with isolation, sync on reconnect, history scroll-back, DM conversations with wrapped_keys validation, and storage operations.
 
+## Building a client
+
+See [PROTOCOL.md](PROTOCOL.md) for the complete protocol reference -- everything you need to build a compatible client in any language. Includes wire format, all message types with JSON examples, crypto specs, key wrapping, and a minimal client checklist.
+
 ## Design
 
 See [PROJECT.md](PROJECT.md) for the full design document including threat model, cryptographic primitives, key exchange protocols, epoch rotation, replay detection, and safety numbers.
