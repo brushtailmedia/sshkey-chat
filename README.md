@@ -6,6 +6,21 @@ The server is a blind relay. It routes, stores, and sequences encrypted blobs. I
 
 Inspired by [ssh-chat](https://github.com/shazow/ssh-chat).
 
+## Features
+
+- **E2E encrypted** -- server stores opaque blobs, never sees message content
+- **SSH identity** -- no accounts, no passwords, your Ed25519 key is your identity
+- **Rooms** with epoch-based key rotation (forward secrecy, bounded exposure)
+- **DMs and group DMs** with per-message keys (Signal-level forward secrecy)
+- **File sharing** via encrypted binary channel (server can't see filenames, types, or content)
+- **Sync on reconnect** -- paginated catch-up with bundled epoch keys
+- **Lazy scroll-back** -- on-demand history, no bulk download on connect
+- **Reactions, typing indicators, read receipts, presence, pins**
+- **Push notifications** -- content-free APNs/FCM wake pushes (app syncs over SSH)
+- **Config hot-reload** -- add/remove users and rooms without restarting
+- **Admin CLI** -- manage users, devices, pending keys from the server shell
+- **Pure Go** -- no cgo, no external dependencies, single binary
+
 ## Architecture
 
 ```
@@ -39,6 +54,10 @@ Only Ed25519 SSH keys are supported. The server rejects RSA, ECDSA, and other ke
 | `sshkey-ctl` | Local admin tool -- reads/writes config, manages users and devices |
 
 ## Quick start
+
+### Requirements
+
+- Go 1.25 or later
 
 ### Build
 
@@ -300,7 +319,7 @@ On reload, the server notifies affected connected clients (updated room lists, j
 
 Content-free wake pushes via APNs (iOS) and FCM (Android). The server never sends message content in push payloads -- it sends a silent wake signal, the app connects via SSH, syncs, and shows a local notification with real content.
 
-Configure in `server.toml`:
+Disabled by default. Enable by adding credentials to `server.toml`:
 
 ```toml
 [push.apns]
@@ -342,7 +361,24 @@ sshkey/
 | [sshkey-term](https://github.com/brushtailmedia/sshkey-term) | Terminal client (Go + Bubble Tea + libghostty) |
 | [sshkey-app](https://github.com/brushtailmedia/sshkey-app) | Desktop + mobile GUI client (Rust + egui) |
 
-## Security
+## Testing
+
+```bash
+go test ./...
+```
+
+Tests cover the full handshake, room messaging with isolation, sync on reconnect, history scroll-back, DM conversations with wrapped_keys validation, and storage operations.
+
+## Status
+
+**Phase 1 complete** -- protocol definition + server + admin tool.
+
+| Phase | Scope | Status |
+|---|---|---|
+| 1 | Protocol + server + Go core library | Done |
+| 2 | File sharing + inline images + link previews | Client-side (server support done) |
+| 3 | Rust core library + GUI client (desktop) | Not started |
+| 4 | GUI client (mobile) + push relay | Server support done |
 
 See [PROJECT.md](PROJECT.md) for the full design document including threat model, cryptographic primitives, key exchange protocols, epoch rotation, replay detection, and safety numbers.
 
