@@ -24,13 +24,12 @@ Server machine
 ├── sshkey-server (:2222)  -- chat app, own SSH listener, own key store
 ├── sshkey-ctl            -- local admin tool, reads/writes config + pending log
 ├── /etc/sshkey-chat/
-│   ├── server.toml         -- server config (port, retention, archive settings)
+│   ├── server.toml         -- server config (port, retention settings)
 │   ├── users.toml          -- user definitions (key, name, rooms, admin flag)
 │   └── rooms.toml          -- room definitions (name, topic)
 └── /var/sshkey-chat/
     ├── pending-keys.log    -- unrecognised keys that tried to connect
-    ├── data/               -- SQLite DBs (encrypted blobs -- rooms, DMs, users.db)
-    └── archives/           -- rolled-up archive DBs
+    └── data/               -- SQLite DBs (encrypted blobs -- rooms, DMs, users.db)
 ```
 
 **Port separation:**
@@ -986,9 +985,7 @@ admins = ["alice", "bob"]
 max_body_size = "16KB"
 
 [retention]
-live_days = 30
-archive_months = 6
-purge_years = 5
+purge_days = 0                   # 0 = keep forever. Set to e.g. 1825 (5 years) to auto-purge.
 
 [sync]
 window_messages = 200            # max messages per room/conversation on reconnect
@@ -1056,8 +1053,8 @@ sshkey-ctl approve --fingerprint xx:yy:zz --name carol --rooms general,engineeri
 # Reject / clear from pending log
 sshkey-ctl reject --fingerprint xx:yy:zz
 
-# Purge old archives
-sshkey-ctl purge-archives --older-than 5y
+# Purge old messages (delete + vacuum)
+sshkey-ctl purge --older-than 5y
 
 # List users
 sshkey-ctl list-users
@@ -1445,7 +1442,7 @@ DMs use per-message keys, so `create_dm` carries no encryption data. The server 
 - **Rooms:** the server stores wrapped epoch keys on disk. On reconnect, epoch keys are bundled with sync batches -- only the keys needed to decrypt messages in the sync window (last 200 messages or 7 days per room). Older epoch keys are fetched on demand with `history` pages. Client unwraps and stores keys locally as they arrive.
 - **DMs:** no catch-up needed. Every DM message carries its own wrapped keys inline. The client simply unwraps each message individually as it arrives in `sync_batch` or `history_result`. No server-side key state for DMs.
 
-**Epoch key retention on server (rooms only):** wrapped epoch keys are retained as long as the room's archive exists. They follow the same three-tier retention as messages (live → archive → purge). Purging an archive also purges its epoch keys. DM messages store their wrapped keys inline -- they're retained and purged as part of the message itself.
+**Epoch key retention on server (rooms only):** wrapped epoch keys are retained as long as the room's messages exist. Purging old messages also purges their epoch keys. DM messages store their wrapped keys inline -- they're retained and purged as part of the message itself.
 
 Client stores epoch keys in local DB for historical room decryption. DM per-message keys are unwrapped on receipt and not stored separately -- the decrypted plaintext is stored in the local DB. Server never holds unwrapped keys -- not in memory, not on disk, not ever.
 
@@ -1505,25 +1502,19 @@ Server stores encrypted blobs it cannot read. Client decrypts with epoch keys an
 
 ### Server-Side Retention / Expiry
 
-Server holds history within the retention window. Clients cache what they've fetched -- the local DB is prunable and anything within retention can be re-fetched via `history` requests.
+Messages are kept indefinitely by default. The admin can purge old messages when needed via `sshkey-ctl purge --older-than 5y`. SQLite handles millions of rows efficiently -- a busy 50-user server accumulates roughly 200 MB/year, which is negligible. Purging is a manual maintenance task, not an automated process.
 
 **Per-device sync watermarks:**
 - Server records `last_synced_at` timestamp per device (updated on each client sync)
-- Retention keeps messages until the oldest device for any active user has synced (capped at the hard limit)
 
-**Three-tier retention:**
-
-1. **Live (e.g., 30 days)** -- current WAL DB, active reads and writes
-2. **Archive (6-month rolling chunks)** -- read-only compacted DBs. Every 6 months the live DB is rolled into an archive: VACUUMed, WAL stripped, optimised for reads. Archives are served on demand for new/recovering devices.
-3. **Purge (admin-configured, e.g., 5 years)** -- archives older than this are deleted. Managed via `sshkey-ctl purge-archives --older-than 5y`
+**Purge:** `sshkey-ctl purge --older-than 5y` deletes messages older than the specified duration from all room and conversation DBs, removes associated epoch keys, and runs `VACUUM` to reclaim disk space. Run manually or as a cron job.
 
 ```
 Server
-├── room-general.db          (live, last 30 days)
-├── room-general-2026-H1.db  (archive, Jan-Jun 2026)
-├── room-general-2025-H2.db  (archive, Jul-Dec 2025)
-├── conv-xK9mQ2pR.db        (live, DM or group DM)
-└── conv-xK9mQ2pR-2026-H1.db (archive)
+├── room-general.db       (all history for "general")
+├── room-engineering.db
+├── conv-xK9mQ2pR.db     (DM or group DM)
+└── conv-yL0nR3qS.db
 ```
 
 **New device sync:**
@@ -1533,10 +1524,6 @@ Server
 - Older history available on demand: as the user scrolls back, client sends `history` requests and the server responds with pages of older messages + their epoch keys
 - `first_seen` still respected -- new users can't see pre-join history even via `history` requests
 - Existing devices with a recent `last_synced_at` just get the delta since their last sync (usually a small batch)
-- No bulk archive streaming on connect. Archives are accessed page-by-page through `history` requests only.
-
-**Archives:**
-- All archives contain encrypted blobs. Room archives include wrapped epoch keys alongside messages. DM archives include wrapped per-message keys inline with each message.
 - New device unwraps keys with same SSH key -- works because the key wrapping is tied to the SSH key, not the device
 
 **SSH key rotation:**
@@ -1566,8 +1553,8 @@ Room epoch key re-wrapping is client-driven (the server can't unwrap):
 If the old key is lost (can't connect to initiate rotation), the admin removes and re-adds the user with the new key. This is a clean break -- new `first_seen`, new `first_epoch` for rooms, no access to pre-rotation history on the server. The user's local DB still has previously fetched messages (decryptable because the local DB is encrypted with a key derived from the old SSH key -- they'd need the old key to open it, or accept the loss).
 
 **Retention cleanup:**
-- Via `sshkey-ctl purge-archives --older-than 5y` (run manually or as a cron job)
-- Per-device sync watermarks still tracked for live DB cleanup
+- Via `sshkey-ctl purge --older-than 5y` (run manually or as a cron job)
+- Deletes old messages, associated epoch keys, and runs VACUUM on each DB
 
 ### Search
 

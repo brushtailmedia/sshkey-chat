@@ -57,16 +57,25 @@ func (s *Store) Close() error {
 	defer s.mu.Unlock()
 
 	var firstErr error
+
+	// Checkpoint WAL on all databases before closing
+	checkpoint := func(db *sql.DB) {
+		db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	}
+
 	for _, db := range s.roomDBs {
+		checkpoint(db)
 		if err := db.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	for _, db := range s.convDBs {
+		checkpoint(db)
 		if err := db.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
+	checkpoint(s.usersDB)
 	if err := s.usersDB.Close(); err != nil && firstErr == nil {
 		firstErr = err
 	}

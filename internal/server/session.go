@@ -457,15 +457,30 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Validate epoch (two-epoch grace window: current or previous only)
+	// Validate epoch
 	currentEpoch := s.epochs.currentEpochNum(msg.Room)
-	if currentEpoch > 0 && msg.Epoch < currentEpoch-1 {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrInvalidEpoch,
-			Message: "Epoch too old (outside grace window)",
-		})
-		return
+	confirmedEpoch := s.epochs.confirmedEpochNum(msg.Room)
+
+	if currentEpoch > 0 {
+		// Reject epochs older than the grace window (current - 1)
+		if msg.Epoch < currentEpoch-1 {
+			c.Encoder.Encode(protocol.Error{
+				Type:    "error",
+				Code:    protocol.ErrInvalidEpoch,
+				Message: "Epoch too old (outside two-epoch grace window)",
+			})
+			return
+		}
+		// Reject epochs beyond what's been confirmed and distributed.
+		// Prevents a client from sending with a pending key that might get rejected.
+		if confirmedEpoch > 0 && msg.Epoch > confirmedEpoch {
+			c.Encoder.Encode(protocol.Error{
+				Type:    "error",
+				Code:    protocol.ErrInvalidEpoch,
+				Message: "Epoch not yet confirmed. Wait for epoch_confirmed before sending.",
+			})
+			return
+		}
 	}
 
 	// Assign server-generated ID and timestamp
@@ -849,6 +864,16 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 
 	// Add sender to members
 	allMembers := append([]string{c.Username}, msg.Members...)
+
+	// Max group DM size: 50 members
+	if len(allMembers) > 50 {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    "too_many_members",
+			Message: "Group DMs are limited to 50 members. Use a room for larger groups.",
+		})
+		return
+	}
 
 	// Deduplicate 1:1 conversations
 	if len(msg.Members) == 1 && s.store != nil {

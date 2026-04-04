@@ -7,9 +7,7 @@ admins = ["alice"]
 max_body_size = "16KB"
 
 [retention]
-live_days = 30
-archive_months = 6
-purge_years = 5
+purge_days = 0      # 0 = keep forever
 
 [sync]
 window_messages = 200
@@ -33,7 +31,7 @@ typing_per_second = 1
 history_per_minute = 50
 
 [shutdown]
-grace_period = "10s"
+grace_period = "100ms"
 
 [logging]
 level = "info"

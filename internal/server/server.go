@@ -113,6 +113,22 @@ func (s *Server) ListenAndServe() error {
 			s.logger.Error("accept failed", "error", err)
 			continue
 		}
+
+		// Connection rate limiting per IP
+		remoteIP := conn.RemoteAddr().String()
+		if host, _, err := net.SplitHostPort(remoteIP); err == nil {
+			remoteIP = host
+		}
+		connLimit := s.cfg.Server.RateLimits.ConnectionsPerMinute
+		if connLimit == 0 {
+			connLimit = 10
+		}
+		if !s.limiter.allowPerMinute("conn:"+remoteIP, connLimit) {
+			s.logger.Warn("connection rate limited", "ip", remoteIP)
+			conn.Close()
+			continue
+		}
+
 		go s.handleConnection(conn)
 	}
 }
@@ -127,6 +143,16 @@ func (s *Server) Close() error {
 		s.audit.Log("server", "shutdown", fmt.Sprintf("clients=%d", clientCount))
 	}
 
+	// Stop accepting new connections
+	var firstErr error
+	if s.listener != nil {
+		ln := s.listener
+		s.listener = nil
+		if err := ln.Close(); err != nil {
+			firstErr = err
+		}
+	}
+
 	// Broadcast shutdown to all connected clients
 	s.mu.RLock()
 	for _, client := range s.clients {
@@ -138,14 +164,17 @@ func (s *Server) Close() error {
 	}
 	s.mu.RUnlock()
 
-	var firstErr error
-	if s.listener != nil {
-		ln := s.listener
-		s.listener = nil
-		if err := ln.Close(); err != nil {
-			firstErr = err
+	// Wait grace period for in-flight operations
+	gracePeriod := 10 * time.Second
+	if s.cfg.Server.Shutdown.GracePeriod != "" {
+		if d, err := time.ParseDuration(s.cfg.Server.Shutdown.GracePeriod); err == nil {
+			gracePeriod = d
 		}
 	}
+	s.logger.Info("waiting for grace period", "duration", gracePeriod)
+	time.Sleep(gracePeriod)
+
+	// Close store (flushes WAL)
 	if s.store != nil {
 		if err := s.store.Close(); err != nil && firstErr == nil {
 			firstErr = err
@@ -157,6 +186,19 @@ func (s *Server) Close() error {
 // authenticateKey validates an SSH public key against users.toml.
 // Only Ed25519 keys are accepted.
 func (s *Server) authenticateKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+	// Failed auth rate limiting per IP
+	remoteIP := conn.RemoteAddr().String()
+	if host, _, err := net.SplitHostPort(remoteIP); err == nil {
+		remoteIP = host
+	}
+	authLimit := s.cfg.Server.RateLimits.FailedAuthPerMinute
+	if authLimit == 0 {
+		authLimit = 5
+	}
+	if !s.limiter.allowPerMinute("auth:"+remoteIP, authLimit) {
+		return nil, fmt.Errorf("too many authentication attempts")
+	}
+
 	if key.Type() != "ssh-ed25519" {
 		s.logger.Warn("rejected non-Ed25519 key",
 			"type", key.Type(),

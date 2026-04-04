@@ -10,11 +10,13 @@ import (
 
 // roomEpochState tracks epoch rotation state for a single room.
 type roomEpochState struct {
-	currentEpoch    int64
+	currentEpoch    int64     // latest confirmed epoch
+	confirmedEpoch  int64     // epoch that has been confirmed and distributed (messages allowed)
 	messageCount    int64     // messages since last rotation
 	lastRotation    time.Time // time of last rotation
 	pendingRotation bool      // rotation in progress
 	pendingEpoch    int64     // the epoch being rotated to
+	pendingTimer    *time.Timer // 5s timeout for pending rotation
 }
 
 // epochManager manages epoch state for all rooms.
@@ -43,8 +45,9 @@ func (em *epochManager) getOrCreate(room string, currentEpoch int64) *roomEpochS
 	state, ok := em.rooms[room]
 	if !ok {
 		state = &roomEpochState{
-			currentEpoch: currentEpoch,
-			lastRotation: time.Now(),
+			currentEpoch:   currentEpoch,
+			confirmedEpoch: currentEpoch,
+			lastRotation:   time.Now(),
 		}
 		em.rooms[room] = state
 	}
@@ -77,7 +80,8 @@ func (em *epochManager) recordMessage(room string) bool {
 }
 
 // startRotation marks a rotation as pending. Returns the new epoch number.
-func (em *epochManager) startRotation(room string) int64 {
+// onTimeout is called if the rotation isn't completed within 5 seconds.
+func (em *epochManager) startRotation(room string, onTimeout func()) int64 {
 	em.mu.Lock()
 	defer em.mu.Unlock()
 
@@ -86,8 +90,28 @@ func (em *epochManager) startRotation(room string) int64 {
 		return 0
 	}
 
+	// Cancel any existing timeout
+	if state.pendingTimer != nil {
+		state.pendingTimer.Stop()
+	}
+
 	state.pendingRotation = true
 	state.pendingEpoch = state.currentEpoch + 1
+
+	// Start 5-second timeout — if rotation isn't completed, cancel and let next sender retry
+	if onTimeout != nil {
+		state.pendingTimer = time.AfterFunc(5*time.Second, func() {
+			em.mu.Lock()
+			if state.pendingRotation && state.pendingEpoch == state.currentEpoch+1 {
+				state.pendingRotation = false
+				state.pendingEpoch = 0
+				state.pendingTimer = nil
+			}
+			em.mu.Unlock()
+			onTimeout()
+		})
+	}
+
 	return state.pendingEpoch
 }
 
@@ -101,7 +125,13 @@ func (em *epochManager) completeRotation(room string, epoch int64) bool {
 		return false
 	}
 
+	if state.pendingTimer != nil {
+		state.pendingTimer.Stop()
+		state.pendingTimer = nil
+	}
+
 	state.currentEpoch = epoch
+	state.confirmedEpoch = epoch
 	state.pendingRotation = false
 	state.pendingEpoch = 0
 	state.messageCount = 0
@@ -116,6 +146,10 @@ func (em *epochManager) cancelRotation(room string) {
 
 	state := em.rooms[room]
 	if state != nil {
+		if state.pendingTimer != nil {
+			state.pendingTimer.Stop()
+			state.pendingTimer = nil
+		}
 		state.pendingRotation = false
 		state.pendingEpoch = 0
 	}
@@ -131,6 +165,19 @@ func (em *epochManager) currentEpochNum(room string) int64 {
 		return 0
 	}
 	return state.currentEpoch
+}
+
+// confirmedEpochNum returns the confirmed (distributable) epoch for a room.
+// Messages with epoch > confirmedEpoch are rejected.
+func (em *epochManager) confirmedEpochNum(room string) int64 {
+	em.mu.Lock()
+	defer em.mu.Unlock()
+
+	state := em.rooms[room]
+	if state == nil {
+		return 0
+	}
+	return state.confirmedEpoch
 }
 
 // sendEpochKeys sends the current epoch key for each room to a connecting client.
@@ -173,7 +220,15 @@ func (s *Server) sendEpochKeys(c *Client) {
 
 // triggerEpochRotation sends an epoch_trigger to a client and handles the response.
 func (s *Server) triggerEpochRotation(c *Client, room string, reason string) {
-	newEpoch := s.epochs.startRotation(room)
+	newEpoch := s.epochs.startRotation(room, func() {
+		// Timeout callback — rotation wasn't completed in 5 seconds.
+		// Cancel and let the next sender pick it up via checkRotationNeeded.
+		s.logger.Warn("epoch rotation timed out",
+			"room", room,
+			"triggered_by", c.Username,
+			"trigger", reason,
+		)
+	})
 	if newEpoch == 0 {
 		return
 	}

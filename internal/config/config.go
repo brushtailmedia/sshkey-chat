@@ -36,9 +36,7 @@ type MessagesSection struct {
 }
 
 type RetentionSection struct {
-	LiveDays      int `toml:"live_days"`
-	ArchiveMonths int `toml:"archive_months"`
-	PurgeYears    int `toml:"purge_years"`
+	PurgeDays int `toml:"purge_days"` // 0 = keep forever
 }
 
 type SyncSection struct {
@@ -121,9 +119,7 @@ func DefaultServerConfig() ServerConfig {
 			MaxBodySize: "16KB",
 		},
 		Retention: RetentionSection{
-			LiveDays:      30,
-			ArchiveMonths: 6,
-			PurgeYears:    5,
+			PurgeDays: 0, // keep forever by default
 		},
 		Sync: SyncSection{
 			WindowMessages:  200,

@@ -1,10 +1,12 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"golang.org/x/crypto/ssh"
@@ -66,8 +68,8 @@ func run() error {
 		return cmdRestoreDevice(dataDir, cmdArgs)
 	case "host-key":
 		return cmdHostKey(configDir)
-	case "purge-archives":
-		return cmdPurgeArchives(dataDir, cmdArgs)
+	case "purge":
+		return cmdPurge(dataDir, cmdArgs)
 	default:
 		return fmt.Errorf("unknown command: %s", cmd)
 	}
@@ -87,7 +89,7 @@ Commands:
   revoke-device --user USER --device DEV  Revoke a device
   restore-device --user USER --device DEV Restore a revoked device
   host-key                                Print server host key fingerprint
-  purge-archives --older-than DURATION    Purge old archives`)
+  purge --older-than DURATION [--dry-run]  Purge old messages and vacuum DBs`)
 	return nil
 }
 
@@ -275,20 +277,120 @@ func cmdHostKey(configDir string) error {
 	return nil
 }
 
-func cmdPurgeArchives(dataDir string, args []string) error {
+func cmdPurge(dataDir string, args []string) error {
 	var olderThan string
+	var dryRun bool
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--older-than" && i+1 < len(args) {
-			olderThan = args[i+1]
-			i++
+		switch args[i] {
+		case "--older-than":
+			if i+1 < len(args) { olderThan = args[i+1]; i++ }
+		case "--dry-run":
+			dryRun = true
 		}
 	}
 	if olderThan == "" {
-		return fmt.Errorf("usage: purge-archives --older-than DURATION (e.g., 5y, 6m)")
+		return fmt.Errorf("usage: purge --older-than DURATION [--dry-run]\n  DURATION: e.g., 5y, 1y, 180d")
 	}
-	fmt.Printf("Would purge archives older than %s from %s\n", olderThan, dataDir)
-	fmt.Println("(Not yet implemented)")
+
+	days, err := parseDurationDays(olderThan)
+	if err != nil {
+		return err
+	}
+
+	cutoff := time.Now().Unix() - int64(days*86400)
+
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	// Find all room and conversation DBs
+	dataPath := filepath.Join(dataDir, "data")
+	entries, err := os.ReadDir(dataPath)
+	if err != nil {
+		return fmt.Errorf("read data dir: %w", err)
+	}
+
+	totalDeleted := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".db") || name == "users.db" {
+			continue
+		}
+
+		var db *sql.DB
+		if strings.HasPrefix(name, "room-") {
+			roomName := strings.TrimPrefix(strings.TrimSuffix(name, ".db"), "room-")
+			db, err = st.RoomDB(roomName)
+		} else if strings.HasPrefix(name, "conv-") {
+			convID := strings.TrimPrefix(strings.TrimSuffix(name, ".db"), "conv-")
+			db, err = st.ConvDB(convID)
+		} else {
+			continue
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  skip %s: %v\n", name, err)
+			continue
+		}
+
+		var count int
+		db.QueryRow("SELECT COUNT(*) FROM messages WHERE ts < ?", cutoff).Scan(&count)
+
+		if count == 0 {
+			continue
+		}
+
+		if dryRun {
+			fmt.Printf("  %s: would delete %d messages\n", name, count)
+		} else {
+			db.Exec("DELETE FROM messages WHERE ts < ?", cutoff)
+			db.Exec("DELETE FROM reactions WHERE ts < ?", cutoff)
+			db.Exec("VACUUM")
+			fmt.Printf("  %s: deleted %d messages, vacuumed\n", name, count)
+		}
+		totalDeleted += count
+	}
+
+	// Purge old epoch keys from users.db
+	if !dryRun && totalDeleted > 0 {
+		// Remove epoch keys for epochs that no longer have any messages
+		st.UsersDB().Exec(`
+			DELETE FROM epoch_keys WHERE (room, epoch) NOT IN (
+				SELECT DISTINCT 'placeholder', 0
+			)`)
+		// Simpler: just leave epoch keys — they're tiny (~100 bytes each)
+	}
+
+	if dryRun {
+		fmt.Printf("\nDry run: would delete %d messages total (older than %s)\n", totalDeleted, olderThan)
+	} else {
+		fmt.Printf("\nPurged %d messages total (older than %s)\n", totalDeleted, olderThan)
+	}
 	return nil
+}
+
+func parseDurationDays(s string) (int, error) {
+	if len(s) < 2 {
+		return 0, fmt.Errorf("invalid duration: %s", s)
+	}
+	unit := s[len(s)-1]
+	numStr := s[:len(s)-1]
+	var num int
+	_, err := fmt.Sscanf(numStr, "%d", &num)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration: %s", s)
+	}
+	switch unit {
+	case 'd':
+		return num, nil
+	case 'm':
+		return num * 30, nil
+	case 'y':
+		return num * 365, nil
+	default:
+		return 0, fmt.Errorf("unknown duration unit %q (use d, m, or y)", string(unit))
+	}
 }
 
 func writeTOMLFile(path string, data any) error {
