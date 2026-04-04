@@ -106,6 +106,40 @@ topic = "Core platform work"
 
 The server generates an Ed25519 host key on first run and stores it in the config directory.
 
+### Deploy (systemd)
+
+Install the binaries and set up a dedicated service user:
+
+```bash
+# Install binaries
+sudo cp sshkey-server sshkey-ctl /usr/local/bin/
+
+# Create service user
+sudo useradd -r -s /usr/sbin/nologin sshkey
+
+# Create directories with correct ownership
+sudo mkdir -p /etc/sshkey-chat /var/sshkey-chat
+sudo chown sshkey:sshkey /var/sshkey-chat
+sudo chmod 750 /var/sshkey-chat
+
+# Copy config files
+sudo cp testdata/config/*.toml /etc/sshkey-chat/
+# Edit users.toml and rooms.toml for your setup
+
+# Install and enable the service
+sudo cp init/sshkey-server.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now sshkey-server
+```
+
+The server runs as a systemd service with automatic restart on failure. Config changes are picked up automatically via fsnotify, or you can trigger a manual reload:
+
+```bash
+sudo systemctl reload sshkey-server   # sends SIGHUP, reloads config
+sudo systemctl restart sshkey-server  # full restart (only needed for port/bind changes)
+sudo journalctl -u sshkey-server -f   # follow logs
+```
+
 ### Admin
 
 ```bash
@@ -310,7 +344,7 @@ sshkey/
 
 ## Security
 
-See [PROJECT-E2EE.md](PROJECT-E2EE.md) for the full security design document including threat model, cryptographic primitives, key exchange protocols, epoch rotation, replay detection, and safety numbers.
+See [PROJECT.md](PROJECT.md) for the full design document including threat model, cryptographic primitives, key exchange protocols, epoch rotation, replay detection, and safety numbers.
 
 ## License
 

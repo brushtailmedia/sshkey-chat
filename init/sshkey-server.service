@@ -1,0 +1,22 @@
+[Unit]
+Description=sshkey-chat server
+After=network.target
+
+[Service]
+Type=simple
+User=sshkey
+Group=sshkey
+ExecStart=/usr/local/bin/sshkey-server -config /etc/sshkey-chat -data /var/sshkey-chat
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/sshkey-chat /etc/sshkey-chat
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
