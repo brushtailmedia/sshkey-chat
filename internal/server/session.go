@@ -381,6 +381,14 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 		s.handleSetProfile(c, raw)
 	case "set_status":
 		s.handleSetStatus(c, raw)
+	case "key_rotate":
+		s.handleKeyRotate(c, raw)
+	case "key_rotate_complete":
+		s.handleKeyRotateComplete(c, raw)
+	case "upload_start":
+		s.handleUploadStart(c, raw)
+	case "download":
+		s.handleDownload(c, raw)
 	case "typing":
 		s.handleTyping(c, raw)
 	case "read":

@@ -49,13 +49,21 @@ func run() error {
 		return fmt.Errorf("server: %w", err)
 	}
 
-	// Handle graceful shutdown
+	// Handle signals
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	go func() {
-		sig := <-sigCh
-		logger.Info("shutdown signal received", "signal", sig.String())
-		srv.Close()
+		for sig := range sigCh {
+			switch sig {
+			case syscall.SIGHUP:
+				logger.Info("SIGHUP received, reloading config")
+				srv.Reload()
+			default:
+				logger.Info("shutdown signal received", "signal", sig.String())
+				srv.Close()
+				return
+			}
+		}
 	}()
 
 	return srv.ListenAndServe()

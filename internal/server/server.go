@@ -26,10 +26,12 @@ type Server struct {
 	store    *store.Store
 	epochs   *epochManager
 	limiter  *rateLimiter
+	files    *fileManager
 	sshCfg   *ssh.ServerConfig
 	hostKey  ssh.Signer
 	logger   *slog.Logger
 	listener net.Listener
+	dataDir  string
 
 	mu       sync.RWMutex
 	clients  map[string]*Client // device_id -> Client
@@ -37,21 +39,28 @@ type Server struct {
 
 // New creates a new server with the given config and data directory.
 func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, error) {
+	dir := ""
+	if len(dataDir) > 0 {
+		dir = dataDir[0]
+	}
+
 	s := &Server{
 		cfg:     cfg,
 		logger:  logger,
 		epochs:  newEpochManager(),
 		limiter: newRateLimiter(),
 		clients: make(map[string]*Client),
+		dataDir: dir,
 	}
 
 	// Open storage if data directory provided
-	if len(dataDir) > 0 && dataDir[0] != "" {
-		st, err := store.Open(dataDir[0])
+	if dir != "" {
+		st, err := store.Open(dir)
 		if err != nil {
 			return nil, fmt.Errorf("store: %w", err)
 		}
 		s.store = st
+		s.files = newFileManager(dir)
 	}
 
 	hostKey, err := s.loadOrGenerateHostKey()
@@ -78,6 +87,9 @@ func (s *Server) ListenAndServe() error {
 	}
 	s.listener = ln
 	s.logger.Info("server listening", "addr", addr)
+
+	// Start config file watcher
+	s.watchConfig()
 
 	for {
 		conn, err := ln.Accept()
@@ -165,8 +177,39 @@ func (s *Server) authenticateKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh
 	return nil, fmt.Errorf("key not authorized")
 }
 
-// logPendingKey appends an entry to pending-keys.log.
+// logPendingKey stores a pending key in the DB, logs to file, and notifies admins.
 func (s *Server) logPendingKey(fingerprint, remote string) {
+	// Store in DB for tracking attempts
+	attempts := 1
+	if s.store != nil {
+		s.store.UsersDB().Exec(`
+			INSERT INTO pending_keys (fingerprint, remote_addr)
+			VALUES (?, ?)
+			ON CONFLICT (fingerprint) DO UPDATE SET
+				attempts = attempts + 1,
+				last_seen = datetime('now'),
+				remote_addr = excluded.remote_addr`,
+			fingerprint, remote)
+
+		var count int
+		var firstSeen string
+		s.store.UsersDB().QueryRow(
+			`SELECT attempts, first_seen FROM pending_keys WHERE fingerprint = ?`,
+			fingerprint).Scan(&count, &firstSeen)
+		if count > 0 {
+			attempts = count
+			// Notify connected admin clients
+			s.notifyAdmins(protocol.AdminNotify{
+				Type:        "admin_notify",
+				Event:       "pending_key",
+				Fingerprint: fingerprint,
+				Attempts:    attempts,
+				FirstSeen:   firstSeen,
+			})
+		}
+	}
+
+	// Also append to flat log file
 	dataDir := filepath.Join(filepath.Dir(s.cfg.Dir), "data")
 	logPath := filepath.Join(dataDir, "pending-keys.log")
 	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
@@ -175,7 +218,26 @@ func (s *Server) logPendingKey(fingerprint, remote string) {
 		return
 	}
 	defer f.Close()
-	fmt.Fprintf(f, "fingerprint=%s remote=%s\n", fingerprint, remote)
+	fmt.Fprintf(f, "fingerprint=%s remote=%s attempts=%d\n", fingerprint, remote, attempts)
+}
+
+// notifyAdmins sends a message to all connected admin clients.
+func (s *Server) notifyAdmins(msg any) {
+	s.cfg.RLock()
+	adminSet := make(map[string]bool, len(s.cfg.Server.Server.Admins))
+	for _, a := range s.cfg.Server.Server.Admins {
+		adminSet[a] = true
+	}
+	s.cfg.RUnlock()
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, client := range s.clients {
+		if adminSet[client.Username] {
+			client.Encoder.Encode(msg)
+		}
+	}
 }
 
 // handleConnection processes a new SSH connection through the full lifecycle.
@@ -199,7 +261,8 @@ func (s *Server) handleConnection(conn net.Conn) {
 	// Discard global requests (keepalive, etc.)
 	go ssh.DiscardRequests(reqs)
 
-	// Handle channels
+	// Handle channels: Channel 1 = NDJSON protocol, Channel 2 = binary file transfer
+	channelNum := 0
 	for newCh := range chans {
 		if newCh.ChannelType() != "session" {
 			newCh.Reject(ssh.UnknownChannelType, "only session channels are supported")
@@ -211,12 +274,18 @@ func (s *Server) handleConnection(conn net.Conn) {
 			s.logger.Error("channel accept failed", "user", username, "error", err)
 			continue
 		}
-
-		// Discard channel requests (pty, shell, exec, etc.)
 		go ssh.DiscardRequests(chReqs)
 
-		// Handle the protocol session on this channel
-		go s.handleSession(username, sshConn, ch)
+		channelNum++
+		if channelNum == 1 {
+			// Channel 1: NDJSON protocol
+			go s.handleSession(username, sshConn, ch)
+		} else if channelNum == 2 {
+			// Channel 2: binary file transfer
+			go s.handleBinaryChannel(username, ch)
+		} else {
+			ch.Close()
+		}
 	}
 
 	s.logger.Info("disconnect",
