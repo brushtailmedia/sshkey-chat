@@ -1,6 +1,6 @@
-# sshkey-chat
+# sshkey
 
-**sshkey.chat**
+**[sshkey.chat](https://sshkey.chat)**
 
 A private messaging platform that uses SSH for transport, encryption, and authentication. End-to-end encrypted -- the server never sees message content. No accounts, no passwords, no OAuth. Identity is your SSH key.
 
