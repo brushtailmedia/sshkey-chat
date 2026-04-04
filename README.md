@@ -369,16 +369,7 @@ go test ./...
 
 Tests cover the full handshake, room messaging with isolation, sync on reconnect, history scroll-back, DM conversations with wrapped_keys validation, and storage operations.
 
-## Status
-
-**Phase 1 complete** -- protocol definition + server + admin tool.
-
-| Phase | Scope | Status |
-|---|---|---|
-| 1 | Protocol + server + Go core library | Done |
-| 2 | File sharing + inline images + link previews | Client-side (server support done) |
-| 3 | Rust core library + GUI client (desktop) | Not started |
-| 4 | GUI client (mobile) + push relay | Server support done |
+## Design
 
 See [PROJECT.md](PROJECT.md) for the full design document including threat model, cryptographic primitives, key exchange protocols, epoch rotation, replay detection, and safety numbers.
 
