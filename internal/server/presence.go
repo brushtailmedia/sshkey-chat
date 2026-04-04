@@ -1,6 +1,9 @@
 package server
 
 import (
+	"database/sql"
+	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/brushtailmedia/sshkey/internal/protocol"
@@ -108,26 +111,75 @@ func (s *Server) sendPins(c *Client) {
 			continue
 		}
 
-		rows, err := db.Query(`SELECT message_id FROM pins ORDER BY ts`)
+		// Get user's first_epoch for this room — filter out pins from before they joined
+		firstSeen, firstEpoch, _ := s.store.GetUserRoom(c.Username, room)
+
+		// Join pins with messages to get the epoch and timestamp of each pinned message
+		rows, err := db.Query(`
+			SELECT p.message_id, COALESCE(m.epoch, 0), COALESCE(m.ts, 0)
+			FROM pins p
+			LEFT JOIN messages m ON p.message_id = m.id
+			ORDER BY p.ts`)
 		if err != nil {
 			continue
 		}
 
 		var pinned []string
+		var pinnedMsgIDs []string
 		for rows.Next() {
 			var msgID string
-			if err := rows.Scan(&msgID); err != nil {
+			var epoch int64
+			var ts int64
+			if err := rows.Scan(&msgID, &epoch, &ts); err != nil {
 				break
 			}
+			if firstEpoch > 0 && epoch > 0 && epoch < firstEpoch {
+				continue
+			}
+			if firstSeen > 0 && ts > 0 && ts < firstSeen {
+				continue
+			}
 			pinned = append(pinned, msgID)
+			pinnedMsgIDs = append(pinnedMsgIDs, msgID)
 		}
 		rows.Close()
 
 		if len(pinned) > 0 {
+			// Fetch full message envelopes for pinned messages
+			var messageData []json.RawMessage
+			for _, msgID := range pinnedMsgIDs {
+				var id, sender, payload, signature string
+				var msgTS, msgEpoch int64
+				var fileIDs sql.NullString
+				err := db.QueryRow(`
+					SELECT id, sender, ts, epoch, payload, signature, file_ids
+					FROM messages WHERE id = ? AND deleted = 0`, msgID,
+				).Scan(&id, &sender, &msgTS, &msgEpoch, &payload, &signature, &fileIDs)
+				if err != nil {
+					continue
+				}
+				msg := protocol.Message{
+					Type:      "message",
+					ID:        id,
+					From:      sender,
+					Room:      room,
+					TS:        msgTS,
+					Epoch:     msgEpoch,
+					Payload:   payload,
+					Signature: signature,
+				}
+				if fileIDs.Valid && fileIDs.String != "" {
+					msg.FileIDs = strings.Split(fileIDs.String, ",")
+				}
+				data, _ := json.Marshal(msg)
+				messageData = append(messageData, data)
+			}
+
 			c.Encoder.Encode(protocol.Pins{
-				Type:     "pins",
-				Room:     room,
-				Messages: pinned,
+				Type:        "pins",
+				Room:        room,
+				Messages:    pinned,
+				MessageData: messageData,
 			})
 		}
 	}

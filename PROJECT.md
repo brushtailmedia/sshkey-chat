@@ -244,7 +244,7 @@ Features are individually negotiated, not tied to a protocol version number. Ser
 ```
 
 **Rules:**
-- Server only sends message types the client has requested capabilities for
+- Capabilities are informational -- the server does not filter outbound messages based on the client's requested set. Clients must handle all message types gracefully regardless of which capabilities they requested.
 - **Clients must ignore unknown message types and unknown fields within known message types** -- forward compatible by default. A v1 client connected to a v2 server that sends a new type just skips it. A v1 client receiving a known type with an extra field it doesn't recognise just ignores that field. No errors, no crashes. Client implementations must use lenient deserialization (no strict/deny-unknown-fields mode).
 - The `version` field is reserved for major protocol-breaking changes (restructuring the handshake itself). Should be rare -- maybe never.
 - New features are added as new capabilities, not new protocol versions
@@ -1101,7 +1101,7 @@ All rate limits are per-user (identified by SSH key) unless noted. Configurable 
 
 **Implementation:** token bucket per user, reset on the configured interval. Lightweight -- no external dependencies. Rate limit state is in-memory only, lost on restart (acceptable -- restarts are rare and the limits rebuild instantly).
 
-**Escalation:** repeated rate limit violations within a window (e.g., 50 violations in 5 minutes) trigger an `admin_notify` alert. No auto-ban -- admin decides via `sshkey-ctl`.
+**Monitoring:** rate limit violations are logged at warn level. Admin monitors via server logs (`journalctl` or `server.log`). No automated escalation -- admin decides action via `sshkey-ctl`.
 
 ### Graceful Server Shutdown
 
@@ -1151,7 +1151,7 @@ Append-only log of all administrative actions. Stored at `/var/sshkey-chat/audit
 2026-04-03T18:00:00Z  server      shutdown   signal=SIGTERM grace=10s clients=12
 ```
 
-Every `sshkey-ctl` command and every server-initiated action (config reload, shutdown, rate limit escalation) gets a timestamped entry. Not tamper-proof against root, but creates accountability and makes forensics possible after an incident.
+Every `sshkey-ctl` command and every server-initiated action (config reload, shutdown) gets a timestamped entry. Not tamper-proof against root, but creates accountability and makes forensics possible after an incident.
 
 ### Admin Notifications
 
