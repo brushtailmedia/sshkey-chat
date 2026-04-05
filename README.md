@@ -19,6 +19,7 @@ Inspired by [ssh-chat](https://github.com/shazow/ssh-chat).
 - **Push notifications** -- content-free APNs/FCM wake pushes (app syncs over SSH)
 - **Config hot-reload** -- add/remove users and rooms without restarting
 - **Admin CLI** -- manage users, devices, pending keys from the server shell
+- **User self-service** -- retire own account, list and revoke own devices from the client
 - **Pure Go** -- no cgo, no external dependencies, single binary
 
 ## Architecture
@@ -247,6 +248,7 @@ Client connects via SSH with Ed25519 key
 | **Files** | `upload_start`, `download` | `upload_ready`, `upload_complete`, `download_start`, `download_complete` |
 | **Push** | `push_register` | `push_registered` |
 | **Retirement** | `retire_me` | `user_retired`, `retired_users` |
+| **Device management** | `list_devices`, `revoke_device` | `device_list`, `device_revoke_result` |
 | **Admin** | -- | `admin_notify`, `device_revoked`, `server_shutdown` |
 | **Errors** | -- | `error` |
 

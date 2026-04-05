@@ -497,6 +497,30 @@ Save unsent drafts, show the message, begin reconnect after `reconnect_in` secon
 
 Server disconnects the device and rejects future connections from that device ID. Device revocation is scoped to a single client — the user's account remains active on other devices, and the SSH key continues to authenticate from new devices. For identity-level termination (key compromise), see Account Retirement.
 
+**User-initiated device management:**
+
+```json
+// Client -> Server (request list of own devices)
+{"type":"list_devices"}
+
+// Server -> Client
+{"type":"device_list","devices":[
+  {"device_id":"dev_laptop","last_synced_at":"2026-04-05T12:00:00Z","created_at":"2026-01-01T00:00:00Z","current":true},
+  {"device_id":"dev_phone","last_synced_at":"2026-04-01T08:00:00Z","created_at":"2026-02-01T00:00:00Z"},
+  {"device_id":"dev_old","last_synced_at":"","created_at":"2025-06-01T00:00:00Z","revoked":true}
+]}
+
+// Client -> Server (revoke one of own devices — server rejects if not owned)
+{"type":"revoke_device","device_id":"dev_phone"}
+
+// Server -> Client
+{"type":"device_revoke_result","device_id":"dev_phone","success":true}
+```
+
+Users can list and revoke their own devices without admin intervention. The server validates that the target `device_id` belongs to the authenticated user before revoking. Self-revocation (revoking the current device) is allowed and will disconnect the requesting session.
+
+Admins can still revoke any user's device via `sshkey-ctl revoke-device --user --device`.
+
 ### Account Retirement
 
 Ed25519 keys are permanent identities on this server. There is no key rotation. When an account needs to end — lost key, compromised key, retired identity — the account is **retired**: monotonic, irreversible, and client-triggered or admin-triggered.
