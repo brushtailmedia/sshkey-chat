@@ -12,7 +12,7 @@ Inspired by [ssh-chat](https://github.com/shazow/ssh-chat).
 - **SSH identity** -- no accounts, no passwords, your Ed25519 key is your permanent identity (no key rotation; lost or compromised keys require account retirement + a fresh account)
 - **Rooms** with epoch-based key rotation (forward secrecy, bounded exposure)
 - **DMs and group DMs** with per-message keys (Signal-level forward secrecy)
-- **File sharing** via encrypted binary channel (server can't see filenames, types, or content)
+- **File sharing** via encrypted upload/download channels (server can't see filenames, types, or content)
 - **Sync on reconnect** -- paginated catch-up with bundled epoch keys
 - **Lazy scroll-back** -- on-demand history, no bulk download on connect
 - **Reactions, typing indicators, read receipts, presence, pins**
@@ -29,12 +29,13 @@ Server (:2222)                           Clients
 ┌─────────────────────────┐
 │  SSH listener            │◄──── sshkey-chat  (terminal, Go)
 │  NDJSON protocol (Ch 1)  │◄──── sshkey-app   (GUI, Rust)
-│  Binary file data (Ch 2) │◄──── any other client that speaks the protocol
+│  Downloads      (Ch 2)   │◄──── any other client that speaks the protocol
+│  Uploads        (Ch 3)   │
 │  SQLite WAL storage      │
 └─────────────────────────┘
 ```
 
-Two SSH channels per connection: Channel 1 carries NDJSON protocol messages, Channel 2 carries raw file bytes. All message content is encrypted client-side before reaching the server.
+Three SSH channels per connection: Channel 1 carries NDJSON protocol messages, Channel 2 carries download file bytes (server → client), Channel 3 carries upload file bytes (client → server). Splitting uploads and downloads onto separate channels lets a large transfer in one direction run in parallel with the other. All message content is encrypted client-side before reaching the server.
 
 ### Encryption
 

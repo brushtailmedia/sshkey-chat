@@ -362,11 +362,15 @@ func (s *Server) handleConnection(conn net.Conn) {
 		}
 	}()
 
-	// Handle channels: Channel 1 = NDJSON protocol, Channel 2 = binary file transfer.
-	// handleSession receives Channel 2 via binChanCh once the client opens it, so
-	// downloads can write back to the same binary channel handleBinaryChannel
-	// reads uploads from.
-	binChanCh := make(chan ssh.Channel, 1)
+	// Handle channels:
+	//   Channel 1 = NDJSON protocol
+	//   Channel 2 = downloads (server writes file bytes here)
+	//   Channel 3 = uploads   (server reads file bytes here)
+	// Download and upload are split onto separate SSH channels so a large
+	// upload doesn't block concurrent downloads (and vice versa). The
+	// download channel is handed to handleSession so handleDownload can
+	// write to client.DownloadChannel.
+	dlChanCh := make(chan ssh.Channel, 1)
 	channelNum := 0
 	for newCh := range chans {
 		if newCh.ChannelType() != "session" {
@@ -382,14 +386,17 @@ func (s *Server) handleConnection(conn net.Conn) {
 		go ssh.DiscardRequests(chReqs)
 
 		channelNum++
-		if channelNum == 1 {
+		switch channelNum {
+		case 1:
 			// Channel 1: NDJSON protocol
-			go s.handleSession(username, sshConn, ch, binChanCh)
-		} else if channelNum == 2 {
-			// Channel 2: binary file transfer — hand off to session, then start reader
-			binChanCh <- ch
+			go s.handleSession(username, sshConn, ch, dlChanCh)
+		case 2:
+			// Channel 2: downloads — server writes here; no reader needed
+			dlChanCh <- ch
+		case 3:
+			// Channel 3: uploads — server reads upload frames here
 			go s.handleBinaryChannel(username, ch)
-		} else {
+		default:
 			ch.Close()
 		}
 	}

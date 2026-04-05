@@ -14,7 +14,7 @@ import (
 	"github.com/brushtailmedia/sshkey/internal/protocol"
 )
 
-// fileManager handles file uploads and downloads via Channel 2.
+// fileManager handles file uploads (Channel 3) and downloads (Channel 2).
 type fileManager struct {
 	dir string // file storage directory
 
@@ -108,8 +108,8 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 		Size:   info.Size(),
 	})
 
-	// Send file bytes on Channel 2
-	if c.BinaryChannel != nil {
+	// Send file bytes on Channel 2 (download channel)
+	if c.DownloadChannel != nil {
 		f, err := os.Open(filePath)
 		if err != nil {
 			s.logger.Error("download: open failed", "file", msg.FileID, "error", err)
@@ -117,12 +117,12 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 		}
 		defer f.Close()
 
-		if err := writeBinaryFrame(c.BinaryChannel, msg.FileID, f, info.Size()); err != nil {
+		if err := writeBinaryFrame(c.DownloadChannel, msg.FileID, f, info.Size()); err != nil {
 			s.logger.Error("download: write failed", "file", msg.FileID, "error", err)
 			return
 		}
 	} else {
-		s.logger.Error("download: no binary channel", "user", c.Username)
+		s.logger.Error("download: no download channel", "user", c.Username)
 	}
 
 	c.Encoder.Encode(protocol.DownloadComplete{
@@ -131,7 +131,7 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 	})
 }
 
-// handleBinaryChannel processes incoming data on SSH Channel 2 (file uploads).
+// handleBinaryChannel processes incoming upload frames on SSH Channel 3.
 func (s *Server) handleBinaryChannel(username string, ch ssh.Channel) {
 	defer ch.Close()
 
@@ -140,21 +140,21 @@ func (s *Server) handleBinaryChannel(username string, ch ssh.Channel) {
 		var idLen [1]byte
 		if _, err := io.ReadFull(ch, idLen[:]); err != nil {
 			if err != io.EOF {
-				s.logger.Debug("binary channel read id_len", "error", err)
+				s.logger.Debug("upload channel read id_len", "error", err)
 			}
 			return
 		}
 
 		idBuf := make([]byte, idLen[0])
 		if _, err := io.ReadFull(ch, idBuf); err != nil {
-			s.logger.Error("binary channel read id", "error", err)
+			s.logger.Error("upload channel read id", "error", err)
 			return
 		}
 		uploadID := string(idBuf)
 
 		var dataLen [8]byte
 		if _, err := io.ReadFull(ch, dataLen[:]); err != nil {
-			s.logger.Error("binary channel read data_len", "error", err)
+			s.logger.Error("upload channel read data_len", "error", err)
 			return
 		}
 		size := binary.BigEndian.Uint64(dataLen[:])
@@ -216,7 +216,7 @@ func (s *Server) handleBinaryChannel(username string, ch ssh.Channel) {
 	}
 }
 
-// writeBinaryFrame writes a Channel 2 binary frame.
+// writeBinaryFrame writes a binary frame on either the download or upload channel.
 func writeBinaryFrame(w io.Writer, id string, r io.Reader, size int64) error {
 	// id_len (1 byte)
 	if _, err := w.Write([]byte{byte(len(id))}); err != nil {

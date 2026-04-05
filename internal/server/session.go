@@ -30,9 +30,9 @@ var allCapabilities = []string{
 }
 
 // handleSession runs the protocol session on an accepted SSH channel.
-// binChanCh delivers the second session channel (binary file transfer) once
-// the client opens it; may remain empty if the client never opens Channel 2.
-func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Channel, binChanCh <-chan ssh.Channel) {
+// dlChanCh delivers the download channel (Channel 2) once the client opens
+// it; may remain empty if the client never opens it.
+func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Channel, dlChanCh <-chan ssh.Channel) {
 	defer ch.Close()
 
 	enc := protocol.NewEncoder(ch)
@@ -194,18 +194,18 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 	s.clients[clientHello.DeviceID] = client
 	s.mu.Unlock()
 
-	// Attach the binary channel if the client opened Channel 2. The client
-	// opens Channel 1 then Channel 2 before sending client_hello, so by now
-	// the second channel should already be on binChanCh. Wait briefly to
-	// tolerate any reordering, then proceed without it (downloads only —
-	// uploads read from Channel 2 via handleBinaryChannel regardless).
+	// Attach the download channel if the client opened Channel 2. The
+	// client opens Channels 1-3 before sending client_hello, so by now the
+	// download channel should already be on dlChanCh. Wait briefly to
+	// tolerate any reordering, then proceed without it (downloads will
+	// fail, uploads still work via Channel 3).
 	select {
-	case binCh := <-binChanCh:
+	case dlCh := <-dlChanCh:
 		s.mu.Lock()
-		client.BinaryChannel = binCh
+		client.DownloadChannel = dlCh
 		s.mu.Unlock()
 	case <-time.After(500 * time.Millisecond):
-		s.logger.Debug("no binary channel", "user", username, "device", clientHello.DeviceID)
+		s.logger.Debug("no download channel", "user", username, "device", clientHello.DeviceID)
 	}
 
 	defer func() {

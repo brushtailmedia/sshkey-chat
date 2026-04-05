@@ -252,17 +252,20 @@ If the user loses their key entirely (no backup, no other device with the key), 
 
 ### SSH Channel Multiplexing
 
-Two channels over one SSH connection:
+Three channels over one SSH connection:
 
 ```
 SSH Connection
-├── Channel 1: NDJSON (messages, commands, sync, metadata)
-└── Channel 2: Binary (raw file bytes, no encoding overhead)
+├── Channel 1: NDJSON    (messages, commands, sync, metadata)
+├── Channel 2: Downloads (server → client: raw file bytes)
+└── Channel 3: Uploads   (client → server: raw file bytes)
 ```
 
-Channel 1 carries all protocol messages. Channel 2 carries raw file data. Transfers are correlated by `upload_id` / `file_id` across channels.
+Channel 1 carries all protocol messages. Channels 2 and 3 carry raw file data in one direction each. Transfers are correlated by `upload_id` / `file_id` across channels.
 
-**Channel 2 framing:** each transfer on the binary channel is length-prefixed so the receiver knows where one file ends and the next begins. Multiple transfers can be in-flight concurrently.
+**Why split uploads and downloads:** a large transfer in one direction can overlap with transfers in the other. Within a direction, concurrent transfers still serialize on a mutex (frame writes must not interleave), but upload-vs-download runs fully parallel on independent SSH channels with independent flow control.
+
+**Binary frame format (Channels 2 and 3):** each transfer is length-prefixed so the receiver knows where one file ends and the next begins. Multiple transfers can be in-flight on the same channel, and frames are self-identifying by their id prefix.
 
 ```
 Binary frame:
@@ -270,20 +273,20 @@ Binary frame:
 │ id_len (1 byte) │ id (variable) │ data_len (8 bytes, big-endian uint64) │ data (raw bytes) │
 └──────────────────────────────────────────────────┘
 
-Example (upload):
+Example (upload on Channel 3):
   id_len: 6
   id: "up_001"
   data_len: 45000
   data: [45000 bytes of raw file data]
 
-Example (download):
+Example (download on Channel 2):
   id_len: 8
   id: "file_xyz"
   data_len: 45000
   data: [45000 bytes of raw file data]
 ```
 
-The `id` field is the `upload_id` (client→server) or `file_id` (server→client), matching the JSON metadata on Channel 1. The 8-byte length prefix supports files up to 16 EiB (effectively unlimited). Receiver reads id_len, then id, then data_len, then exactly data_len bytes before expecting the next frame.
+The `id` field is the `upload_id` (Channel 3, client→server) or `file_id` (Channel 2, server→client), matching the JSON metadata on Channel 1. The 8-byte length prefix supports files up to 16 EiB (effectively unlimited). Receiver reads id_len, then id, then data_len, then exactly data_len bytes before expecting the next frame.
 
 **Compression:** SSH supports compression natively (`zlib@openssh.com`). Enabled at the SSH layer -- NDJSON compresses well, free optimisation, no protocol changes needed.
 
@@ -732,7 +735,7 @@ Client shows badge counts per room/conversation. Synced across devices via read 
 
 Capability: `file_transfer`
 
-Metadata on Channel 1 (JSON), raw bytes on Channel 2 (binary). **File content is encrypted client-side** before upload. Room files are encrypted with the epoch key. DM files are encrypted with the per-message key from the message that references them. The server stores opaque encrypted blobs -- it knows the file ID and size, but not the filename, mime type, or content.
+Metadata on Channel 1 (JSON), upload bytes on Channel 3, download bytes on Channel 2. **File content is encrypted client-side** before upload. Room files are encrypted with the epoch key. DM files are encrypted with a fresh per-file key `K_file` that travels inside the encrypted message payload (Design A — see Key Exchange below). The server stores opaque encrypted blobs -- it knows the file ID and size, but not the filename, mime type, or content.
 
 ```json
 // Channel 1: Client -> Server (initiate -- no filename or mime, server doesn't need them)
@@ -744,25 +747,32 @@ Metadata on Channel 1 (JSON), raw bytes on Channel 2 (binary). **File content is
 // Channel 1: Server -> Client (ready)
 {"type":"upload_ready","upload_id":"up_001"}
 
-// Channel 2: Client -> Server (length-prefixed binary frame, see Channel 2 framing above)
-// File bytes are already encrypted client-side (epoch key for rooms, per-message key for DMs)
+// Channel 3: Client -> Server (length-prefixed binary frame, see framing above)
+// File bytes are already encrypted client-side (epoch key for rooms, per-file K_file for DMs)
 
 // Channel 1: Server -> Client (complete)
 {"type":"upload_complete","upload_id":"up_001","file_id":"file_xyz"}
 ```
 
-Then the client sends a message referencing the `file_id`. Upload first, message second. Multiple files can be uploaded before sending one message with several attachments. The attachment metadata (filename, mime type, thumbnail ID) is inside the encrypted message payload -- the server never sees it.
+Then the client sends a message referencing the `file_id`. Upload first, message second. Multiple files can be uploaded before sending one message with several attachments. The attachment metadata (filename, mime type, thumbnail ID, and for DMs the `file_key`) is inside the encrypted message payload -- the server never sees it.
 
 **Attachment thumbnails:** the **sender** generates a small thumbnail for images and videos before upload, encrypts it, and uploads as a separate file. Both the full file and thumbnail are opaque blobs to the server. Clients download the thumbnail first (tiny, instant), full file on demand.
 
-**Decrypted payload includes attachment metadata:**
+**Decrypted payload includes attachment metadata (room):**
 ```json
 {
   "attachments": [{"file_id":"file_xyz","name":"photo.jpg","size":230000,"mime":"image/jpeg","thumbnail_id":"file_xyz_thumb","file_epoch":3}]
 }
 ```
 
-`file_epoch` is rooms only -- it records which epoch key was used to encrypt the file bytes. If the file was uploaded during a different epoch than the message, recipients use the correct key. Usually matches the message epoch; only differs during epoch transitions. DM attachments don't include `file_epoch` -- the file is encrypted with the per-message key from the message that references it.
+**Decrypted payload includes attachment metadata (DM):**
+```json
+{
+  "attachments": [{"file_id":"file_xyz","name":"photo.jpg","size":230000,"mime":"image/jpeg","file_key":"base64_K_file"}]
+}
+```
+
+`file_epoch` is rooms only -- it records which epoch key was used to encrypt the file bytes. If the file was uploaded during a different epoch than the message, recipients use the correct key. Usually matches the message epoch; only differs during epoch transitions. `file_key` is DMs only -- the sender generates a fresh symmetric key per attachment, encrypts the file with it, and stores the base64 key inside the encrypted payload. Recipients decrypt the payload (with their wrapped `K_msg`), read `file_key` per attachment, then decrypt each file independently.
 
 #### File Transfer (download)
 
@@ -773,8 +783,8 @@ Then the client sends a message referencing the `file_id`. Upload first, message
 // Channel 1: Server -> Client (server only knows file_id and size)
 {"type":"download_start","file_id":"file_xyz","size":45000}
 
-// Channel 2: Server -> Client (length-prefixed binary frame, see Channel 2 framing above)
-// Encrypted bytes -- client decrypts with the appropriate key (epoch key for rooms, per-message key for DMs)
+// Channel 2: Server -> Client (length-prefixed binary frame, see framing above)
+// Encrypted bytes -- client decrypts with the appropriate key (epoch key for rooms, file_key for DMs)
 
 // Channel 1: Server -> Client
 {"type":"download_complete","file_id":"file_xyz"}
@@ -1257,7 +1267,7 @@ format = "json"                   # structured JSON, one object per line
 
 | Level | Events |
 |---|---|
-| **error** | Epoch rotation failures, DB write errors, SSH channel errors, corrupted frames on binary channel, key wrapping validation failures |
+| **error** | Epoch rotation failures, DB write errors, SSH channel errors, corrupted frames on upload/download channels, key wrapping validation failures |
 | **warn** | Rate limit violations, stale_member_list rejections, epoch_conflict rejections, invalid_wrapped_keys rejections, client protocol errors, push delivery failures |
 | **info** | Connections, disconnections, room joins/leaves, epoch rotations (room, old_epoch, new_epoch, triggered_by, duration_ms), DM conversations created, config reloads, server start/stop |
 | **debug** | Per-message routing (from, room/conversation, size_bytes -- not content), sync batches sent (user, device, pages, message_count), history requests, file uploads/downloads (file_id, size), capability negotiation |
@@ -1299,7 +1309,7 @@ format = "json"                   # structured JSON, one object per line
 
 ## File Sharing & Inline Media
 
-The server stores encrypted file blobs and serves them via the binary channel. The server cannot see file content, filenames, or mime types. Display is entirely a client-side concern.
+The server stores encrypted file blobs and serves them via the upload/download channels (Channels 2 and 3). The server cannot see file content, filenames, or mime types. Display is entirely a client-side concern.
 
 ### File type handling (client-side)
 

@@ -6,10 +6,13 @@ Everything you need to build a client for the sshkey chat server.
 
 Connect via SSH to the server on port 2222 (configurable). Only Ed25519 keys are supported -- the server rejects RSA, ECDSA, and other key types.
 
-Two SSH channels per connection:
+Three SSH channels per connection:
 
 - **Channel 1:** NDJSON protocol messages (one JSON object per line, terminated by `\n`)
-- **Channel 2:** Raw binary file data (length-prefixed frames)
+- **Channel 2:** Downloads — server writes raw encrypted file bytes here (length-prefixed frames); client reads
+- **Channel 3:** Uploads — client writes raw encrypted file bytes here (length-prefixed frames); server reads
+
+Downloads and uploads are split onto separate SSH channels so a large transfer in one direction does not block the other. The client opens Channels 1, 2, and 3 in that order (each as a plain `session` channel) before sending `client_hello`.
 
 The server's SSH host key is Ed25519, generated on first run. Clients should use trust-on-first-use (TOFU) -- store the host key fingerprint on first connect, verify on subsequent connects.
 
@@ -17,7 +20,7 @@ The server's SSH host key is Ed25519, generated on first run. Clients should use
 
 ```
 Client opens SSH connection with Ed25519 key
-Client opens session channel (Channel 1)
+Client opens 3 session channels (Channel 1: protocol, Channel 2: downloads, Channel 3: uploads)
 
   Server -> {"type":"server_hello","protocol":"sshkey-chat","version":1,"server_id":"chat.example.com","capabilities":["typing","reactions","read_receipts","file_transfer","link_previews","presence","pins","mentions","unread","status","signatures"]}
 
@@ -443,7 +446,7 @@ Capability: `presence`
 
 Capability: `file_transfer`
 
-Metadata on Channel 1, raw bytes on Channel 2. File content is encrypted client-side before upload.
+Metadata on Channel 1, raw bytes on Channel 2 (downloads) or Channel 3 (uploads). File content is encrypted client-side before upload.
 
 ```json
 // Channel 1: Client -> Server
@@ -452,7 +455,7 @@ Metadata on Channel 1, raw bytes on Channel 2. File content is encrypted client-
 // Channel 1: Server -> Client
 {"type":"upload_ready","upload_id":"up_001"}
 
-// Channel 2: Client -> Server (binary frame -- see below)
+// Channel 3: Client -> Server (binary frame -- see below)
 
 // Channel 1: Server -> Client
 {"type":"upload_complete","upload_id":"up_001","file_id":"file_xyz"}
@@ -468,13 +471,15 @@ Then send a message referencing the `file_id`. Upload first, message second.
 {"type":"download_complete","file_id":"file_xyz"}
 ```
 
-**Channel 2 binary frame format:**
+**Binary frame format (Channels 2 and 3):**
 
 ```
 id_len (1 byte) | id (variable) | data_len (8 bytes, big-endian uint64) | data (raw bytes)
 ```
 
-The `id` is the `upload_id` (client -> server) or `file_id` (server -> client). Read `id_len`, then `id`, then `data_len`, then exactly `data_len` bytes.
+The `id` is the `upload_id` (on Channel 3, client -> server) or `file_id` (on Channel 2, server -> client). Read `id_len`, then `id`, then `data_len`, then exactly `data_len` bytes.
+
+Concurrent uploads share Channel 3 and so must serialize their frame writes (clients typically use a single mutex for the upload channel). Concurrent downloads share Channel 2 the same way on the client side. But an upload and a download happen on different channels and can proceed in parallel.
 
 **Room files:** encrypt with the current epoch key. Record `file_epoch` in the attachment metadata so recipients know which epoch key decrypts the file (usually matches the message's epoch; only differs during epoch transitions).
 
