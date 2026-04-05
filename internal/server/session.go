@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"time"
 
@@ -197,6 +198,9 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 	// Send profiles for visible users
 	s.sendProfiles(client)
 
+	// Send retired users list so client can mark historical messages correctly
+	s.sendRetiredUsers(client)
+
 	// Send current epoch keys for rooms
 	s.sendEpochKeys(client)
 
@@ -365,6 +369,8 @@ func (s *Server) sendProfiles(c *Client) {
 			DisplayName:    user.DisplayName,
 			PubKey:         user.Key,
 			KeyFingerprint: ssh.FingerprintSHA256(parsed),
+			Retired:        user.Retired,
+			RetiredAt:      user.RetiredAt,
 		})
 	}
 }
@@ -421,10 +427,8 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 		s.handleSetProfile(c, raw)
 	case "set_status":
 		s.handleSetStatus(c, raw)
-	case "key_rotate":
-		s.handleKeyRotate(c, raw)
-	case "key_rotate_complete":
-		s.handleKeyRotateComplete(c, raw)
+	case "retire_me":
+		s.handleRetireMe(c, raw)
 	case "upload_start":
 		s.handleUploadStart(c, raw)
 	case "download":
@@ -574,6 +578,19 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 		// Validate wrapped_keys match conversation member list
 		members, err := s.store.GetConversationMembers(msg.Conversation)
 		if err == nil {
+			// Reject if any member is retired (applies to 1:1 DMs where the
+			// retired user is preserved in conversation_members). Group DMs
+			// have retired members removed at retirement time, so this check
+			// is effectively a 1:1-only safeguard.
+			if retired := s.findRetiredMember(members); retired != "" {
+				c.Encoder.Encode(protocol.Error{
+					Type:    "error",
+					Code:    protocol.ErrUserRetired,
+					Message: fmt.Sprintf("Cannot send — %s's account has been retired", retired),
+				})
+				return
+			}
+
 			memberSet := make(map[string]bool, len(members))
 			for _, m := range members {
 				memberSet[m] = true
@@ -704,6 +721,20 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed react"})
 		return
+	}
+
+	// Reject DM reactions targeting retired members (1:1 DM case)
+	if msg.Conversation != "" && s.store != nil {
+		if members, err := s.store.GetConversationMembers(msg.Conversation); err == nil {
+			if retired := s.findRetiredMember(members); retired != "" {
+				c.Encoder.Encode(protocol.Error{
+					Type:    "error",
+					Code:    protocol.ErrUserRetired,
+					Message: fmt.Sprintf("Cannot react — %s's account has been retired", retired),
+				})
+				return
+			}
+		}
 	}
 
 	reactionID := generateID("react_")
@@ -888,6 +919,16 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 
 	// Add sender to members
 	allMembers := append([]string{c.Username}, msg.Members...)
+
+	// Reject if any proposed member is retired
+	if retired := s.findRetiredMember(msg.Members); retired != "" {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrUserRetired,
+			Message: fmt.Sprintf("Cannot create conversation — %s's account has been retired", retired),
+		})
+		return
+	}
 
 	// Max group DM size: 50 members
 	if len(allMembers) > 50 {

@@ -99,22 +99,57 @@ func (s *Server) reloadUsers() {
 	// Detect changes
 	var added, removed []string
 	var roomChanges []roomChange
+	var retirements []retirementTransition
 
-	for username := range newUsers {
+	for username, newUser := range newUsers {
 		if _, existed := oldUsers[username]; !existed {
+			if newUser.Retired {
+				// Admin added a retired entry directly — no join events, no rotation.
+				s.logger.Info("loaded retired user (new entry)", "user", username)
+				continue
+			}
 			added = append(added, username)
 		}
 	}
-	for username := range oldUsers {
+	for username, oldUser := range oldUsers {
 		if _, exists := newUsers[username]; !exists {
+			// Skip users that were already retired — they weren't active anyway.
+			if oldUser.Retired {
+				continue
+			}
 			removed = append(removed, username)
 		}
 	}
 
-	// Detect room membership changes for existing users
+	// Detect retirement transitions (user flipped to retired via admin edit)
+	// and room membership changes for existing users.
 	for username, newUser := range newUsers {
 		oldUser, existed := oldUsers[username]
 		if !existed {
+			continue
+		}
+
+		// Transition to retired: handled separately, skip room-diff for this user.
+		if newUser.Retired && !oldUser.Retired {
+			retirements = append(retirements, retirementTransition{
+				username: username,
+				oldRooms: oldUser.Rooms,
+				reason:   newUser.RetiredReason,
+			})
+			continue
+		}
+
+		// Un-retirement via admin edit (unusual — retirement is meant to be
+		// monotonic, but admins can override). Log and proceed normally.
+		if oldUser.Retired && !newUser.Retired {
+			s.logger.Warn("user un-retired by admin edit",
+				"user", username,
+			)
+		}
+
+		// Skip room diff for users that are retired on both sides
+		// (their rooms list should stay empty).
+		if newUser.Retired {
 			continue
 		}
 
@@ -131,6 +166,13 @@ func (s *Server) reloadUsers() {
 				roomChanges = append(roomChanges, roomChange{username, r, "leave"})
 			}
 		}
+	}
+
+	// Process retirement transitions first. handleRetirement fires its own
+	// broadcasts and acquires its own locks, so we call it before holding s.mu
+	// to avoid lock contention with the diff-broadcasting block below.
+	for _, r := range retirements {
+		s.handleRetirement(r.username, r.oldRooms, r.reason)
 	}
 
 	// Notify connected clients of changes
@@ -228,13 +270,14 @@ func (s *Server) reloadUsers() {
 	}
 
 	if s.audit != nil {
-		s.audit.Log("server", "reload", fmt.Sprintf("file=users.toml added=%d removed=%d room_changes=%d", len(added), len(removed), len(roomChanges)))
+		s.audit.Log("server", "reload", fmt.Sprintf("file=users.toml added=%d removed=%d room_changes=%d retired=%d", len(added), len(removed), len(roomChanges), len(retirements)))
 	}
 
 	s.logger.Info("users.toml reloaded",
 		"added", len(added),
 		"removed", len(removed),
 		"room_changes", len(roomChanges),
+		"retired", len(retirements),
 	)
 }
 
@@ -291,6 +334,15 @@ type roomChange struct {
 	user  string
 	room  string
 	event string // "join" or "leave"
+}
+
+// retirementTransition captures a user flipping from active to retired,
+// carrying the rooms they were in before retirement so handleRetirement can
+// fire leave events and mark those rooms for epoch rotation.
+type retirementTransition struct {
+	username string
+	oldRooms []string
+	reason   string // self_compromise | admin | key_lost
 }
 
 func toSet(s []string) map[string]bool {

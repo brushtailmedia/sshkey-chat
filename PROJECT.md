@@ -185,6 +185,65 @@ No single layer is perfect. Together they provide meaningful E2E security withou
 
 ---
 
+## Account Lifecycle
+
+### Identity model
+
+**Your Ed25519 SSH key IS your account.** There is no separate account identifier, no password, no recovery mechanism on the server. The server authenticates by matching the raw key bytes against `users.toml` entries — if the key matches, you are that user; if not, the connection is rejected.
+
+**Keys are permanent.** There is no in-band key rotation protocol. A key's relationship to a username is lifelong. When that relationship needs to end, the account is **retired** — monotonic, irreversible — and a new account is created (potentially under the same username) via admin action.
+
+This is a deliberate design choice. The alternative — supporting rotation — would:
+- Require re-wrapping every room epoch key on every rotation (complex, bug-prone — see early drafts of this document)
+- Introduce a **self-hijack attack**: an attacker with a stolen key could rotate to a key they control, locking out the legitimate owner
+- Complicate safety-number continuity (each rotation invalidates every verified pair)
+- Muddy the philosophical claim that "your key is your identity"
+
+The cost of not supporting rotation is that legitimate key changes (hardware upgrade, good-hygiene rotation) are rare events that require admin action. For a self-hosted team-chat deployment this is acceptable.
+
+### Three-layer defense
+
+| Layer | Protects against | Mechanism |
+|---|---|---|
+| **Passphrase** | Stolen device, key at rest | Client-side SSH key passphrase — server never sees it |
+| **Device revocation** | Lazy attacker reusing the stolen device as-is | `sshkey-ctl revoke-device` → `device_revoked` event, scoped to a single `device_id` |
+| **Account retirement** | Key exfiltration, suspected key compromise | `retire_me` message or admin config change — ends the account |
+
+**Key insight:** device revocation alone is NOT crypto-level protection. `device_id` is a client-generated identifier with no cryptographic binding. An attacker who extracts the raw SSH key from a stolen device can generate a new `device_id` and reconnect as a fresh device. **Device revocation only stops an attacker who uses the stolen device as-is.** For key-theft scenarios (copy the key file, exfiltrate via malware, crack the passphrase), retirement is the only answer.
+
+### Retirement flow
+
+On retirement (triggered by `retire_me` from the client, admin-editing `users.toml`, or `sshkey-ctl retire-user`):
+
+1. `users.toml` entry is updated to `retired = true, retired_at = <ISO8601>, retired_reason = <...>` and the user's room list is cleared.
+2. The server's config watcher detects the change (fsnotify) and fires the retirement transition handler.
+3. SSH authentication henceforth rejects the key with "account retired".
+4. All active sessions for that user are terminated with `user_retired` error code.
+5. `room_event` leaves broadcast for every room the user was in; affected rooms are marked for epoch rotation (next sender triggers the new key).
+6. User is removed from group DM (3+ members) `conversation_members`; `conversation_event` leaves with `reason: "retirement"` broadcast to remaining members.
+7. User remains in 1:1 DM `conversation_members` (for UI continuity of the remaining party) but `send_dm`/`react`/`create_dm` reject with `user_retired` error if any target is retired.
+8. `user_retired` event broadcast to all connected clients so their UIs update (retired markers, read-only DMs, exclusion from completion).
+9. On next client connect, `retired_users` list is sent after `welcome` so fresh clients learn about retirements that happened offline.
+
+### Attacker-vs-victim race
+
+If both the legitimate user and an attacker with the stolen key attempt `retire_me` simultaneously, first-to-send wins. **This is acceptable:**
+- Either outcome ends with the legitimate user needing a new account.
+- The attacker's "win" amounts to denial-of-service, not privilege escalation.
+- This is strictly better than the hypothetical rotation model, where an attacker could rotate the key and retain exclusive access to the account while locking the legitimate user out entirely.
+
+### Username reuse
+
+Retired user entries remain in `users.toml` (with `retired = true`) for historical message attribution. To reuse the name for a new account, the admin moves the retired entry (e.g., renames it to `[alice.2026-04]`) and adds a fresh `[alice]` with the new key. The legitimate user's client sees the new fingerprint via key-pinning and gets the standard "key has changed — verify" warning, which is the correct behavior (they should verify the new account's safety number out-of-band).
+
+### Key loss
+
+If the user loses their key entirely (no backup, no other device with the key), they cannot self-retire. They contact the admin out-of-band, who sets `retired = true, retired_reason = "key_lost"` directly in `users.toml` or runs `sshkey-ctl retire-user`. The admin then adds a fresh account entry with the new key.
+
+**The TUI enforces key backup** at account creation (wizard backup step with explicit "I understand there is no recovery" acknowledgement) to make this failure mode as rare as possible.
+
+---
+
 ## Protocol Specification
 
 ### Wire Format
@@ -1541,31 +1600,7 @@ Server
 - Existing devices with a recent `last_synced_at` just get the delta since their last sync (usually a small batch)
 - New device unwraps keys with same SSH key -- works because the key wrapping is tied to the SSH key, not the device
 
-**SSH key rotation:**
-
-Rotating a user's SSH key requires re-wrapping all room epoch keys the user has access to. DM messages store wrapped keys inline -- re-wrapping them would mean rewriting every DM message, which is impractical. Instead, DM history from before the key rotation remains accessible only if the user still has the old key (or has already fetched and decrypted those messages into their local DB).
-
-Room epoch key re-wrapping is client-driven (the server can't unwrap):
-
-1. User generates a new SSH key
-2. Client connects with the **old key** and sends a key rotation request:
-   ```json
-   {"type":"key_rotate","new_pubkey":"ssh-ed25519 AAAA...new"}
-   ```
-3. Server sends all wrapped room epoch keys for the user (wrapped with old key):
-   ```json
-   {"type":"key_rotate_keys","keys":[{"room":"general","epoch":3,"wrapped_key":"base64..."},{"room":"engineering","epoch":7,"wrapped_key":"base64..."},...]}
-   ```
-4. Client unwraps each with the old private key, re-wraps with the new public key, sends back:
-   ```json
-   {"type":"key_rotate_complete","keys":[{"room":"general","epoch":3,"wrapped_key":"base64...rewrapped"},...],"new_pubkey":"ssh-ed25519 AAAA...new"}
-   ```
-5. Server atomically swaps the user's key in `users.toml` and replaces all wrapped room epoch keys
-6. Server disconnects the client. Client reconnects with the new key.
-
-**DM history after key rotation:** old DM messages on the server have wrapped keys for the old SSH key. The server can't re-wrap them. Options: (a) the user fetches all DM history before rotating (local DB has the decrypted plaintext), or (b) accept that server-side DM history from before rotation is inaccessible with the new key. The local DB retains everything already fetched.
-
-If the old key is lost (can't connect to initiate rotation), the admin removes and re-adds the user with the new key. This is a clean break -- new `first_seen`, new `first_epoch` for rooms, no access to pre-rotation history on the server. The user's local DB still has previously fetched messages (decryptable because the local DB is encrypted with a key derived from the old SSH key -- they'd need the old key to open it, or accept the loss).
+**SSH key changes:** Key rotation is not supported. See the **Account Lifecycle** section earlier in this document for the identity model, retirement flow, and the reasoning behind the no-rotation decision.
 
 **Retention cleanup:**
 - Via `sshkey-ctl purge --older-than 5y` (run manually or as a cron job)
@@ -1743,7 +1778,6 @@ Small service running alongside the chat server:
 - Users register their push token (per device) with the server on first mobile connect
 - Server sends lightweight wake-up pushes via APNs/FCM when messages arrive for offline users
 - Push relay never sees message content -- it just signals "you have new messages"
-- ~50 lines of platform-specific code in the mobile app for push registration
 
 ### Platform-Specific Requirements
 

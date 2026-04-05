@@ -62,6 +62,10 @@ func run() error {
 		return cmdListUsers(configDir)
 	case "remove-user":
 		return cmdRemoveUser(configDir, cmdArgs)
+	case "retire-user":
+		return cmdRetireUser(configDir, cmdArgs)
+	case "list-retired":
+		return cmdListRetired(configDir)
 	case "revoke-device":
 		return cmdRevokeDevice(dataDir, cmdArgs)
 	case "restore-device":
@@ -86,6 +90,8 @@ Commands:
   reject --fingerprint FP                 Reject/clear a pending key
   list-users                              List all users
   remove-user NAME                        Remove a user
+  retire-user NAME [--reason REASON]      Retire an account (permanent, for lost keys or compromise)
+  list-retired                            List retired accounts
   revoke-device --user USER --device DEV  Revoke a device
   restore-device --user USER --device DEV Restore a revoked device
   host-key                                Print server host key fingerprint
@@ -203,6 +209,69 @@ func cmdRemoveUser(configDir string, args []string) error {
 
 	delete(users, name)
 	return writeTOMLFile(usersPath, users)
+}
+
+func cmdRetireUser(configDir string, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: retire-user NAME [--reason REASON]")
+	}
+	name := args[0]
+	reason := "admin"
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--reason" && i+1 < len(args) {
+			reason = args[i+1]
+			i++
+		}
+	}
+
+	usersPath := filepath.Join(configDir, "users.toml")
+	users, err := config.LoadUsers(usersPath)
+	if err != nil {
+		return err
+	}
+
+	u, ok := users[name]
+	if !ok {
+		return fmt.Errorf("user %q not found", name)
+	}
+	if u.Retired {
+		return fmt.Errorf("user %q is already retired (at %s, reason: %s)", name, u.RetiredAt, u.RetiredReason)
+	}
+
+	u.Retired = true
+	u.RetiredAt = time.Now().UTC().Format(time.RFC3339)
+	u.RetiredReason = reason
+	u.Rooms = nil // retired users belong to no rooms
+	users[name] = u
+
+	if err := writeTOMLFile(usersPath, users); err != nil {
+		return fmt.Errorf("write users.toml: %w", err)
+	}
+
+	fmt.Printf("User %q retired (reason: %s).\n", name, reason)
+	fmt.Println("The running server (if any) will detect the change via config watch")
+	fmt.Println("and fire leave events + epoch rotations automatically.")
+	return nil
+}
+
+func cmdListRetired(configDir string) error {
+	users, err := config.LoadUsers(filepath.Join(configDir, "users.toml"))
+	if err != nil {
+		return err
+	}
+	found := false
+	for name, user := range users {
+		if !user.Retired {
+			continue
+		}
+		found = true
+		fmt.Printf("%-20s retired_at=%s  reason=%s  display_name=%q\n",
+			name, user.RetiredAt, user.RetiredReason, user.DisplayName)
+	}
+	if !found {
+		fmt.Println("No retired accounts.")
+	}
+	return nil
 }
 
 func cmdRevokeDevice(dataDir string, args []string) error {

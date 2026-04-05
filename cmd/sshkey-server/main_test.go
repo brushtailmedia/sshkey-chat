@@ -1,12 +1,16 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +20,89 @@ import (
 	"github.com/brushtailmedia/sshkey/internal/protocol"
 	"github.com/brushtailmedia/sshkey/internal/server"
 )
+
+// Test fixture keys generated once per TestMain run. Written to /tmp for
+// backwards compatibility with pre-existing test code that expects them
+// there, and mirrored into a per-run testConfigDir with matching users.toml.
+var (
+	testFixtureOnce   sync.Once
+	testFixtureDir    string // temp config dir with generated users.toml
+	testFixtureErr    error
+)
+
+// setupFixtures creates three Ed25519 test keys (alice/bob/carol), writes
+// their private keys to /tmp/sshkey-test-key[-bob|-carol], and produces a
+// matching users.toml + rooms.toml + server.toml in a temp config dir.
+// Called lazily on first test that needs the fixtures.
+func setupFixtures() (string, error) {
+	testFixtureOnce.Do(func() {
+		testFixtureDir, testFixtureErr = generateTestFixtures()
+	})
+	return testFixtureDir, testFixtureErr
+}
+
+func generateTestFixtures() (string, error) {
+	// Generate the three test keys + pub keys
+	users := []struct {
+		name    string
+		keyPath string
+		rooms   string
+	}{
+		{"alice", "/tmp/sshkey-test-key", `["general", "engineering"]`},
+		{"bob", "/tmp/sshkey-test-key-bob", `["general"]`},
+		{"carol", "/tmp/sshkey-test-key-carol", `["general"]`},
+	}
+
+	tmpConfigDir, err := os.MkdirTemp("", "sshkey-test-config-")
+	if err != nil {
+		return "", fmt.Errorf("tempdir: %w", err)
+	}
+
+	var usersToml string
+	for _, u := range users {
+		// Generate a fresh key (overwrite any stale fixture)
+		pub, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			return "", err
+		}
+		block, err := ssh.MarshalPrivateKey(priv, "")
+		if err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(u.keyPath, pem.EncodeToMemory(block), 0600); err != nil {
+			return "", fmt.Errorf("write %s: %w", u.keyPath, err)
+		}
+
+		sshPub, err := ssh.NewPublicKey(pub)
+		if err != nil {
+			return "", err
+		}
+		pubLine := string(ssh.MarshalAuthorizedKey(sshPub))
+		// Trim trailing newline; add a comment
+		pubLine = pubLine[:len(pubLine)-1] + " " + u.name + "@test"
+
+		usersToml += fmt.Sprintf("[%s]\nkey = %q\ndisplay_name = %q\nrooms = %s\n\n",
+			u.name, pubLine, u.name, u.rooms)
+	}
+
+	if err := os.WriteFile(filepath.Join(tmpConfigDir, "users.toml"), []byte(usersToml), 0644); err != nil {
+		return "", err
+	}
+
+	// Copy rooms.toml + server.toml from committed testdata
+	for _, f := range []string{"rooms.toml", "server.toml"} {
+		src := filepath.Join("..", "..", "testdata", "config", f)
+		data, err := os.ReadFile(src)
+		if err != nil {
+			return "", fmt.Errorf("read %s: %w", src, err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpConfigDir, f), data, 0644); err != nil {
+			return "", err
+		}
+	}
+
+	return tmpConfigDir, nil
+}
 
 // testEnv holds a running server and its config for tests.
 type testEnv struct {
@@ -27,7 +114,10 @@ type testEnv struct {
 
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
-	testConfigDir := filepath.Join("..", "..", "testdata", "config")
+	testConfigDir, err := setupFixtures()
+	if err != nil {
+		t.Fatalf("setup fixtures: %v", err)
+	}
 	testDataDir := t.TempDir()
 
 	cfg, err := config.Load(testConfigDir)

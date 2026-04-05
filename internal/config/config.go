@@ -97,10 +97,20 @@ type FCMConfig struct {
 }
 
 // User represents a single user entry from users.toml.
+//
+// Retirement: When Retired is true, the account is permanently ended. The key
+// no longer authenticates, the user is removed from all rooms and DMs, and
+// other users see their messages in history marked [retired]. Retirement is
+// monotonic and irreversible at the protocol level — a retired account can
+// only be succeeded by a new account (same or different username) added by
+// an admin. See PROJECT.md "Account Retirement" for the full model.
 type User struct {
-	Key         string   `toml:"key"`
-	DisplayName string   `toml:"display_name"`
-	Rooms       []string `toml:"rooms"`
+	Key            string   `toml:"key"`
+	DisplayName    string   `toml:"display_name"`
+	Rooms          []string `toml:"rooms"`
+	Retired        bool     `toml:"retired,omitempty"`
+	RetiredAt      string   `toml:"retired_at,omitempty"`      // RFC3339 timestamp
+	RetiredReason  string   `toml:"retired_reason,omitempty"`  // self_compromise | admin | key_lost
 }
 
 // Room represents a single room entry from rooms.toml.
@@ -173,6 +183,37 @@ func LoadUsers(path string) (map[string]User, error) {
 	return raw, nil
 }
 
+// WriteUsers writes the users map back to users.toml atomically (write to
+// temp file, then rename). Used by the retirement flow when the server needs
+// to persist a retirement flag set via the protocol.
+//
+// Because the config directory is watched via fsnotify, this write will
+// trigger a reload. The reload is idempotent: the in-memory state is updated
+// first, so the reload loads the same state it finds in memory and computes
+// an empty diff.
+func WriteUsers(path string, users map[string]User) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	enc := toml.NewEncoder(f)
+	if err := enc.Encode(users); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("encode users.toml: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("rename temp file: %w", err)
+	}
+	return nil
+}
+
 // LoadRooms reads and parses rooms.toml. Returns a map of room name -> Room.
 func LoadRooms(path string) (map[string]Room, error) {
 	var raw map[string]Room
@@ -212,8 +253,13 @@ func Load(dir string) (*Config, error) {
 		return nil, err
 	}
 
-	// Validate: all user room assignments reference existing rooms
+	// Validate: all user room assignments reference existing rooms.
+	// Retired users' room lists are ignored (should be empty; stale entries
+	// are tolerated so admin mis-edits don't block server startup).
 	for username, user := range users {
+		if user.Retired {
+			continue
+		}
 		for _, room := range user.Rooms {
 			if _, ok := rooms[room]; !ok {
 				return nil, fmt.Errorf("user %q references unknown room %q", username, room)
@@ -221,14 +267,20 @@ func Load(dir string) (*Config, error) {
 		}
 	}
 
-	// Validate: all admin users exist
+	// Validate: all admin users exist and are not retired
 	for _, admin := range server.Server.Admins {
-		if _, ok := users[admin]; !ok {
+		u, ok := users[admin]
+		if !ok {
 			return nil, fmt.Errorf("admin %q not found in users.toml", admin)
+		}
+		if u.Retired {
+			return nil, fmt.Errorf("admin %q is retired — remove from server.toml admins or un-retire", admin)
 		}
 	}
 
 	// Validate: all user keys are Ed25519 and parseable
+	// (retired users are still required to have a valid key — it's preserved
+	// for historical attribution and auditability; it just doesn't authenticate)
 	for username, user := range users {
 		if len(user.Key) == 0 {
 			return nil, fmt.Errorf("user %q has no key", username)

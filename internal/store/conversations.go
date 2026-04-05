@@ -142,3 +142,70 @@ func (s *Store) IsConversationMember(convID, user string) (bool, error) {
 	).Scan(&count)
 	return count > 0, err
 }
+
+// RetireUserFromConversations processes the conversation-membership effects
+// of retiring a user. Returns the list of ALL affected conversation IDs so
+// the caller can broadcast conversation_event leaves to remaining members.
+//
+// Behaviour differs by conversation type:
+//   - Group DMs (3+ current members): the user is removed from
+//     conversation_members. The group continues with the remaining members.
+//     Future wrapped_keys validation on sends will exclude the retired user
+//     naturally.
+//   - 1:1 DMs (exactly 2 current members): the user is KEPT in
+//     conversation_members. This preserves the relationship in the remaining
+//     member's conversation list (fresh clients reconnecting still see
+//     "1:1 with alice" rather than an orphan single-member conversation).
+//     Sends to these conversations must be rejected by the message handlers
+//     via a per-send retirement check (see user_retired error code).
+func (s *Store) RetireUserFromConversations(user string) ([]string, error) {
+	// Collect conv IDs the user is a member of, along with current member count
+	rows, err := s.usersDB.Query(`
+		SELECT cm.conversation_id,
+		       (SELECT COUNT(*) FROM conversation_members cm2 WHERE cm2.conversation_id = cm.conversation_id) AS member_count
+		FROM conversation_members cm
+		WHERE cm.user = ?`,
+		user,
+	)
+	if err != nil {
+		return nil, err
+	}
+	type convInfo struct {
+		id    string
+		count int
+	}
+	var convs []convInfo
+	for rows.Next() {
+		var c convInfo
+		if err := rows.Scan(&c.id, &c.count); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		convs = append(convs, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(convs) == 0 {
+		return nil, nil
+	}
+
+	// Remove user only from group DMs (3+ members). Leave 1:1s intact so the
+	// remaining member still sees the relationship.
+	var affected []string
+	for _, c := range convs {
+		affected = append(affected, c.id)
+		if c.count >= 3 {
+			if _, err := s.usersDB.Exec(`
+				DELETE FROM conversation_members WHERE conversation_id = ? AND user = ?`,
+				c.id, user,
+			); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	return affected, nil
+}

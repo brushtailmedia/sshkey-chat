@@ -229,7 +229,12 @@ Message body limit: 16KB. `file_epoch` records which epoch key was used to encry
 
 // Server -> Client (broadcast to remaining members)
 {"type":"conversation_event","conversation":"conv_xK9mQ2pR","event":"leave","user":"alice"}
+
+// Server -> Client (leave caused by account retirement — new optional "reason" field)
+{"type":"conversation_event","conversation":"conv_xK9mQ2pR","event":"leave","user":"alice","reason":"retirement"}
 ```
+
+The optional `reason` field distinguishes voluntary leaves from retirement-triggered removals so clients can render differently ("alice left the conversation" vs "alice's account was retired"). Clients that don't know the field should ignore it (forward-compat rule).
 
 ### Epoch Key Management
 
@@ -476,23 +481,6 @@ DM files: encrypt with the per-message key from the message that references them
 
 Re-send on every foreground connect (token upsert). Platform is `"ios"` or `"android"`.
 
-### SSH Key Rotation
-
-```json
-// Client connects with OLD key, sends:
-{"type":"key_rotate","new_pubkey":"ssh-ed25519 AAAA...new"}
-
-// Server sends all wrapped room epoch keys:
-{"type":"key_rotate_keys","keys":[{"room":"general","epoch":3,"wrapped_key":"base64..."},...]}
-
-// Client unwraps each with old key, re-wraps with new key, sends:
-{"type":"key_rotate_complete","keys":[{"room":"general","epoch":3,"wrapped_key":"base64...rewrapped"}],"new_pubkey":"ssh-ed25519 AAAA...new"}
-
-// Server swaps key and disconnects. Reconnect with new key.
-```
-
-DM history from before rotation is inaccessible with the new key (wrapped keys are inline per-message, can't be re-wrapped server-side).
-
 ### Server Shutdown
 
 ```json
@@ -507,7 +495,55 @@ Save unsent drafts, show the message, begin reconnect after `reconnect_in` secon
 {"type":"device_revoked","device_id":"dev_macbook_abc","reason":"admin_action"}
 ```
 
-Server disconnects the device and rejects future connections from that device ID.
+Server disconnects the device and rejects future connections from that device ID. Device revocation is scoped to a single client — the user's account remains active on other devices, and the SSH key continues to authenticate from new devices. For identity-level termination (key compromise), see Account Retirement.
+
+### Account Retirement
+
+Ed25519 keys are permanent identities on this server. There is no key rotation. When an account needs to end — lost key, compromised key, retired identity — the account is **retired**: monotonic, irreversible, and client-triggered or admin-triggered.
+
+**Client-initiated (self-service):**
+
+```json
+// Client -> Server (authenticated by the current SSH connection)
+{"type":"retire_me","reason":"self_compromise"}
+```
+
+Valid reasons: `self_compromise` (suspected key theft), `switching_key` (voluntary identity change), `other`. The server authenticates the target from the SSH connection — the message has no `user` field. An attacker with the stolen key can also trigger retirement, but the outcome is the same (the legitimate user needs a new account either way).
+
+**Admin-initiated (out-of-band):** the server operator edits `users.toml` to set `retired = true` on the user's entry, or runs `sshkey-ctl retire-user <name> --reason <reason>`. The server's config watcher detects the change and fires the same downstream events.
+
+**Server broadcasts to peers:**
+
+```json
+// Server -> Client (real-time transition, broadcast to all connected clients)
+{"type":"user_retired","user":"alice","ts":1712345678}
+
+// Server -> Client (on connect, after welcome, listing known retired users visible to this client)
+{"type":"retired_users","users":[{"user":"alice","retired_at":"2026-04-05T14:30:00Z"}]}
+```
+
+Clients use these to render `[retired]` markers on historical messages, mark 1:1 DMs with retired partners as read-only, and exclude retired users from mention completion and new-DM candidates.
+
+**What happens when a user is retired:**
+- The SSH key no longer authenticates (handshake rejected with "account retired")
+- All active sessions for that user are terminated immediately
+- `room_event` leaves are broadcast for every room they were in
+- Epoch rotations are marked for all those rooms (next sender triggers the new key)
+- The user is removed from all group DMs (3+ members), and a `conversation_event` leave with `reason: "retirement"` is broadcast to remaining members
+- The user is kept in 1:1 DM conversation_members (2 members) so the other party retains the conversation relationship in their UI — but sends to that conversation are rejected with `user_retired` error
+- Profile messages for the retired user now include `"retired": true` and `"retired_at": "..."` for clients that connect later
+
+**Profile extensions on retirement:**
+
+```json
+{"type":"profile","user":"alice","display_name":"Alice","pubkey":"ssh-ed25519 ...","key_fingerprint":"SHA256:...","retired":true,"retired_at":"2026-04-05T14:30:00Z"}
+```
+
+The key and fingerprint are still delivered so clients can verify signatures on historical messages from the retired user.
+
+**Send-time enforcement:** `send_dm`, `react` (DM reactions), and `create_dm` reject with `user_retired` error code if any target conversation member is retired. `send` (room messages) is not affected — retired users aren't members of rooms, so their exclusion is automatic.
+
+**See `PROJECT.md` section "Account Retirement"** for the full design rationale, threat model (key compromise vs. device theft vs. rotation), username reuse handling, and the attacker-vs-victim race analysis.
 
 ### Admin Notifications
 
@@ -538,6 +574,7 @@ Delivered only to connected admin clients.
 | `invalid_epoch` | Epoch too old (outside grace window) or not yet confirmed |
 | `unknown_conversation` | Not a member of this conversation |
 | `unknown_room` | Not in this room |
+| `user_retired` | Sender or target of a DM operation has a retired account |
 
 ## Client-Side Storage
 

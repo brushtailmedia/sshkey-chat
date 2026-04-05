@@ -137,10 +137,11 @@ type LeaveConversation struct {
 }
 
 type ConversationEvent struct {
-	Type         string `json:"type"`         // "conversation_event"
+	Type         string `json:"type"`             // "conversation_event"
 	Conversation string `json:"conversation"`
-	Event        string `json:"event"`        // "leave"
+	Event        string `json:"event"`            // "leave"
 	User         string `json:"user"`
+	Reason       string `json:"reason,omitempty"` // optional: "retirement" (leave caused by account retirement)
 }
 
 // Message deletion
@@ -269,6 +270,8 @@ type Profile struct {
 	AvatarID       string `json:"avatar_id,omitempty"`
 	PubKey         string `json:"pubkey"`          // ssh-ed25519 public key
 	KeyFingerprint string `json:"key_fingerprint"` // SHA256:...
+	Retired        bool   `json:"retired,omitempty"`      // true if the account has been retired
+	RetiredAt      string `json:"retired_at,omitempty"`   // RFC3339 timestamp of retirement
 }
 
 // User status
@@ -469,28 +472,38 @@ type ServerShutdown struct {
 	ReconnectIn int    `json:"reconnect_in"` // seconds
 }
 
-// Key rotation
+// Account retirement
 
-type KeyRotate struct {
-	Type      string `json:"type"`       // "key_rotate"
-	NewPubKey string `json:"new_pubkey"` // ssh-ed25519 new public key
+// RetireMe is sent by a client to permanently retire their own account.
+// The request is authenticated by the current SSH connection (the user is
+// holding their key). Retirement is monotonic and irreversible: the key
+// no longer authenticates, the user is removed from rooms and group DMs,
+// and other users are notified via user_retired.
+type RetireMe struct {
+	Type   string `json:"type"`   // "retire_me"
+	Reason string `json:"reason"` // self_compromise | switching_key | other
 }
 
-type KeyRotateKeys struct {
-	Type string          `json:"type"` // "key_rotate_keys"
-	Keys []KeyRotateItem `json:"keys"`
+// UserRetired is broadcast to peers sharing rooms or conversations with
+// the retired user, so clients can update their UI (mark user inactive,
+// render 1:1 DMs as read-only, add [retired] marker to historical messages).
+type UserRetired struct {
+	Type string `json:"type"` // "user_retired"
+	User string `json:"user"`
+	Ts   int64  `json:"ts"`   // unix seconds
 }
 
-type KeyRotateItem struct {
-	Room       string `json:"room"`
-	Epoch      int64  `json:"epoch"`
-	WrappedKey string `json:"wrapped_key"`
+// RetiredUsers is sent on connect (after welcome, alongside profiles) with
+// the list of retired users visible to this client. Allows fresh clients to
+// learn about retirements that happened while they were offline.
+type RetiredUsers struct {
+	Type  string        `json:"type"`  // "retired_users"
+	Users []RetiredUser `json:"users"`
 }
 
-type KeyRotateComplete struct {
-	Type      string          `json:"type"`       // "key_rotate_complete"
-	Keys      []KeyRotateItem `json:"keys"`       // re-wrapped with new key
-	NewPubKey string          `json:"new_pubkey"`
+type RetiredUser struct {
+	User      string `json:"user"`
+	RetiredAt string `json:"retired_at"` // RFC3339
 }
 
 // Errors
@@ -515,6 +528,7 @@ const (
 	ErrInvalidEpoch      = "invalid_epoch"
 	ErrUnknownConversation = "unknown_conversation"
 	ErrUnknownRoom       = "unknown_room"
+	ErrUserRetired       = "user_retired"
 )
 
 // RawMessage is a JSON object that hasn't been decoded into a specific type yet.

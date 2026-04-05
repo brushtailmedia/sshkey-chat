@@ -216,6 +216,16 @@ func (s *Server) authenticateKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh
 			continue
 		}
 		if bytes.Equal(key.Marshal(), parsed.Marshal()) {
+			if user.Retired {
+				s.logger.Info("rejected retired account login",
+					"user", username,
+					"fingerprint", ssh.FingerprintSHA256(key),
+					"remote", conn.RemoteAddr().String(),
+					"retired_at", user.RetiredAt,
+					"retired_reason", user.RetiredReason,
+				)
+				return nil, fmt.Errorf("account retired")
+			}
 			s.logger.Info("key authenticated",
 				"user", username,
 				"fingerprint", ssh.FingerprintSHA256(key),

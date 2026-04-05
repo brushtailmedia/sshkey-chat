@@ -9,7 +9,7 @@ Inspired by [ssh-chat](https://github.com/shazow/ssh-chat).
 ## Features
 
 - **E2E encrypted** -- server stores opaque blobs, never sees message content
-- **SSH identity** -- no accounts, no passwords, your Ed25519 key is your identity
+- **SSH identity** -- no accounts, no passwords, your Ed25519 key is your permanent identity (no key rotation; lost or compromised keys require account retirement + a fresh account)
 - **Rooms** with epoch-based key rotation (forward secrecy, bounded exposure)
 - **DMs and group DMs** with per-message keys (Signal-level forward secrecy)
 - **File sharing** via encrypted binary channel (server can't see filenames, types, or content)
@@ -202,6 +202,8 @@ sshkey-ctl approve --fingerprint FP --name NAME --rooms general  # approve a use
 sshkey-ctl reject --fingerprint FP                    # reject a pending key
 sshkey-ctl list-users                                 # list all users
 sshkey-ctl remove-user carol                          # remove a user
+sshkey-ctl retire-user bob --reason key_lost          # permanently retire an account (bob can no longer authenticate)
+sshkey-ctl list-retired                               # list retired accounts
 sshkey-ctl revoke-device --user alice --device dev_x  # revoke a stolen device
 sshkey-ctl restore-device --user alice --device dev_x # re-authorize a device
 sshkey-ctl host-key                                   # print server host key fingerprint
@@ -244,7 +246,7 @@ Client connects via SSH with Ed25519 key
 | **Profiles** | `set_profile`, `set_status` | `profile`, `presence` |
 | **Files** | `upload_start`, `download` | `upload_ready`, `upload_complete`, `download_start`, `download_complete` |
 | **Push** | `push_register` | `push_registered` |
-| **Key rotation** | `key_rotate`, `key_rotate_complete` | `key_rotate_keys` |
+| **Retirement** | `retire_me` | `user_retired`, `retired_users` |
 | **Admin** | -- | `admin_notify`, `device_revoked`, `server_shutdown` |
 | **Errors** | -- | `error` |
 
