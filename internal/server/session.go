@@ -117,8 +117,17 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 	}
 	s.cfg.RUnlock()
 
-	// TODO: load conversation list from DB
+	// Conversation IDs for the welcome envelope. Rich info (members, names)
+	// arrives separately via the conversation_list message sent just after
+	// welcome in the connect sequence.
 	var conversations []string
+	if s.store != nil {
+		if convs, err := s.store.GetUserConversations(username); err == nil {
+			for _, c := range convs {
+				conversations = append(conversations, c.ID)
+			}
+		}
+	}
 
 	// Step 3: Send welcome
 	pendingSync := clientHello.LastSyncedAt != "" // sync follows if client has a last_synced_at

@@ -364,6 +364,16 @@ Capability: `reactions`
 
 **Encrypted reaction payload:** `{"emoji":"...","target":"msg_abc123","seq":43,"device_id":"dev_..."}`. Verify `target` matches the envelope `id` on decryption.
 
+**Emoji handling is entirely client-side.** The server cannot see the emoji content — it's encrypted inside the `payload` field, same as message bodies. This has several implications:
+
+- **Display aggregation is a client responsibility.** The server streams reaction events; clients decrypt and aggregate by emoji. Display count should be the number of **distinct users** who reacted with a given emoji, not the number of reaction events received. A user who sends the same emoji twice should appear once in the display.
+- **De-duplication is client-enforced.** The server stores each reaction as a separate record keyed by `reaction_id` (server-generated). It does not enforce uniqueness on `(message_id, user, emoji)` because it can't see the emoji. Clients are expected to skip sending a `react` when the user already has a reaction with that emoji on the target message.
+- **Removal uses `reaction_id`.** Clients must track the `reaction_id` of each reaction they care about (especially the current user's own reactions) so they can send `unreact` with the right ID. The recommended client-side index is `(message_id, user, emoji) → []reaction_id`.
+- **Multi-device and race drift.** Two devices for the same user can send a `react` for the same emoji before either sees the server echo. The server will store both, producing a zombie record. Clients should de-duplicate at display time (one user, one emoji → one count) and `unreact` the most recent ID first if asked to remove. Periodic server-side GC of zombie records is not required for correctness.
+- **Emoji normalisation.** Clients should normalise emoji strings before comparing for de-duplication (Unicode variation selectors, skin-tone modifiers, ZWJ sequences). A simple byte-wise equality check over UTF-8 is sufficient for the common cases; clients that want exact agreement with other client implementations should NFC-normalise.
+- **Multiple distinct emojis per user are allowed and expected.** A user can react to the same message with `👍` and `🎉` and `❤️` simultaneously. The model is Slack/Discord-style, not Signal-style (which replaces).
+- **Removal UX.** Clients should expose an explicit "Remove my reaction" action (e.g., context menu entry) rather than relying on re-picking an emoji to toggle. Picking the same emoji twice in the emoji picker should be a no-op, not a removal.
+
 ### Pinned Messages
 
 Rooms only. DMs do not support pins.

@@ -309,6 +309,19 @@ Features are individually negotiated, not tied to a protocol version number. Ser
 - New features are added as new capabilities, not new protocol versions
 - Capabilities are per-device, per-server (see Device Identity below)
 
+**Why the server stays permissive (design decision):**
+
+The server sends every message to every client regardless of negotiated capabilities. Clients filter for display based on their own capability set. This is deliberate:
+
+- **Forward compatibility.** A server can roll out a new feature before all clients have been updated. Old clients silently ignore messages they don't understand (per the forward-compat rule above). A strict server that filtered by capability would have to be upgraded first or clients would see degraded behaviour.
+- **No spoofing attack surface.** A compromised or malicious client cannot downgrade other users by claiming it lacks capabilities it actually has, because capabilities never affect what the server routes.
+- **Simpler server.** No per-message capability lookups in hot paths (message broadcast, reaction fan-out, typing indicators). The server's job is routing; filtering is presentation.
+- **Clients own their UX.** A client can choose to display typing indicators for some rooms but not others, mute presence events per-device, or filter by time of day -- without renegotiating with the server.
+
+The small cost is a modest amount of wasted bandwidth sending `typing` / `presence` / `read` events to clients that don't render them. That cost is negligible relative to actual message traffic.
+
+The `active_capabilities` field in `welcome` is informational -- it records what the client advertised in `client_hello`, so both ends agree on the UX contract, but nothing on the server side enforces it.
+
 ### Device Identity
 
 Each device generates a Nano ID on first launch and stores it locally. Same SSH key on different devices = different `device_id`. Server tracks state per device. **Max 10 devices per user** (configurable in `server.toml`). Server rejects new device registrations past the cap with `device_limit_exceeded` error. User revokes an old device via `sshkey-ctl revoke-device` to make room. This bounds the key wrapping cost per user during epoch rotations.
