@@ -429,6 +429,10 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 		s.handleSetStatus(c, raw)
 	case "retire_me":
 		s.handleRetireMe(c, raw)
+	case "list_devices":
+		s.handleListDevices(c, raw)
+	case "revoke_device":
+		s.handleRevokeDevice(c, raw)
 	case "upload_start":
 		s.handleUploadStart(c, raw)
 	case "download":

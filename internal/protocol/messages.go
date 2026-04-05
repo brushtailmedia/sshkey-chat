@@ -440,6 +440,44 @@ type DeviceRevoked struct {
 	Reason   string `json:"reason"`   // "admin_action"
 }
 
+// Device management (user-scoped; admin uses sshkey-ctl instead)
+
+// ListDevices requests the list of devices registered for the authenticated user.
+type ListDevices struct {
+	Type string `json:"type"` // "list_devices"
+}
+
+// DeviceList is the server's response to ListDevices, listing all devices
+// for the requesting user.
+type DeviceList struct {
+	Type    string       `json:"type"`    // "device_list"
+	Devices []DeviceInfo `json:"devices"`
+}
+
+type DeviceInfo struct {
+	DeviceID     string `json:"device_id"`
+	LastSyncedAt string `json:"last_synced_at,omitempty"`
+	CreatedAt    string `json:"created_at"`
+	Current      bool   `json:"current,omitempty"` // true if this is the requesting device
+	Revoked      bool   `json:"revoked,omitempty"` // true if the device has been revoked
+}
+
+// RevokeDevice asks the server to revoke one of the authenticated user's
+// own devices (not this one — for that, Close the client directly). The
+// server rejects if the device_id doesn't belong to the authenticated user.
+type RevokeDevice struct {
+	Type     string `json:"type"`      // "revoke_device"
+	DeviceID string `json:"device_id"` // device to revoke
+}
+
+// DeviceRevokeResult is the server's response to RevokeDevice.
+type DeviceRevokeResult struct {
+	Type     string `json:"type"`      // "device_revoke_result"
+	DeviceID string `json:"device_id"`
+	Success  bool   `json:"success"`
+	Error    string `json:"error,omitempty"`
+}
+
 // Admin notifications
 
 type AdminNotify struct {
