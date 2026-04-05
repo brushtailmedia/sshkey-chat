@@ -193,7 +193,7 @@ Every room message and DM is split into:
 }
 ```
 
-Message body limit: 16KB. `file_epoch` records which epoch key was used to encrypt the file (rooms only).
+Message body limit: 16KB. `file_epoch` records which epoch key was used to encrypt the file (rooms only). DM attachments use `file_key` instead — see File Transfer below.
 
 ### Direct Messages
 
@@ -476,8 +476,28 @@ id_len (1 byte) | id (variable) | data_len (8 bytes, big-endian uint64) | data (
 
 The `id` is the `upload_id` (client -> server) or `file_id` (server -> client). Read `id_len`, then `id`, then `data_len`, then exactly `data_len` bytes.
 
-Room files: encrypt with epoch key, record `file_epoch` in the message payload.
-DM files: encrypt with the per-message key from the message that references them.
+**Room files:** encrypt with the current epoch key. Record `file_epoch` in the attachment metadata so recipients know which epoch key decrypts the file (usually matches the message's epoch; only differs during epoch transitions).
+
+**DM files:** encrypt each attachment with its own fresh per-file key `K_file` and store `K_file` (base64) in the attachment's `file_key` field inside the encrypted message payload. Recipients decrypt the DM payload (using their wrapped `K_msg`), read `file_key` off each attachment, then download and decrypt the file bytes independently. Design properties:
+
+- **Per-file keys, decoupled from the message key.** `K_msg` protects the payload (including each `K_file`); each `K_file` protects only its file. An attacker who recovers `K_msg` still must separately recover each `K_file` — though in practice both live inside the same encrypted envelope.
+- **Upload and send are independent operations.** You can upload a file, get back `(file_id, K_file)`, then build the message whenever you're ready (or attach the same file to a later message by re-referencing its `(file_id, K_file)` pair).
+- **Each attachment is self-contained.** A recipient re-opening an attachment months later only needs the decrypted payload — no envelope key rederivation.
+- **The same `Attachment` struct serves rooms and DMs.** Rooms populate `file_epoch`; DMs populate `file_key`. Both fields are `omitempty`.
+- **Forward secrecy:** compromise of a single `K_file` exposes only that one file. Compromise of `K_msg` exposes the payload and every `K_file` it carries (since they live inside the payload) — so attack surfaces are equivalent for the common case, but per-file isolation means keys age independently and can be deleted piecewise.
+
+Decrypted payload for a DM message with an attachment:
+
+```json
+{
+  "body": "here's the thing",
+  "seq": 17,
+  "device_id": "dev_V1StGXR8_Z5jdHi6B-myT",
+  "attachments": [{"file_id":"file_abc","name":"pic.jpg","size":45000,"mime":"image/jpeg","file_key":"base64_K_file"}]
+}
+```
+
+For room messages with attachments, the payload includes `file_epoch` on each attachment instead of `file_key` (see Message Types → Room Messages).
 
 ### Push Registration
 

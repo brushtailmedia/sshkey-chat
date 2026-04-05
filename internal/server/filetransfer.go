@@ -121,6 +121,8 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 			s.logger.Error("download: write failed", "file", msg.FileID, "error", err)
 			return
 		}
+	} else {
+		s.logger.Error("download: no binary channel", "user", c.Username)
 	}
 
 	c.Encoder.Encode(protocol.DownloadComplete{
