@@ -754,6 +754,12 @@ Metadata on Channel 1 (JSON), upload bytes on Channel 3, download bytes on Chann
 {"type":"upload_complete","upload_id":"up_001","file_id":"file_xyz"}
 ```
 
+If the server rejects the `upload_start` (rate limit, size limit, etc.) it replies with `upload_error` instead of `upload_ready`. The `upload_id` is echoed so clients can fail the matching pending upload instead of hanging:
+
+```json
+{"type":"upload_error","upload_id":"up_001","code":"rate_limited","message":"Upload rate limit exceeded"}
+```
+
 Then the client sends a message referencing the `file_id`. Upload first, message second. Multiple files can be uploaded before sending one message with several attachments. The attachment metadata (filename, mime type, thumbnail ID, and for DMs the `file_key`) is inside the encrypted message payload -- the server never sees it.
 
 **Attachment thumbnails:** the **sender** generates a small thumbnail for images and videos before upload, encrypts it, and uploads as a separate file. Both the full file and thumbnail are opaque blobs to the server. Clients download the thumbnail first (tiny, instant), full file on demand.
@@ -788,6 +794,12 @@ Then the client sends a message referencing the `file_id`. Upload first, message
 
 // Channel 1: Server -> Client
 {"type":"download_complete","file_id":"file_xyz"}
+```
+
+If the server rejects the download (file missing, no channel open, open failed) it replies with `download_error` and nothing is written to Channel 2. Clients MUST wait for either `download_start` or `download_error` on Channel 1 before attempting to read from Channel 2 — reading speculatively would block forever on a rejected download.
+
+```json
+{"type":"download_error","file_id":"file_xyz","code":"not_found","message":"File not found: file_xyz"}
 ```
 
 Clients can auto-download (images under a size threshold) or prompt the user (large files). Client-side setting. The client knows the mime type and filename from the decrypted message payload, not from the server.
@@ -1099,7 +1111,7 @@ max_per_user = 10                 # max concurrent devices per user (bounds key 
 
 [rate_limits]
 messages_per_second = 5          # per user, across all rooms/conversations
-uploads_per_minute = 10          # per user
+uploads_per_minute = 60          # per user (burst 5, refill 1/sec)
 connections_per_minute = 10      # per SSH key fingerprint (prevents reconnect storms)
 failed_auth_per_minute = 5       # per IP (brute force protection)
 typing_per_second = 1            # per user (throttle noisy typing indicators)
@@ -1500,7 +1512,7 @@ Epoch 3 (key_c): messages 201-300   ← current epoch, key_c only exists in clie
 - **Member joins during rotation:** Alice is wrapping epoch N+1 (doesn't include Carol who just joined). Alice completes N+1. Carol triggers her own rotation on join (epoch N+2). Two back-to-back rotations. Any messages in the brief N+1 window are pre-Carol (covered by `first_seen`). Correct behaviour, not a bug.
 - **Epoch transition -- messages in flight with old key:** Bob hasn't received epoch 4 yet and sends a message with epoch 3. This is valid -- Bob legitimately has epoch 3. Server accepts messages from both the current and previous epoch (two-epoch grace window). Clients must decrypt messages from adjacent epochs during transition. Client switches to the new epoch for **sending** as soon as it receives the new key. Client accepts **receiving** from current and previous epoch. Previous means exactly one epoch back -- anything older is rejected.
 - **Epoch replay attack:** server replays an old `epoch_rotate` to roll a conversation back to a compromised key. Clients enforce monotonic epoch numbers -- any `epoch_key` or `epoch_rotate` with an epoch ≤ the client's current epoch for that conversation is rejected. Epoch numbers only go up. Epoch keys bundled with `sync_batch` and `history_result` are for historical decryption only and do not update the client's current epoch.
-- **File upload epoch mismatch:** Alice uploads a file encrypted with epoch 3. Before sending the message, the room rotates to epoch 4. The message payload is epoch 4, the file bytes are epoch 3. Fix: the encrypted payload records `file_epoch` per attachment. Recipients use the correct epoch key to decrypt each file. Both keys exist in their local DB. (DM files don't have this problem -- the file is encrypted with the per-message key from the message that references it.)
+- **File upload epoch mismatch:** Alice uploads a file encrypted with epoch 3. Before sending the message, the room rotates to epoch 4. The message payload is epoch 4, the file bytes are epoch 3. Fix: the encrypted payload records `file_epoch` per attachment. Recipients use the correct epoch key to decrypt each file. Both keys exist in their local DB. (DM files don't have this problem -- each DM attachment is encrypted with its own fresh `K_file` carried in the payload's `file_key` field, independent of any epoch.)
 
 ```json
 // Server -> Client (you triggered rotation, generate the new key)

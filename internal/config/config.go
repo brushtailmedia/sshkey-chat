@@ -146,7 +146,7 @@ func DefaultServerConfig() ServerConfig {
 		},
 		RateLimits: RateLimitsSection{
 			MessagesPerSecond:    5,
-			UploadsPerMinute:     10,
+			UploadsPerMinute:     60,
 			ConnectionsPerMinute: 10,
 			FailedAuthPerMinute:  5,
 			TypingPerSecond:      1,

@@ -124,7 +124,7 @@ max_per_user = 10
 
 [rate_limits]
 messages_per_second = 5
-uploads_per_minute = 10
+uploads_per_minute = 60
 history_per_minute = 50
 ```
 
@@ -246,7 +246,7 @@ Client connects via SSH with Ed25519 key
 | **Reactions** | `react`, `unreact` | `reaction`, `reaction_removed` |
 | **Pins** | `pin`, `unpin` | `pinned`, `unpinned`, `pins` |
 | **Profiles** | `set_profile`, `set_status` | `profile`, `presence` |
-| **Files** | `upload_start`, `download` | `upload_ready`, `upload_complete`, `download_start`, `download_complete` |
+| **Files** | `upload_start`, `download` | `upload_ready`, `upload_complete`, `upload_error`, `download_start`, `download_complete`, `download_error` |
 | **Push** | `push_register` | `push_registered` |
 | **Retirement** | `retire_me` | `user_retired`, `retired_users` |
 | **Device management** | `list_devices`, `revoke_device` | `device_list`, `device_revoke_result` |

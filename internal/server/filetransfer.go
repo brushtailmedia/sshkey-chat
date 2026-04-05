@@ -42,14 +42,20 @@ func newFileManager(dataDir string) *fileManager {
 
 // handleUploadStart processes an upload_start request on Channel 1.
 func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
-	if !s.limiter.allowPerMinute("upload:"+c.Username, s.cfg.Server.RateLimits.UploadsPerMinute) {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Upload rate limit exceeded"})
+	var msg protocol.UploadStart
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		// No upload_id parsed yet — fall back to generic error
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed upload_start"})
 		return
 	}
 
-	var msg protocol.UploadStart
-	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed upload_start"})
+	if !s.limiter.allowPerMinute("upload:"+c.Username, s.cfg.Server.RateLimits.UploadsPerMinute) {
+		c.Encoder.Encode(protocol.UploadError{
+			Type:     "upload_error",
+			UploadID: msg.UploadID,
+			Code:     protocol.ErrRateLimited,
+			Message:  "Upload rate limit exceeded",
+		})
 		return
 	}
 
@@ -57,10 +63,11 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 	// TODO: parse max_file_size from config string to bytes
 	maxSize := int64(50 * 1024 * 1024) // 50MB default
 	if msg.Size > maxSize {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUploadTooLarge,
-			Message: fmt.Sprintf("File exceeds maximum size (%d bytes)", maxSize),
+		c.Encoder.Encode(protocol.UploadError{
+			Type:     "upload_error",
+			UploadID: msg.UploadID,
+			Code:     protocol.ErrUploadTooLarge,
+			Message:  fmt.Sprintf("File exceeds maximum size (%d bytes)", maxSize),
 		})
 		return
 	}
@@ -94,13 +101,38 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 	filePath := filepath.Join(s.files.dir, msg.FileID)
 	info, err := os.Stat(filePath)
 	if err != nil {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
+		c.Encoder.Encode(protocol.DownloadError{
+			Type:    "download_error",
+			FileID:  msg.FileID,
 			Code:    "not_found",
 			Message: "File not found: " + msg.FileID,
 		})
 		return
 	}
+
+	if c.DownloadChannel == nil {
+		s.logger.Error("download: no download channel", "user", c.Username)
+		c.Encoder.Encode(protocol.DownloadError{
+			Type:    "download_error",
+			FileID:  msg.FileID,
+			Code:    "no_channel",
+			Message: "Download channel not open",
+		})
+		return
+	}
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		s.logger.Error("download: open failed", "file", msg.FileID, "error", err)
+		c.Encoder.Encode(protocol.DownloadError{
+			Type:    "download_error",
+			FileID:  msg.FileID,
+			Code:    "open_failed",
+			Message: "Server could not open file",
+		})
+		return
+	}
+	defer f.Close()
 
 	c.Encoder.Encode(protocol.DownloadStart{
 		Type:   "download_start",
@@ -108,21 +140,14 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 		Size:   info.Size(),
 	})
 
-	// Send file bytes on Channel 2 (download channel)
-	if c.DownloadChannel != nil {
-		f, err := os.Open(filePath)
-		if err != nil {
-			s.logger.Error("download: open failed", "file", msg.FileID, "error", err)
-			return
-		}
-		defer f.Close()
-
-		if err := writeBinaryFrame(c.DownloadChannel, msg.FileID, f, info.Size()); err != nil {
-			s.logger.Error("download: write failed", "file", msg.FileID, "error", err)
-			return
-		}
-	} else {
-		s.logger.Error("download: no download channel", "user", c.Username)
+	if err := writeBinaryFrame(c.DownloadChannel, msg.FileID, f, info.Size()); err != nil {
+		s.logger.Error("download: write failed", "file", msg.FileID, "error", err)
+		// Can't signal via Channel 1 anymore — the client is mid-read on
+		// Channel 2 and the binary frame is partial/corrupt. Closing the
+		// download channel is the only way to abort cleanly, but that
+		// would tear down other concurrent downloads too. Log and hope
+		// the client times out (SSH layer will close on connection drop).
+		return
 	}
 
 	c.Encoder.Encode(protocol.DownloadComplete{

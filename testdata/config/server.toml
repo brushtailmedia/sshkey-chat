@@ -24,7 +24,7 @@ max_per_user = 10
 
 [rate_limits]
 messages_per_second = 5
-uploads_per_minute = 10
+uploads_per_minute = 6000
 connections_per_minute = 10
 failed_auth_per_minute = 5
 typing_per_second = 1

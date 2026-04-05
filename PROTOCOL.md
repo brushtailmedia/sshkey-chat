@@ -461,6 +461,13 @@ Metadata on Channel 1, raw bytes on Channel 2 (downloads) or Channel 3 (uploads)
 {"type":"upload_complete","upload_id":"up_001","file_id":"file_xyz"}
 ```
 
+If the server rejects an `upload_start` (rate limit, size limit, etc.), it replies with `upload_error` instead of `upload_ready`. The message carries the client's `upload_id` so the client can fail that specific pending upload instead of hanging waiting for `upload_ready`:
+
+```json
+// Channel 1: Server -> Client (rejection)
+{"type":"upload_error","upload_id":"up_001","code":"rate_limited","message":"Upload rate limit exceeded"}
+```
+
 Then send a message referencing the `file_id`. Upload first, message second.
 
 ```json
@@ -470,6 +477,15 @@ Then send a message referencing the `file_id`. Upload first, message second.
 // Channel 2: Server -> Client (binary frame)
 {"type":"download_complete","file_id":"file_xyz"}
 ```
+
+Clients MUST wait for `download_start` on Channel 1 before reading from Channel 2. If the server rejects the download (file not found, no channel open, open failed) it replies with `download_error` carrying the `file_id` and nothing is ever written to Channel 2:
+
+```json
+// Channel 1: Server -> Client (rejection — no binary frame follows)
+{"type":"download_error","file_id":"file_xyz","code":"not_found","message":"File not found: file_xyz"}
+```
+
+Error codes: `not_found`, `no_channel`, `open_failed`.
 
 **Binary frame format (Channels 2 and 3):**
 

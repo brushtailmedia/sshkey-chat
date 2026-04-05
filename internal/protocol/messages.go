@@ -413,6 +413,17 @@ type UploadComplete struct {
 	FileID   string `json:"file_id"`   // server-assigned, file_ prefix
 }
 
+// UploadError is sent when the server rejects an upload_start (rate limit,
+// size limit, etc.). Clients match on UploadID to fail the pending upload
+// instead of waiting forever for upload_ready. Code matches the protocol
+// error codes (Err* constants).
+type UploadError struct {
+	Type     string `json:"type"`      // "upload_error"
+	UploadID string `json:"upload_id"`
+	Code     string `json:"code"`
+	Message  string `json:"message"`
+}
+
 type Download struct {
 	Type   string `json:"type"`   // "download"
 	FileID string `json:"file_id"`
@@ -427,6 +438,17 @@ type DownloadStart struct {
 type DownloadComplete struct {
 	Type   string `json:"type"`   // "download_complete"
 	FileID string `json:"file_id"`
+}
+
+// DownloadError is sent when the server rejects a download request (file
+// not found, storage failure, missing channel, etc.). Clients match on
+// FileID to fail the pending download instead of waiting forever for
+// binary frames on Channel 2.
+type DownloadError struct {
+	Type    string `json:"type"`    // "download_error"
+	FileID  string `json:"file_id"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 // Message signatures (capability: signatures)
