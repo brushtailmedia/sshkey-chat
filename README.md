@@ -1,6 +1,6 @@
 # sshkey-chat
 
-Work in Progress - This project is not yet feature complete or stable. Expect breaking changes until v1.0.
+Functional Work in Progress - Expect breaking changes until v1.0.
 
 Private messaging server over SSH with end-to-end encryption. No accounts, no passwords -- identity is your SSH key.
 
