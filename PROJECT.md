@@ -9,7 +9,7 @@ Inspired by [shazow/ssh-chat](https://github.com/shazow/ssh-chat). Credit is in 
 **Binaries:**
 - `sshkey-server` -- the chat server
 - `sshkey-ctl` -- local admin tool
-- `sshkey-chat` -- terminal client (Go + Ghostty + Bubble Tea)
+- `sshkey-chat` -- terminal client (Go + Bubble Tea + rasterm)
 - `sshkey-app` -- GUI client (Rust + egui)
 
 ---
@@ -1679,7 +1679,7 @@ Two reference client apps in two languages. The server protocol is well-document
 ```
 ┌──────────────────────┐  ┌──────────────────────────────┐
 │ Terminal client       │  │ GUI client                    │
-│ (Ghostty + Bubble Tea)│  │ (egui)                        │
+│ (Bubble Tea + rasterm)│  │ (egui)                        │
 ├──────────────────────┤  ├──────────────────────────────┤
 │ Go core library       │  │ Rust core library              │
 │ x/crypto/ssh          │  │ russh · rusqlite · ring        │

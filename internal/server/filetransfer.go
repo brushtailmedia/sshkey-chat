@@ -12,8 +12,8 @@ import (
 	"golang.org/x/crypto/blake2b"
 	"golang.org/x/crypto/ssh"
 
-	"github.com/brushtailmedia/sshkey/internal/config"
-	"github.com/brushtailmedia/sshkey/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/config"
+	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 )
 
 // contentHash computes a BLAKE2b-256 hash in tagged format.

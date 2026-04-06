@@ -10,8 +10,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/brushtailmedia/sshkey/internal/protocol"
-	"github.com/brushtailmedia/sshkey/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
 
 const maxPayloadBytes = 16 * 1024 // 16KB max message body

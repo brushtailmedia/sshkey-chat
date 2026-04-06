@@ -3,7 +3,7 @@ package server
 import (
 	"encoding/json"
 
-	"github.com/brushtailmedia/sshkey/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 )
 
 // handlePushRegister processes a push token registration.

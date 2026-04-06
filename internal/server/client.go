@@ -3,7 +3,7 @@ package server
 import (
 	"golang.org/x/crypto/ssh"
 
-	"github.com/brushtailmedia/sshkey/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 )
 
 // Client represents a connected client session.

@@ -1,0 +1,55 @@
+version: 2
+
+project_name: sshkey-chat
+
+builds:
+  - id: sshkey-server
+    main: ./cmd/sshkey-server
+    binary: sshkey-server
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+  - id: sshkey-ctl
+    main: ./cmd/sshkey-ctl
+    binary: sshkey-ctl
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - id: default
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+      - CHANGELOG.md
+      - PROTOCOL.md
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  use: github-native
+
+release:
+  github:
+    owner: brushtailmedia
+    name: sshkey-chat
+  draft: true
+  prerelease: auto

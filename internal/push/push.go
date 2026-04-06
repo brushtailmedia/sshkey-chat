@@ -6,7 +6,7 @@ package push
 import (
 	"log/slog"
 
-	"github.com/brushtailmedia/sshkey/internal/config"
+	"github.com/brushtailmedia/sshkey-chat/internal/config"
 )
 
 // Sender sends a push notification to a device token.

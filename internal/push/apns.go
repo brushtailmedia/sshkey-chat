@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/brushtailmedia/sshkey/internal/config"
+	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/golang-jwt/jwt/v5"
 )
 

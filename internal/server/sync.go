@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/brushtailmedia/sshkey/internal/protocol"
-	"github.com/brushtailmedia/sshkey/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
 
 // sendSync sends sync batches to a reconnecting client.

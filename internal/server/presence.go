@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/brushtailmedia/sshkey/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 )
 
 // broadcastPresence sends presence updates when a user connects or disconnects.

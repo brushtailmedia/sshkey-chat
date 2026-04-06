@@ -430,7 +430,7 @@ sshkey-chat/
 
 | Repo | Description |
 |---|---|
-| [sshkey-chat](https://github.com/brushtailmedia/sshkey) | Server + admin tool + Go core library (this repo) |
+| [sshkey-chat](https://github.com/brushtailmedia/sshkey-chat) | Server + admin tool + Go core library (this repo) |
 | [sshkey-term](https://github.com/brushtailmedia/sshkey-term) | Terminal client (Go + Bubble Tea + rasterm) |
 | [sshkey-app](https://github.com/brushtailmedia/sshkey-app) | Desktop + mobile GUI client (Rust + egui) |
 

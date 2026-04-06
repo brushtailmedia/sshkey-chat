@@ -16,9 +16,9 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/brushtailmedia/sshkey/internal/config"
-	"github.com/brushtailmedia/sshkey/internal/protocol"
-	"github.com/brushtailmedia/sshkey/internal/server"
+	"github.com/brushtailmedia/sshkey-chat/internal/config"
+	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/server"
 )
 
 // Test fixture keys generated once per TestMain run. Written to /tmp for

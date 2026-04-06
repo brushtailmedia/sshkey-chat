@@ -12,8 +12,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/brushtailmedia/sshkey/internal/config"
-	"github.com/brushtailmedia/sshkey/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/config"
+	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
 
 func generateCLIID(prefix string) string {

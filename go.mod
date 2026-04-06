@@ -1,4 +1,4 @@
-module github.com/brushtailmedia/sshkey
+module github.com/brushtailmedia/sshkey-chat
 
 go 1.25.0
 

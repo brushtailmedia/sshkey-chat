@@ -7,8 +7,8 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/brushtailmedia/sshkey/internal/config"
-	"github.com/brushtailmedia/sshkey/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/config"
+	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 )
 
 // watchConfig starts watching config files for changes and reloads on modification.

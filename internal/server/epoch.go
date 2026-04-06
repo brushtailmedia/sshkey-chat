@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/brushtailmedia/sshkey/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 )
 
 // roomEpochState tracks epoch rotation state for a single room.
