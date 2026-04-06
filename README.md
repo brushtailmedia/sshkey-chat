@@ -329,6 +329,18 @@ CREATE TABLE pending_keys (
 CREATE TABLE profiles (
     user TEXT PRIMARY KEY, display_name TEXT, avatar_id TEXT, status_text TEXT
 );
+
+-- File content hashes (BLAKE2b-256, verified on upload/download)
+CREATE TABLE file_hashes (
+    file_id TEXT PRIMARY KEY, content_hash TEXT NOT NULL, size INTEGER NOT NULL
+);
+
+-- Performance indexes (per-connect query paths)
+CREATE INDEX idx_epoch_keys_room_user_epoch ON epoch_keys(room, user, epoch);
+CREATE INDEX idx_epoch_keys_user ON epoch_keys(user, room, epoch);
+CREATE INDEX idx_conversation_members_user ON conversation_members(user, conversation_id);
+CREATE INDEX idx_devices_last_synced ON devices(last_synced) WHERE last_synced IS NOT NULL;
+CREATE INDEX idx_push_tokens_user_active ON push_tokens(user, active);
 ```
 
 ### Schema: room/conversation DBs
@@ -351,6 +363,12 @@ CREATE TABLE reactions (
 CREATE TABLE pins (
     message_id TEXT PRIMARY KEY, pinned_by TEXT, ts INTEGER
 );
+
+-- Performance indexes
+CREATE INDEX idx_messages_ts ON messages(ts);
+CREATE INDEX idx_messages_sender ON messages(sender);
+CREATE INDEX idx_messages_not_deleted ON messages(deleted) WHERE deleted = 0;
+CREATE INDEX idx_reactions_message ON reactions(message_id);
 ```
 
 ## Config hot-reload

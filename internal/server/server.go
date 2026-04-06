@@ -67,6 +67,10 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		s.store = st
 		s.files = newFileManager(dir)
 		s.audit = newAuditLog(dir)
+
+		// Remove orphan files from crashed uploads (files on disk with
+		// no hash record in the DB — they never completed successfully)
+		s.cleanOrphanFiles()
 	}
 
 	// Initialize push relay (nil if not configured)

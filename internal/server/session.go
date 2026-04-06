@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -212,6 +213,18 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 		s.mu.Lock()
 		delete(s.clients, clientHello.DeviceID)
 		s.mu.Unlock()
+
+		// Clean up any pending uploads for this user. If the client
+		// disconnected mid-upload, these entries would leak in the map
+		// and the associated files (if partially written) are cleaned
+		// up by handleBinaryChannel's error path.
+		s.files.mu.Lock()
+		for id, p := range s.files.uploads {
+			if p.user == client.Username {
+				delete(s.files.uploads, id)
+			}
+		}
+		s.files.mu.Unlock()
 	}()
 
 	// Send room list
@@ -379,6 +392,11 @@ func (s *Server) sendProfiles(c *Client) {
 	s.cfg.RLock()
 	defer s.cfg.RUnlock()
 
+	adminSet := make(map[string]bool, len(s.cfg.Server.Server.Admins))
+	for _, a := range s.cfg.Server.Server.Admins {
+		adminSet[a] = true
+	}
+
 	for username := range visible {
 		user, ok := s.cfg.Users[username]
 		if !ok {
@@ -388,12 +406,33 @@ func (s *Server) sendProfiles(c *Client) {
 		if err != nil {
 			continue
 		}
+
+		displayName := user.DisplayName
+		avatarID := ""
+		// Merge stored profile data (avatar, display_name overrides from
+		// set_profile) with config-based defaults. DB values take precedence
+		// for fields users can customize at runtime.
+		if s.store != nil {
+			var dbDisplayName, dbAvatarID sql.NullString
+			s.store.UsersDB().QueryRow(
+				`SELECT display_name, avatar_id FROM profiles WHERE user = ?`,
+				username).Scan(&dbDisplayName, &dbAvatarID)
+			if dbDisplayName.Valid && dbDisplayName.String != "" {
+				displayName = dbDisplayName.String
+			}
+			if dbAvatarID.Valid {
+				avatarID = dbAvatarID.String
+			}
+		}
+
 		c.Encoder.Encode(protocol.Profile{
 			Type:           "profile",
 			User:           username,
-			DisplayName:    user.DisplayName,
+			DisplayName:    displayName,
+			AvatarID:       avatarID,
 			PubKey:         user.Key,
 			KeyFingerprint: ssh.FingerprintSHA256(parsed),
+			Admin:          adminSet[username],
 			Retired:        user.Retired,
 			RetiredAt:      user.RetiredAt,
 		})
@@ -458,6 +497,8 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 		s.handleListDevices(c, raw)
 	case "revoke_device":
 		s.handleRevokeDevice(c, raw)
+	case "list_pending_keys":
+		s.handleListPendingKeys(c)
 	case "upload_start":
 		s.handleUploadStart(c, raw)
 	case "download":
@@ -1222,6 +1263,14 @@ func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	isAdmin := false
+	for _, a := range s.cfg.Server.Server.Admins {
+		if a == c.Username {
+			isAdmin = true
+			break
+		}
+	}
+
 	profile := protocol.Profile{
 		Type:           "profile",
 		User:           c.Username,
@@ -1229,6 +1278,7 @@ func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
 		AvatarID:       msg.AvatarID,
 		PubKey:         user.Key,
 		KeyFingerprint: ssh.FingerprintSHA256(parsed),
+		Admin:          isAdmin,
 	}
 
 	// Broadcast to all users who can see this user
@@ -1350,4 +1400,48 @@ func (s *Server) broadcastToConversationExcept(convID, excludeDevice string, msg
 			client.Encoder.Encode(msg)
 		}
 	}
+}
+
+// handleListPendingKeys returns the list of pending (unapproved) SSH keys.
+// Admin-only — non-admin clients receive an error.
+func (s *Server) handleListPendingKeys(c *Client) {
+	isAdmin := false
+	s.cfg.RLock()
+	for _, a := range s.cfg.Server.Server.Admins {
+		if a == c.Username {
+			isAdmin = true
+			break
+		}
+	}
+	s.cfg.RUnlock()
+
+	if !isAdmin {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrNotAuthorized,
+			Message: "Only admins can list pending keys",
+		})
+		return
+	}
+
+	var keys []protocol.PendingKeyEntry
+	if s.store != nil {
+		rows, err := s.store.UsersDB().Query(
+			`SELECT fingerprint, attempts, first_seen, last_seen
+			 FROM pending_keys ORDER BY last_seen DESC`)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var k protocol.PendingKeyEntry
+				if rows.Scan(&k.Fingerprint, &k.Attempts, &k.FirstSeen, &k.LastSeen) == nil {
+					keys = append(keys, k)
+				}
+			}
+		}
+	}
+
+	c.Encoder.Encode(protocol.PendingKeysList{
+		Type: "pending_keys_list",
+		Keys: keys,
+	})
 }

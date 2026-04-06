@@ -215,6 +215,74 @@ func getMessagesBefore(db *sql.DB, beforeID string, limit int) ([]StoredMessage,
 	return scanMessages(rows)
 }
 
+// StoredReaction represents a reaction as stored on disk.
+type StoredReaction struct {
+	ReactionID  string
+	MessageID   string
+	User        string
+	TS          int64
+	Epoch       int64
+	Payload     string
+	Signature   string
+	WrappedKeys map[string]string // DMs only
+}
+
+// GetRoomReactionsForMessages returns all reactions on the given message IDs from a room DB.
+func (s *Store) GetRoomReactionsForMessages(room string, messageIDs []string) ([]StoredReaction, error) {
+	db, err := s.RoomDB(room)
+	if err != nil {
+		return nil, err
+	}
+	return getReactionsForMessages(db, messageIDs)
+}
+
+// GetConvReactionsForMessages returns all reactions on the given message IDs from a conversation DB.
+func (s *Store) GetConvReactionsForMessages(convID string, messageIDs []string) ([]StoredReaction, error) {
+	db, err := s.ConvDB(convID)
+	if err != nil {
+		return nil, err
+	}
+	return getReactionsForMessages(db, messageIDs)
+}
+
+func getReactionsForMessages(db *sql.DB, messageIDs []string) ([]StoredReaction, error) {
+	if len(messageIDs) == 0 {
+		return nil, nil
+	}
+	// Build placeholders: ?, ?, ?
+	placeholders := strings.Repeat("?,", len(messageIDs))
+	placeholders = placeholders[:len(placeholders)-1] // trim trailing comma
+
+	args := make([]any, len(messageIDs))
+	for i, id := range messageIDs {
+		args[i] = id
+	}
+
+	rows, err := db.Query(`
+		SELECT reaction_id, message_id, user, ts, COALESCE(epoch, 0), payload, COALESCE(signature, ''), COALESCE(wrapped_keys, '')
+		FROM reactions
+		WHERE message_id IN (`+placeholders+`)
+		ORDER BY ts ASC`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var reactions []StoredReaction
+	for rows.Next() {
+		var r StoredReaction
+		var wrappedKeys string
+		if err := rows.Scan(&r.ReactionID, &r.MessageID, &r.User, &r.TS, &r.Epoch, &r.Payload, &r.Signature, &wrappedKeys); err != nil {
+			return nil, err
+		}
+		r.WrappedKeys = decodeMap(wrappedKeys)
+		reactions = append(reactions, r)
+	}
+	return reactions, rows.Err()
+}
+
 // GetEpochRange returns the min and max epoch numbers for messages in a result set.
 func GetEpochRange(msgs []StoredMessage) (int64, int64) {
 	if len(msgs) == 0 {

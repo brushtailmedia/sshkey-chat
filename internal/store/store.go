@@ -82,6 +82,28 @@ func (s *Store) Close() error {
 	return firstErr
 }
 
+// StoreFileHash saves the content hash for a file_id.
+func (s *Store) StoreFileHash(fileID, contentHash string, size int64) error {
+	_, err := s.usersDB.Exec(`
+		INSERT OR REPLACE INTO file_hashes (file_id, content_hash, size)
+		VALUES (?, ?, ?)`,
+		fileID, contentHash, size)
+	return err
+}
+
+// GetFileHash retrieves the content hash for a file_id. Returns ("", nil)
+// if no hash is stored (backwards-compat with files uploaded before hashing).
+func (s *Store) GetFileHash(fileID string) (string, error) {
+	var hash string
+	err := s.usersDB.QueryRow(
+		`SELECT content_hash FROM file_hashes WHERE file_id = ?`,
+		fileID).Scan(&hash)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return hash, err
+}
+
 // openDB opens a SQLite database in WAL mode.
 func (s *Store) openDB(name string) (*sql.DB, error) {
 	path := filepath.Join(s.dir, name)
@@ -248,6 +270,25 @@ func (s *Store) initUsersDB() error {
 			last_seen   TEXT NOT NULL DEFAULT (datetime('now')),
 			PRIMARY KEY (fingerprint)
 		);
+
+		-- File content hashes (BLAKE2b-256 of encrypted bytes, verified on upload/download)
+		CREATE TABLE IF NOT EXISTS file_hashes (
+			file_id      TEXT PRIMARY KEY,
+			content_hash TEXT NOT NULL,
+			size         INTEGER NOT NULL
+		);
+
+		-- Indexes for per-connect query paths (sync, epoch keys, conversations)
+		CREATE INDEX IF NOT EXISTS idx_epoch_keys_room_user_epoch
+			ON epoch_keys(room, user, epoch);
+		CREATE INDEX IF NOT EXISTS idx_epoch_keys_user
+			ON epoch_keys(user, room, epoch);
+		CREATE INDEX IF NOT EXISTS idx_conversation_members_user
+			ON conversation_members(user, conversation_id);
+		CREATE INDEX IF NOT EXISTS idx_devices_last_synced
+			ON devices(last_synced) WHERE last_synced IS NOT NULL AND last_synced != '';
+		CREATE INDEX IF NOT EXISTS idx_push_tokens_user_active
+			ON push_tokens(user, active);
 	`)
 	return err
 }
@@ -269,6 +310,7 @@ func (s *Store) initMessageDB(db *sql.DB) error {
 
 		CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
 		CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender);
+		CREATE INDEX IF NOT EXISTS idx_messages_not_deleted ON messages(deleted) WHERE deleted = 0;
 
 		CREATE TABLE IF NOT EXISTS reactions (
 			reaction_id TEXT PRIMARY KEY,

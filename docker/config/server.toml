@@ -15,7 +15,7 @@ window_days = 7
 history_page_size = 100
 
 [files]
-max_file_size = "50MB"
+max_file_size = "50MB"                  # increase with care — see grace_period below
 max_avatar_size = "256KB"
 allowed_avatar_types = ["image/png", "image/jpeg"]
 
@@ -31,7 +31,9 @@ typing_per_second = 1
 history_per_minute = 50
 
 [shutdown]
-grace_period = "10s"
+grace_period = "10s"                    # time to finish in-flight transfers on shutdown
+                                        # if you increase max_file_size, increase this too
+                                        # rule of thumb: max_file_size / 10 MB/s = minimum grace
 
 [logging]
 level = "info"

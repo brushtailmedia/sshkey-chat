@@ -6,10 +6,41 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/BurntSushi/toml"
 )
+
+// ParseSize parses a human-readable size string like "50MB", "256KB", "1GB"
+// into bytes. Supports KB, MB, GB suffixes (case-insensitive). Plain numbers
+// are treated as bytes.
+func ParseSize(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty size string")
+	}
+
+	s = strings.ToUpper(s)
+	var multiplier int64 = 1
+	if strings.HasSuffix(s, "GB") {
+		multiplier = 1024 * 1024 * 1024
+		s = strings.TrimSuffix(s, "GB")
+	} else if strings.HasSuffix(s, "MB") {
+		multiplier = 1024 * 1024
+		s = strings.TrimSuffix(s, "MB")
+	} else if strings.HasSuffix(s, "KB") {
+		multiplier = 1024
+		s = strings.TrimSuffix(s, "KB")
+	}
+
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size: %q", s)
+	}
+	return n * multiplier, nil
+}
 
 // ServerConfig represents server.toml.
 type ServerConfig struct {

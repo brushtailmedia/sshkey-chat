@@ -449,8 +449,8 @@ Capability: `file_transfer`
 Metadata on Channel 1, raw bytes on Channel 2 (downloads) or Channel 3 (uploads). File content is encrypted client-side before upload.
 
 ```json
-// Channel 1: Client -> Server
-{"type":"upload_start","upload_id":"up_001","size":45000,"room":"general"}
+// Channel 1: Client -> Server (content_hash is required)
+{"type":"upload_start","upload_id":"up_001","size":45000,"content_hash":"blake2b-256:a1b2c3...","room":"general"}
 
 // Channel 1: Server -> Client
 {"type":"upload_ready","upload_id":"up_001"}
@@ -461,31 +461,39 @@ Metadata on Channel 1, raw bytes on Channel 2 (downloads) or Channel 3 (uploads)
 {"type":"upload_complete","upload_id":"up_001","file_id":"file_xyz"}
 ```
 
-If the server rejects an `upload_start` (rate limit, size limit, etc.), it replies with `upload_error` instead of `upload_ready`. The message carries the client's `upload_id` so the client can fail that specific pending upload instead of hanging waiting for `upload_ready`:
+The `content_hash` field is **required**. Format: `blake2b-256:<hex>` — a BLAKE2b-256 hash of the encrypted bytes. The server verifies the hash after receiving the file and rejects on mismatch. The hash is stored and echoed back on downloads so clients can verify integrity before decrypting.
+
+If the server rejects an `upload_start` (rate limit, size limit, missing hash, hash mismatch, etc.), it replies with `upload_error`:
 
 ```json
 // Channel 1: Server -> Client (rejection)
 {"type":"upload_error","upload_id":"up_001","code":"rate_limited","message":"Upload rate limit exceeded"}
 ```
 
+Upload error codes: `rate_limited`, `upload_too_large`, `missing_hash`, `hash_mismatch`, `invalid_message`.
+
 Then send a message referencing the `file_id`. Upload first, message second.
 
 ```json
-// Download
+// Download (client MUST wait for download_start before reading Channel 2)
 {"type":"download","file_id":"file_xyz"}
-{"type":"download_start","file_id":"file_xyz","size":45000}
+{"type":"download_start","file_id":"file_xyz","size":45000,"content_hash":"blake2b-256:a1b2c3..."}
 // Channel 2: Server -> Client (binary frame)
 {"type":"download_complete","file_id":"file_xyz"}
 ```
 
-Clients MUST wait for `download_start` on Channel 1 before reading from Channel 2. If the server rejects the download (file not found, no channel open, open failed) it replies with `download_error` carrying the `file_id` and nothing is ever written to Channel 2:
+Clients MUST wait for `download_start` on Channel 1 before reading from Channel 2. On receipt, hash the received encrypted bytes and compare with `content_hash`. Discard without writing to disk on mismatch.
+
+If the server rejects the download, it replies with `download_error` and nothing is written to Channel 2:
 
 ```json
 // Channel 1: Server -> Client (rejection — no binary frame follows)
 {"type":"download_error","file_id":"file_xyz","code":"not_found","message":"File not found: file_xyz"}
 ```
 
-Error codes: `not_found`, `no_channel`, `open_failed`.
+Download error codes: `not_found`, `no_channel`, `open_failed`.
+
+**Timeout:** Clients should apply a 30-second timeout when waiting for `upload_ready`, `upload_complete`, and `download_start`. If the server doesn't respond within 30 seconds, abort with a timeout error.
 
 **Binary frame format (Channels 2 and 3):**
 

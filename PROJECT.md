@@ -737,12 +737,14 @@ Capability: `file_transfer`
 
 Metadata on Channel 1 (JSON), upload bytes on Channel 3, download bytes on Channel 2. **File content is encrypted client-side** before upload. Room files are encrypted with the epoch key. DM files are encrypted with a fresh per-file key `K_file` that travels inside the encrypted message payload (Design A — see Key Exchange below). The server stores opaque encrypted blobs -- it knows the file ID and size, but not the filename, mime type, or content.
 
+**Content integrity:** Every upload includes a `content_hash` (BLAKE2b-256 of the encrypted bytes). The server verifies the hash on receipt and rejects on mismatch. The hash is stored and echoed on `download_start` so clients can verify before decrypting. This catches truncation, bit rot, and transit corruption. Clients apply a 30-second timeout on upload/download handshake waits to prevent hangs.
+
 ```json
 // Channel 1: Client -> Server (initiate -- no filename or mime, server doesn't need them)
-{"type":"upload_start","upload_id":"up_001","size":45000,"room":"general"}
+{"type":"upload_start","upload_id":"up_001","size":45000,"content_hash":"blake2b-256:a1b2c3...","room":"general"}
 
 // DM / group DM upload:
-{"type":"upload_start","upload_id":"up_002","size":120000,"conversation":"conv_xK9mQ2pR"}
+{"type":"upload_start","upload_id":"up_002","size":120000,"content_hash":"blake2b-256:d4e5f6...","conversation":"conv_xK9mQ2pR"}
 
 // Channel 1: Server -> Client (ready)
 {"type":"upload_ready","upload_id":"up_001"}
@@ -787,7 +789,7 @@ Then the client sends a message referencing the `file_id`. Upload first, message
 {"type":"download","file_id":"file_xyz"}
 
 // Channel 1: Server -> Client (server only knows file_id and size)
-{"type":"download_start","file_id":"file_xyz","size":45000}
+{"type":"download_start","file_id":"file_xyz","size":45000,"content_hash":"blake2b-256:a1b2c3..."}
 
 // Channel 2: Server -> Client (length-prefixed binary frame, see framing above)
 // Encrypted bytes -- client decrypts with the appropriate key (epoch key for rooms, file_key for DMs)
@@ -1102,7 +1104,7 @@ window_days = 7                  # max age of messages in sync window
 history_page_size = 100          # messages per lazy scroll-back page
 
 [files]
-max_file_size = "50MB"
+max_file_size = "50MB"                # if you increase this, also increase grace_period below
 max_avatar_size = "256KB"
 allowed_avatar_types = ["image/png", "image/jpeg"]  # server can only filter unencrypted uploads (avatars)
 
@@ -1118,7 +1120,8 @@ typing_per_second = 1            # per user (throttle noisy typing indicators)
 history_per_minute = 50          # per user (scroll-back pagination)
 
 [shutdown]
-grace_period = "10s"             # time between shutdown signal and forced disconnect
+grace_period = "10s"             # time to finish in-flight transfers on shutdown
+                                 # rule of thumb: max_file_size / 10 MB/s = minimum grace
 ```
 
 ```toml

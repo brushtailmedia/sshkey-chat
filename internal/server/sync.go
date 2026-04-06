@@ -118,12 +118,21 @@ func (s *Server) syncRoom(c *Client, room string, sinceTS int64, limit int) {
 	// Convert to protocol messages
 	protoMsgs := storedToRawMessages(msgs, room, "")
 
+	// Fetch reactions for these messages
+	var protoReactions []json.RawMessage
+	if msgIDs := collectMessageIDs(msgs); len(msgIDs) > 0 {
+		if reactions, err := s.store.GetRoomReactionsForMessages(room, msgIDs); err == nil && len(reactions) > 0 {
+			protoReactions = storedReactionsToRaw(reactions, room, "")
+		}
+	}
+
 	c.Encoder.Encode(protocol.SyncBatch{
 		Type:      "sync_batch",
 		Messages:  protoMsgs,
+		Reactions: protoReactions,
 		EpochKeys: epochKeys,
 		Page:      1,
-		HasMore:   false, // single batch for now; pagination can be added later
+		HasMore:   false,
 	})
 }
 
@@ -142,9 +151,17 @@ func (s *Server) syncConversation(c *Client, convID string, sinceTS int64, limit
 	// DMs carry their own wrapped keys -- no epoch_keys needed
 	protoMsgs := storedToRawMessages(msgs, "", convID)
 
+	var protoReactions []json.RawMessage
+	if msgIDs := collectMessageIDs(msgs); len(msgIDs) > 0 {
+		if reactions, err := s.store.GetConvReactionsForMessages(convID, msgIDs); err == nil && len(reactions) > 0 {
+			protoReactions = storedReactionsToRaw(reactions, "", convID)
+		}
+	}
+
 	c.Encoder.Encode(protocol.SyncBatch{
 		Type:      "sync_batch",
 		Messages:  protoMsgs,
+		Reactions: protoReactions,
 		EpochKeys: nil,
 		Page:      1,
 		HasMore:   false,
@@ -239,10 +256,18 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 			}
 		}
 
+		var roomReactions []json.RawMessage
+		if msgIDs := collectMessageIDs(msgs); len(msgIDs) > 0 {
+			if reactions, err := s.store.GetRoomReactionsForMessages(req.Room, msgIDs); err == nil && len(reactions) > 0 {
+				roomReactions = storedReactionsToRaw(reactions, req.Room, "")
+			}
+		}
+
 		c.Encoder.Encode(protocol.HistoryResult{
 			Type:      "history_result",
 			Room:      req.Room,
 			Messages:  storedToRawMessages(msgs, req.Room, ""),
+			Reactions: roomReactions,
 			EpochKeys: epochKeys,
 			HasMore:   hasMore,
 		})
@@ -269,10 +294,18 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 			msgs = msgs[:limit]
 		}
 
+		var convReactions []json.RawMessage
+		if msgIDs := collectMessageIDs(msgs); len(msgIDs) > 0 {
+			if reactions, err := s.store.GetConvReactionsForMessages(req.Conversation, msgIDs); err == nil && len(reactions) > 0 {
+				convReactions = storedReactionsToRaw(reactions, "", req.Conversation)
+			}
+		}
+
 		c.Encoder.Encode(protocol.HistoryResult{
 			Type:         "history_result",
 			Conversation: req.Conversation,
 			Messages:     storedToRawMessages(msgs, "", req.Conversation),
+			Reactions:    convReactions,
 			HasMore:      hasMore,
 		})
 	}
@@ -280,6 +313,40 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 
 // storedToRawMessages converts stored messages to JSON raw messages for sync/history.
 // Tombstoned messages become "deleted" type messages.
+// collectMessageIDs extracts non-deleted message IDs from a set of stored messages.
+func collectMessageIDs(msgs []store.StoredMessage) []string {
+	ids := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		if !m.Deleted {
+			ids = append(ids, m.ID)
+		}
+	}
+	return ids
+}
+
+// storedReactionsToRaw converts stored reactions to protocol Reaction raw messages.
+func storedReactionsToRaw(reactions []store.StoredReaction, room, conversation string) []json.RawMessage {
+	result := make([]json.RawMessage, 0, len(reactions))
+	for _, r := range reactions {
+		msg := protocol.Reaction{
+			Type:        "reaction",
+			ReactionID:  r.ReactionID,
+			ID:          r.MessageID,
+			Room:        room,
+			Conversation: conversation,
+			User:        r.User,
+			TS:          r.TS,
+			Epoch:       r.Epoch,
+			WrappedKeys: r.WrappedKeys,
+			Payload:     r.Payload,
+			Signature:   r.Signature,
+		}
+		data, _ := json.Marshal(msg)
+		result = append(result, json.RawMessage(data))
+	}
+	return result
+}
+
 func storedToRawMessages(msgs []store.StoredMessage, room, conversation string) []json.RawMessage {
 	result := make([]json.RawMessage, 0, len(msgs))
 

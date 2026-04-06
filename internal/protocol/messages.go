@@ -39,9 +39,10 @@ type Welcome struct {
 // Sync messages
 
 type SyncBatch struct {
-	Type      string          `json:"type"`       // "sync_batch"
-	Messages  []RawMessage    `json:"messages"`   // mixed room + DM messages
-	EpochKeys []SyncEpochKey  `json:"epoch_keys"` // room epoch keys needed for this batch
+	Type      string          `json:"type"`                 // "sync_batch"
+	Messages  []RawMessage    `json:"messages"`             // mixed room + DM messages
+	Reactions []RawMessage    `json:"reactions,omitempty"`   // reactions on the synced messages
+	EpochKeys []SyncEpochKey  `json:"epoch_keys"`           // room epoch keys needed for this batch
 	Page      int             `json:"page"`
 	HasMore   bool            `json:"has_more"`
 }
@@ -270,6 +271,7 @@ type Profile struct {
 	AvatarID       string `json:"avatar_id,omitempty"`
 	PubKey         string `json:"pubkey"`          // ssh-ed25519 public key
 	KeyFingerprint string `json:"key_fingerprint"` // SHA256:...
+	Admin          bool   `json:"admin,omitempty"`        // true if user is a server admin
 	Retired        bool   `json:"retired,omitempty"`      // true if the account has been retired
 	RetiredAt      string `json:"retired_at,omitempty"`   // RFC3339 timestamp of retirement
 }
@@ -353,6 +355,7 @@ type HistoryResult struct {
 	Room         string         `json:"room,omitempty"`
 	Conversation string         `json:"conversation,omitempty"`
 	Messages     []RawMessage   `json:"messages"`
+	Reactions    []RawMessage   `json:"reactions,omitempty"`     // reactions on the returned messages
 	EpochKeys    []SyncEpochKey `json:"epoch_keys,omitempty"`   // rooms only
 	HasMore      bool           `json:"has_more"`
 }
@@ -395,9 +398,10 @@ type EpochConfirmed struct {
 // File transfer
 
 type UploadStart struct {
-	Type         string `json:"type"`                   // "upload_start"
-	UploadID     string `json:"upload_id"`              // client-generated, up_ prefix
-	Size         int64  `json:"size"`                   // bytes
+	Type         string `json:"type"`                        // "upload_start"
+	UploadID     string `json:"upload_id"`                   // client-generated, up_ prefix
+	Size         int64  `json:"size"`                        // bytes (encrypted)
+	ContentHash  string `json:"content_hash"`      // "blake2b-256:<hex>" of encrypted bytes
 	Room         string `json:"room,omitempty"`
 	Conversation string `json:"conversation,omitempty"`
 }
@@ -430,9 +434,10 @@ type Download struct {
 }
 
 type DownloadStart struct {
-	Type   string `json:"type"`   // "download_start"
-	FileID string `json:"file_id"`
-	Size   int64  `json:"size"`
+	Type        string `json:"type"`                    // "download_start"
+	FileID      string `json:"file_id"`
+	Size        int64  `json:"size"`
+	ContentHash string `json:"content_hash"`  // "blake2b-256:<hex>" of encrypted bytes
 }
 
 type DownloadComplete struct {
@@ -508,6 +513,24 @@ type AdminNotify struct {
 	Fingerprint string `json:"fingerprint"`
 	Attempts    int    `json:"attempts"`
 	FirstSeen   string `json:"first_seen"`  // ISO 8601
+}
+
+// Pending keys management (admin-only)
+
+type ListPendingKeys struct {
+	Type string `json:"type"` // "list_pending_keys"
+}
+
+type PendingKeyEntry struct {
+	Fingerprint string `json:"fingerprint"`
+	Attempts    int    `json:"attempts"`
+	FirstSeen   string `json:"first_seen"`
+	LastSeen    string `json:"last_seen"`
+}
+
+type PendingKeysList struct {
+	Type string            `json:"type"` // "pending_keys_list"
+	Keys []PendingKeyEntry `json:"keys"`
 }
 
 // Mobile push registration
