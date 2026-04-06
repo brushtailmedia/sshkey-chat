@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/BurntSushi/toml"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/brushtailmedia/sshkey/internal/config"
@@ -82,6 +81,12 @@ func run() error {
 		return cmdRevokeDevice(dataDir, cmdArgs)
 	case "restore-device":
 		return cmdRestoreDevice(dataDir, cmdArgs)
+	case "add-to-room":
+		return cmdAddToRoom(configDir, cmdArgs)
+	case "remove-from-room":
+		return cmdRemoveFromRoom(configDir, cmdArgs)
+	case "status":
+		return cmdStatus(configDir, dataDir)
 	case "host-key":
 		return cmdHostKey(configDir)
 	case "purge":
@@ -105,8 +110,11 @@ Commands:
   remove-user NAME                        Remove a user
   retire-user NAME [--reason REASON]      Retire an account (permanent, for lost keys or compromise)
   list-retired                            List retired accounts
+  add-to-room --user USER --room ROOM     Add user to a room
+  remove-from-room --user USER --room ROOM  Remove user from a room
   revoke-device --user USER --device DEV  Revoke a device
   restore-device --user USER --device DEV Restore a revoked device
+  status                                  Show server overview (users, rooms, data)
   host-key                                Print server host key fingerprint
   purge --older-than DURATION [--dry-run]  Purge old messages and vacuum DBs`)
 	return nil
@@ -156,6 +164,9 @@ func cmdApprove(configDir string, args []string) error {
 
 	// Extract display name from key comment if --name not provided
 	parts := strings.SplitN(strings.TrimSpace(key), " ", 3)
+	if len(parts) < 2 {
+		return fmt.Errorf("malformed key: expected at least \"type base64\"")
+	}
 	if len(parts) == 3 && displayName == "" {
 		displayName = strings.TrimSpace(parts[2])
 	}
@@ -166,12 +177,38 @@ func cmdApprove(configDir string, args []string) error {
 	// Strip comment from key for storage
 	keyLine := parts[0] + " " + parts[1]
 
-	// Check display name uniqueness against existing users
+	// Check against existing users
 	usersPath := filepath.Join(configDir, "users.toml")
-	if existingUsers, err := config.LoadUsers(usersPath); err == nil {
-		for _, user := range existingUsers {
-			if strings.EqualFold(user.DisplayName, displayName) {
-				return fmt.Errorf("display name %q is already in use. Choose a different name with --name.", displayName)
+	existingUsers, _ := config.LoadUsers(usersPath)
+
+	// Check display name uniqueness
+	for _, user := range existingUsers {
+		if strings.EqualFold(user.DisplayName, displayName) {
+			return fmt.Errorf("display name %q is already in use. Choose a different name with --name.", displayName)
+		}
+	}
+
+	// Check for duplicate SSH key (same key bytes already assigned to another user)
+	parsedBytes := parsed.Marshal()
+	for username, user := range existingUsers {
+		existingParsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(user.Key))
+		if err != nil {
+			continue
+		}
+		if string(existingParsed.Marshal()) == string(parsedBytes) {
+			return fmt.Errorf("this SSH key is already assigned to user %s (%s). Each key can only belong to one account.", user.DisplayName, username)
+		}
+	}
+
+	// Validate rooms exist (warning only — advisory output)
+	if rooms != "" {
+		knownRooms, err := config.LoadRooms(filepath.Join(configDir, "rooms.toml"))
+		if err == nil {
+			for _, r := range strings.Split(rooms, ",") {
+				r = strings.TrimSpace(r)
+				if _, ok := knownRooms[r]; !ok {
+					fmt.Fprintf(os.Stderr, "Warning: room %q does not exist in rooms.toml\n", r)
+				}
 			}
 		}
 	}
@@ -253,7 +290,7 @@ func cmdRemoveUser(configDir string, args []string) error {
 	}
 
 	delete(users, name)
-	return writeTOMLFile(usersPath, users)
+	return config.WriteUsers(usersPath, users)
 }
 
 func cmdRetireUser(configDir string, args []string) error {
@@ -289,7 +326,7 @@ func cmdRetireUser(configDir string, args []string) error {
 	u.Rooms = nil // retired users belong to no rooms
 	users[name] = u
 
-	if err := writeTOMLFile(usersPath, users); err != nil {
+	if err := config.WriteUsers(usersPath, users); err != nil {
 		return fmt.Errorf("write users.toml: %w", err)
 	}
 
@@ -316,6 +353,113 @@ func cmdListRetired(configDir string) error {
 	if !found {
 		fmt.Println("No retired accounts.")
 	}
+	return nil
+}
+
+func cmdAddToRoom(configDir string, args []string) error {
+	var user, room string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--user":
+			if i+1 < len(args) { user = args[i+1]; i++ }
+		case "--room":
+			if i+1 < len(args) { room = args[i+1]; i++ }
+		}
+	}
+	if user == "" || room == "" {
+		return fmt.Errorf("usage: add-to-room --user USER --room ROOM")
+	}
+
+	usersPath := filepath.Join(configDir, "users.toml")
+	users, err := config.LoadUsers(usersPath)
+	if err != nil {
+		return err
+	}
+
+	u, ok := users[user]
+	if !ok {
+		return fmt.Errorf("user %q not found", user)
+	}
+	if u.Retired {
+		return fmt.Errorf("user %q is retired and cannot be added to rooms", user)
+	}
+
+	// Validate room exists
+	rooms, err := config.LoadRooms(filepath.Join(configDir, "rooms.toml"))
+	if err != nil {
+		return fmt.Errorf("load rooms.toml: %w", err)
+	}
+	if _, ok := rooms[room]; !ok {
+		return fmt.Errorf("room %q does not exist in rooms.toml", room)
+	}
+
+	// Check not already a member
+	for _, r := range u.Rooms {
+		if r == room {
+			return fmt.Errorf("user %q is already in room %q", user, room)
+		}
+	}
+
+	u.Rooms = append(u.Rooms, room)
+	users[user] = u
+
+	if err := config.WriteUsers(usersPath, users); err != nil {
+		return fmt.Errorf("write users.toml: %w", err)
+	}
+
+	fmt.Printf("Added %s (%s) to room %q.\n", u.DisplayName, user, room)
+	fmt.Println("The server will detect the change and broadcast a join event automatically.")
+	return nil
+}
+
+func cmdRemoveFromRoom(configDir string, args []string) error {
+	var user, room string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--user":
+			if i+1 < len(args) { user = args[i+1]; i++ }
+		case "--room":
+			if i+1 < len(args) { room = args[i+1]; i++ }
+		}
+	}
+	if user == "" || room == "" {
+		return fmt.Errorf("usage: remove-from-room --user USER --room ROOM")
+	}
+
+	usersPath := filepath.Join(configDir, "users.toml")
+	users, err := config.LoadUsers(usersPath)
+	if err != nil {
+		return err
+	}
+
+	u, ok := users[user]
+	if !ok {
+		return fmt.Errorf("user %q not found", user)
+	}
+
+	// Find and remove the room
+	found := false
+	filtered := u.Rooms[:0]
+	for _, r := range u.Rooms {
+		if r == room {
+			found = true
+		} else {
+			filtered = append(filtered, r)
+		}
+	}
+	if !found {
+		return fmt.Errorf("user %q is not in room %q", user, room)
+	}
+
+	u.Rooms = filtered
+	users[user] = u
+
+	if err := config.WriteUsers(usersPath, users); err != nil {
+		return fmt.Errorf("write users.toml: %w", err)
+	}
+
+	fmt.Printf("Removed %s (%s) from room %q.\n", u.DisplayName, user, room)
+	fmt.Println("The server will detect the change, broadcast a leave event, and trigger epoch rotation.")
 	return nil
 }
 
@@ -371,6 +515,78 @@ func cmdRestoreDevice(dataDir string, args []string) error {
 	}
 	fmt.Printf("Device %s for user %s restored.\n", device, user)
 	return nil
+}
+
+func cmdStatus(configDir, dataDir string) error {
+	// Users
+	users, err := config.LoadUsers(filepath.Join(configDir, "users.toml"))
+	if err != nil {
+		return fmt.Errorf("load users: %w", err)
+	}
+	active := 0
+	retired := 0
+	for _, u := range users {
+		if u.Retired {
+			retired++
+		} else {
+			active++
+		}
+	}
+
+	// Rooms
+	rooms, err := config.LoadRooms(filepath.Join(configDir, "rooms.toml"))
+	if err != nil {
+		return fmt.Errorf("load rooms: %w", err)
+	}
+
+	// Pending keys
+	pendingCount := 0
+	logPath := filepath.Join(dataDir, "data", "pending-keys.log")
+	if data, err := os.ReadFile(logPath); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.TrimSpace(line) != "" {
+				pendingCount++
+			}
+		}
+	}
+
+	// Data size
+	dataPath := filepath.Join(dataDir, "data")
+	var totalSize int64
+	var dbCount int
+	if entries, err := os.ReadDir(dataPath); err == nil {
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".db") {
+				dbCount++
+				if info, err := e.Info(); err == nil {
+					totalSize += info.Size()
+				}
+			}
+		}
+	}
+
+	fmt.Println("sshkey-chat server status")
+	fmt.Println("─────────────────────────")
+	fmt.Printf("Users:        %d active, %d retired\n", active, retired)
+	fmt.Printf("Rooms:        %d\n", len(rooms))
+	fmt.Printf("Pending keys: %d\n", pendingCount)
+	fmt.Printf("Databases:    %d files, %s\n", dbCount, formatBytes(totalSize))
+	fmt.Printf("Config:       %s\n", configDir)
+	fmt.Printf("Data:         %s\n", dataDir)
+	return nil
+}
+
+func formatBytes(b int64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(b)/float64(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(b)/float64(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(b)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
 }
 
 func cmdHostKey(configDir string) error {
@@ -505,15 +721,6 @@ func parseDurationDays(s string) (int, error) {
 	default:
 		return 0, fmt.Errorf("unknown duration unit %q (use d, m, or y)", string(unit))
 	}
-}
-
-func writeTOMLFile(path string, data any) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return toml.NewEncoder(f).Encode(data)
 }
 
 func formatTOMLArray(items []string) string {

@@ -500,6 +500,8 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 		s.handleRevokeDevice(c, raw)
 	case "list_pending_keys":
 		s.handleListPendingKeys(c)
+	case "room_members":
+		s.handleRoomMembers(c, raw)
 	case "upload_start":
 		s.handleUploadStart(c, raw)
 	case "download":
@@ -1499,5 +1501,58 @@ func (s *Server) handleListPendingKeys(c *Client) {
 	c.Encoder.Encode(protocol.PendingKeysList{
 		Type: "pending_keys_list",
 		Keys: keys,
+	})
+}
+
+func (s *Server) handleRoomMembers(c *Client, raw json.RawMessage) {
+	var req protocol.RoomMembers
+	if err := json.Unmarshal(raw, &req); err != nil || req.Room == "" {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrUnknownRoom,
+			Message: "Invalid room_members request",
+		})
+		return
+	}
+
+	// Single lock across auth check + member collection to prevent
+	// TOCTOU race with config reload.
+	s.cfg.RLock()
+	user := s.cfg.Users[c.Username]
+	inRoom := false
+	for _, r := range user.Rooms {
+		if r == req.Room {
+			inRoom = true
+			break
+		}
+	}
+	if !inRoom {
+		s.cfg.RUnlock()
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrNotAuthorized,
+			Message: "You are not a member of room: " + req.Room,
+		})
+		return
+	}
+
+	var members []string
+	for username, u := range s.cfg.Users {
+		if u.Retired {
+			continue
+		}
+		for _, r := range u.Rooms {
+			if r == req.Room {
+				members = append(members, username)
+				break
+			}
+		}
+	}
+	s.cfg.RUnlock()
+
+	c.Encoder.Encode(protocol.RoomMembersList{
+		Type:    "room_members_list",
+		Room:    req.Room,
+		Members: members,
 	})
 }

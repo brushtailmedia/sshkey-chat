@@ -446,7 +446,15 @@ Capability: `presence`
 // Server -> Client (membership changes)
 {"type":"room_event","room":"general","event":"join","user":"carol"}
 {"type":"room_event","room":"general","event":"leave","user":"carol"}
+
+// Client -> Server (request room member list — must be a member of the room)
+{"type":"room_members","room":"general"}
+
+// Server -> Client
+{"type":"room_members_list","room":"general","members":["usr_abc","usr_def","usr_ghi"]}
 ```
+
+`room_members` is a lazy query — clients send it when the info panel or member panel opens for a room, not on every room switch. The server rejects with `not_authorized` if the requesting user is not a member of the room. Retired users are excluded from the response. DM/group DM members are known client-side from `conversation_list` and don't need this request.
 
 ### File Transfer
 

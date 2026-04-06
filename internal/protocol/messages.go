@@ -533,6 +533,19 @@ type PendingKeysList struct {
 	Keys []PendingKeyEntry `json:"keys"`
 }
 
+// Room membership
+
+type RoomMembers struct {
+	Type string `json:"type"` // "room_members"
+	Room string `json:"room"`
+}
+
+type RoomMembersList struct {
+	Type    string   `json:"type"` // "room_members_list"
+	Room    string   `json:"room"`
+	Members []string `json:"members"`
+}
+
 // Mobile push registration
 
 type PushRegister struct {
