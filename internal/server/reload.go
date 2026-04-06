@@ -108,6 +108,18 @@ func (s *Server) reloadUsers() {
 				s.logger.Info("loaded retired user (new entry)", "user", username)
 				continue
 			}
+			// Check if this username was previously retired — v1 rule: retired names cannot be reused
+			if oldUser, wasRetired := oldUsers[username]; wasRetired && oldUser.Retired {
+				s.logger.Error("rejected new user: username belongs to a retired account",
+					"user", username,
+					"retired_at", oldUser.RetiredAt,
+				)
+				// Restore the old retired entry — don't allow the new one
+				s.cfg.Lock()
+				s.cfg.Users[username] = oldUser
+				s.cfg.Unlock()
+				continue
+			}
 			added = append(added, username)
 		}
 	}
@@ -126,6 +138,18 @@ func (s *Server) reloadUsers() {
 	for username, newUser := range newUsers {
 		oldUser, existed := oldUsers[username]
 		if !existed {
+			continue
+		}
+
+		// Reject un-retiring: v1 rule — retired accounts cannot be reactivated
+		if oldUser.Retired && !newUser.Retired {
+			s.logger.Error("rejected reactivation: retired accounts cannot be un-retired",
+				"user", username,
+				"retired_at", oldUser.RetiredAt,
+			)
+			s.cfg.Lock()
+			s.cfg.Users[username] = oldUser
+			s.cfg.Unlock()
 			continue
 		}
 

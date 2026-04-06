@@ -626,6 +626,8 @@ The key and fingerprint are still delivered so clients can verify signatures on 
 
 **Send-time enforcement:** `send_dm`, `react` (DM reactions), and `create_dm` reject with `user_retired` error code if any target conversation member is retired. `send` (room messages) is not affected — retired users aren't members of rooms, so their exclusion is automatic.
 
+**Username reuse rule:** retired usernames cannot be reused for new accounts. The server and `sshkey-ctl approve` reject new accounts with a username matching a retired entry. This prevents identity confusion, DM routing conflicts, and silent key overwrites. Usernames are immutable internal IDs; display names (changeable via `set_profile`) are the human-visible names with server-enforced uniqueness. See `PROJECT.md` section "Identity Model" for details.
+
 **See `PROJECT.md` section "Account Retirement"** for the full design rationale, threat model (key compromise vs. device theft vs. rotation), username reuse handling, and the attacker-vs-victim race analysis.
 
 ### Admin Notifications

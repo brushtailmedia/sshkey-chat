@@ -44,13 +44,14 @@ func setupFixtures() (string, error) {
 func generateTestFixtures() (string, error) {
 	// Generate the three test keys + pub keys
 	users := []struct {
-		name    string
-		keyPath string
-		rooms   string
+		username    string // internal nanoid-style ID
+		displayName string
+		keyPath     string
+		rooms       string
 	}{
-		{"alice", "/tmp/sshkey-test-key", `["general", "engineering"]`},
-		{"bob", "/tmp/sshkey-test-key-bob", `["general"]`},
-		{"carol", "/tmp/sshkey-test-key-carol", `["general"]`},
+		{"usr_alice_test", "alice", "/tmp/sshkey-test-key", `["general", "engineering"]`},
+		{"usr_bob_test", "bob", "/tmp/sshkey-test-key-bob", `["general"]`},
+		{"usr_carol_test", "carol", "/tmp/sshkey-test-key-carol", `["general"]`},
 	}
 
 	tmpConfigDir, err := os.MkdirTemp("", "sshkey-test-config-")
@@ -79,10 +80,10 @@ func generateTestFixtures() (string, error) {
 		}
 		pubLine := string(ssh.MarshalAuthorizedKey(sshPub))
 		// Trim trailing newline; add a comment
-		pubLine = pubLine[:len(pubLine)-1] + " " + u.name + "@test"
+		pubLine = pubLine[:len(pubLine)-1] + " " + u.displayName + "@test"
 
 		usersToml += fmt.Sprintf("[%s]\nkey = %q\ndisplay_name = %q\nrooms = %s\n\n",
-			u.name, pubLine, u.name, u.rooms)
+			u.username, pubLine, u.displayName, u.rooms)
 	}
 
 	if err := os.WriteFile(filepath.Join(tmpConfigDir, "users.toml"), []byte(usersToml), 0644); err != nil {
@@ -321,7 +322,7 @@ func TestRoomMessaging(t *testing.T) {
 	if aliceMsg.ID != bobMsg.ID {
 		t.Errorf("message IDs don't match: alice=%s bob=%s", aliceMsg.ID, bobMsg.ID)
 	}
-	if aliceMsg.From != "alice" {
+	if aliceMsg.From != "usr_alice_test" {
 		t.Errorf("from = %q, want alice", aliceMsg.From)
 	}
 	if aliceMsg.Room != "general" {
@@ -593,7 +594,7 @@ func TestDMConversations(t *testing.T) {
 	// Alice creates a DM with bob
 	alice.enc.Encode(protocol.CreateDM{
 		Type:    "create_dm",
-		Members: []string{"bob"},
+		Members: []string{"usr_bob_test"},
 	})
 
 	// Alice receives dm_created
@@ -615,7 +616,7 @@ func TestDMConversations(t *testing.T) {
 	// Alice creates the same DM again -- should get back the existing one (1:1 dedup)
 	alice.enc.Encode(protocol.CreateDM{
 		Type:    "create_dm",
-		Members: []string{"bob"},
+		Members: []string{"usr_bob_test"},
 	})
 	msgType, raw = alice.readMessage()
 	if msgType != "dm_created" {
@@ -633,7 +634,7 @@ func TestDMConversations(t *testing.T) {
 	alice.enc.Encode(protocol.SendDM{
 		Type:         "send_dm",
 		Conversation: convID,
-		WrappedKeys:  map[string]string{"alice": "wrapped_a", "bob": "wrapped_b"},
+		WrappedKeys:  map[string]string{"usr_alice_test": "wrapped_a", "usr_bob_test": "wrapped_b"},
 		Payload:      "base64_encrypted_dm",
 		Signature:    "base64_sig_dm",
 	})
@@ -658,7 +659,7 @@ func TestDMConversations(t *testing.T) {
 	var bobDM protocol.DM
 	json.Unmarshal(raw, &bobDM)
 
-	if bobDM.From != "alice" {
+	if bobDM.From != "usr_alice_test" {
 		t.Errorf("from = %q, want alice", bobDM.From)
 	}
 	if bobDM.Conversation != convID {
@@ -667,8 +668,8 @@ func TestDMConversations(t *testing.T) {
 	if bobDM.Payload != "base64_encrypted_dm" {
 		t.Errorf("payload = %q, want base64_encrypted_dm", bobDM.Payload)
 	}
-	if bobDM.WrappedKeys["bob"] != "wrapped_b" {
-		t.Errorf("wrapped_keys[bob] = %q, want wrapped_b", bobDM.WrappedKeys["bob"])
+	if bobDM.WrappedKeys["usr_bob_test"] != "wrapped_b" {
+		t.Errorf("wrapped_keys[bob] = %q, want wrapped_b", bobDM.WrappedKeys["usr_bob_test"])
 	}
 
 	t.Logf("DM delivered: id=%s from=%s conv=%s", bobDM.ID, bobDM.From, bobDM.Conversation)
@@ -677,7 +678,7 @@ func TestDMConversations(t *testing.T) {
 	alice.enc.Encode(protocol.SendDM{
 		Type:         "send_dm",
 		Conversation: convID,
-		WrappedKeys:  map[string]string{"alice": "wrapped_a"}, // missing bob
+		WrappedKeys:  map[string]string{"usr_alice_test": "wrapped_a"}, // missing bob
 		Payload:      "base64_bad",
 	})
 
@@ -705,7 +706,7 @@ func TestDMConversations(t *testing.T) {
 	}
 	var event protocol.ConversationEvent
 	json.Unmarshal(raw, &event)
-	if event.Event != "leave" || event.User != "bob" {
+	if event.Event != "leave" || event.User != "usr_bob_test" {
 		t.Errorf("event = %+v, want leave by bob", event)
 	}
 

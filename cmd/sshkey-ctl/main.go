@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +16,16 @@ import (
 	"github.com/brushtailmedia/sshkey/internal/config"
 	"github.com/brushtailmedia/sshkey/internal/store"
 )
+
+func generateCLIID(prefix string) string {
+	const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-"
+	b := make([]byte, 21)
+	for i := range b {
+		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+		b[i] = alphabet[n.Int64()]
+	}
+	return prefix + string(b)
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -86,7 +98,8 @@ Usage: sshkey-ctl [--config DIR] [--data DIR] <command> [args]
 
 Commands:
   pending                                 View pending key requests
-  approve --fingerprint FP --name NAME --rooms ROOMS  Approve a pending key
+  approve --key "ssh-ed25519 AAAA... name" --rooms ROOMS  Approve (display name from key comment)
+  approve --key "ssh-ed25519 AAAA..." --name NAME --rooms ROOMS  Approve (override display name)
   reject --fingerprint FP                 Reject/clear a pending key
   list-users                              List all users
   remove-user NAME                        Remove a user
@@ -118,35 +131,67 @@ func cmdPending(dataDir string) error {
 }
 
 func cmdApprove(configDir string, args []string) error {
-	var fingerprint, name, rooms string
+	var displayName, key, rooms string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--fingerprint":
-			if i+1 < len(args) { fingerprint = args[i+1]; i++ }
 		case "--name":
-			if i+1 < len(args) { name = args[i+1]; i++ }
+			if i+1 < len(args) { displayName = args[i+1]; i++ }
+		case "--key":
+			if i+1 < len(args) { key = args[i+1]; i++ }
 		case "--rooms":
 			if i+1 < len(args) { rooms = args[i+1]; i++ }
 		}
 	}
-	if fingerprint == "" || name == "" {
-		return fmt.Errorf("usage: approve --fingerprint FP --name NAME --rooms ROOMS")
+
+	if key == "" {
+		return fmt.Errorf("usage: approve --key \"ssh-ed25519 AAAA... name\" --rooms ROOMS\n" +
+			"   or: approve --key \"ssh-ed25519 AAAA...\" --name NAME --rooms ROOMS")
 	}
 
-	// We need the actual public key, not just fingerprint.
-	// In practice, the admin would copy it from pending-keys.log or the user would provide it.
-	// For now, we require the full key to be provided via --key flag too.
-	fmt.Printf("To approve user %q with fingerprint %s:\n", name, fingerprint)
-	fmt.Printf("1. Get the user's full public key (ssh-ed25519 AAAA...)\n")
-	fmt.Printf("2. Add to %s/users.toml:\n\n", configDir)
-	fmt.Printf("[%s]\n", name)
-	fmt.Printf("key = \"<paste full public key here>\"\n")
-	fmt.Printf("display_name = %q\n", name)
+	// Parse the key
+	parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(key))
+	if err != nil {
+		return fmt.Errorf("invalid key: %v", err)
+	}
+
+	// Extract display name from key comment if --name not provided
+	parts := strings.SplitN(strings.TrimSpace(key), " ", 3)
+	if len(parts) == 3 && displayName == "" {
+		displayName = strings.TrimSpace(parts[2])
+	}
+	if displayName == "" {
+		return fmt.Errorf("display name required: provide --name NAME or embed it in the key comment")
+	}
+
+	// Strip comment from key for storage
+	keyLine := parts[0] + " " + parts[1]
+
+	// Check display name uniqueness against existing users
+	usersPath := filepath.Join(configDir, "users.toml")
+	if existingUsers, err := config.LoadUsers(usersPath); err == nil {
+		for _, user := range existingUsers {
+			if strings.EqualFold(user.DisplayName, displayName) {
+				return fmt.Errorf("display name %q is already in use. Choose a different name with --name.", displayName)
+			}
+		}
+	}
+
+	// Generate nanoid username (internal ID, never shown to users)
+	username := generateCLIID("usr_")
+
+	fmt.Printf("Display name: %s\n", displayName)
+	fmt.Printf("Fingerprint:  %s\n", ssh.FingerprintSHA256(parsed))
+	fmt.Printf("Username:     %s (internal ID)\n\n", username)
+
+	fmt.Printf("Add to %s/users.toml:\n\n", configDir)
+	fmt.Printf("[%s]\n", username)
+	fmt.Printf("key = %q\n", keyLine)
+	fmt.Printf("display_name = %q\n", displayName)
 	if rooms != "" {
 		roomList := strings.Split(rooms, ",")
 		fmt.Printf("rooms = [%s]\n", formatTOMLArray(roomList))
 	}
-	fmt.Println("\n3. The server will hot-reload the config automatically.")
+	fmt.Println("\nThe server will hot-reload the config automatically.")
 	return nil
 }
 

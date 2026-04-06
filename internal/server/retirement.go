@@ -97,7 +97,18 @@ func (s *Server) handleRetirement(username string, oldRooms []string, reason str
 	}
 	s.mu.RUnlock()
 
-	// 6. Terminate active sessions for the retired user
+	// 6. Update stored profile display_name to the suffixed version
+	if s.store != nil {
+		s.cfg.RLock()
+		newDisplayName := s.cfg.Users[username].DisplayName
+		s.cfg.RUnlock()
+		s.store.UsersDB().Exec(
+			`INSERT INTO profiles (user, display_name) VALUES (?, ?)
+			 ON CONFLICT (user) DO UPDATE SET display_name = excluded.display_name`,
+			username, newDisplayName)
+	}
+
+	// 7. Terminate active sessions for the retired user
 	s.mu.RLock()
 	for _, client := range s.clients {
 		if client.Username == username {
@@ -111,7 +122,7 @@ func (s *Server) handleRetirement(username string, oldRooms []string, reason str
 	}
 	s.mu.RUnlock()
 
-	// 7. Audit log
+	// 8. Audit log
 	if s.audit != nil {
 		s.audit.Log("server", "retire",
 			fmt.Sprintf("user=%s reason=%s rooms=%d convs=%d",
@@ -321,6 +332,12 @@ func (s *Server) retireUser(username, reason string) error {
 	user.Retired = true
 	user.RetiredAt = time.Now().UTC().Format(time.RFC3339)
 	user.RetiredReason = reason
+	// Free the display name for reuse by suffixing it with part of the
+	// nanoid username. Historical messages remain attributable ("Alice_V1St")
+	// and the TUI appends [retired] for full clarity.
+	if len(username) > 8 {
+		user.DisplayName = user.DisplayName + "_" + username[4:8]
+	}
 	s.cfg.Users[username] = user
 	s.cfg.Unlock()
 

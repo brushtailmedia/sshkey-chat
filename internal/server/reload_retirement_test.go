@@ -160,9 +160,9 @@ retired_reason = "key_lost"
 	}
 }
 
-func TestReloadHandlesUnretirement(t *testing.T) {
-	// Admin can un-retire a user by removing the retired=true field. This
-	// is unusual but should not crash — it should log a warning and proceed.
+func TestReloadRejectsUnretirement(t *testing.T) {
+	// v1 rule: retired accounts cannot be reactivated. The server should
+	// reject the config change and preserve the retired state.
 	s := newTestServer(t)
 
 	// Start with bob retired
@@ -175,7 +175,7 @@ func TestReloadHandlesUnretirement(t *testing.T) {
 	s.cfg.Users["bob"] = bob
 	s.cfg.Unlock()
 
-	// Rewrite users.toml with bob un-retired
+	// Rewrite users.toml with bob un-retired (admin tries to undo retirement)
 	usersPath := filepath.Join(s.cfg.Dir, "users.toml")
 	newContent := `[alice]
 key = "` + testKeyAlice + `"
@@ -197,8 +197,8 @@ rooms = ["general"]
 	s.reloadUsers()
 
 	after := s.cfg.Users["bob"]
-	if after.Retired {
-		t.Error("bob should no longer be retired after admin edit")
+	if !after.Retired {
+		t.Error("bob should still be retired — un-retirement is blocked in v1")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -1243,6 +1244,61 @@ func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
 	var msg protocol.SetProfile
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
+	}
+
+	// Reject empty display name
+	if msg.DisplayName == "" {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    "invalid_profile",
+			Message: "Display name cannot be empty",
+		})
+		return
+	}
+
+	// Check for duplicate display name across all users (case-insensitive)
+	s.cfg.RLock()
+	for username, user := range s.cfg.Users {
+		if username == c.Username {
+			continue // skip self
+		}
+		// Check against config display_name
+		if strings.EqualFold(user.DisplayName, msg.DisplayName) {
+			s.cfg.RUnlock()
+			c.Encoder.Encode(protocol.Error{
+				Type:    "error",
+				Code:    "username_taken",
+				Message: fmt.Sprintf("Display name %q is already in use", msg.DisplayName),
+			})
+			return
+		}
+		// Check against config username (can't take someone's username as your display name)
+		if strings.EqualFold(username, msg.DisplayName) {
+			s.cfg.RUnlock()
+			c.Encoder.Encode(protocol.Error{
+				Type:    "error",
+				Code:    "username_taken",
+				Message: fmt.Sprintf("Display name %q is already in use", msg.DisplayName),
+			})
+			return
+		}
+	}
+	s.cfg.RUnlock()
+
+	// Also check stored display names (from set_profile, which may differ from config)
+	if s.store != nil {
+		var existingUser string
+		s.store.UsersDB().QueryRow(
+			`SELECT user FROM profiles WHERE LOWER(display_name) = LOWER(?) AND user != ?`,
+			msg.DisplayName, c.Username).Scan(&existingUser)
+		if existingUser != "" {
+			c.Encoder.Encode(protocol.Error{
+				Type:    "error",
+				Code:    "username_taken",
+				Message: fmt.Sprintf("Display name %q is already in use", msg.DisplayName),
+			})
+			return
+		}
 	}
 
 	// Update in store

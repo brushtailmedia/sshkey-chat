@@ -1,7 +1,7 @@
 [server]
 port = 2222
 bind = "0.0.0.0"
-admins = ["alice"]
+admins = ["usr_alice_test"]
 
 [messages]
 max_body_size = "16KB"

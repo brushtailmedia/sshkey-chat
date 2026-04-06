@@ -1838,3 +1838,42 @@ Small service running alongside the chat server:
 2. File sharing + inline images + link previews
 3. Rust core library + GUI client (desktop)
 4. GUI client (mobile) + push relay
+
+---
+
+## Identity Model
+
+Two-layer identity system: **usernames** (immutable internal IDs) and **display names** (mutable, human-visible).
+
+### Usernames (internal)
+
+- The `[alice]` section key in `users.toml` is the **immutable username**
+- Stored in every DB table as `sender`, `user`, primary keys
+- Never changes after account creation — no bulk DB updates needed
+- Retired usernames cannot be reused (prevents DM/history conflicts)
+- Server rejects: new accounts with existing username, un-retiring retired accounts
+
+### Display names (visible)
+
+- Set by admin initially in `display_name` field, changeable by user via Settings
+- Stored ONLY in the `profiles` table — name changes update one row
+- Server enforces uniqueness (case-insensitive) against all active usernames and display names
+- TUI renders display name everywhere; username is the hidden lookup key
+- Broadcast to all clients on change — clients update their profile cache, no local DB migration
+
+### Why this works
+
+| Concern | How it's handled |
+|---|---|
+| Name changes | Only `profiles` table updates — no message/reaction/DM rewriting |
+| Retirement | Username stays, display name freed for reuse by different account |
+| Duplicate names | Server rejects duplicate display names on `set_profile` and `sshkey-ctl approve` |
+| History attribution | Messages reference immutable username — always points to the right person |
+| Client DB sync | Profile broadcast updates render cache — no local DB rows change |
+
+### Enforcement
+
+- `set_profile`: server checks display name against all usernames + display names (case-insensitive)
+- `sshkey-ctl approve`: checks proposed username against existing + retired usernames + display names
+- Config reload: rejects retired username reuse and un-retirement attempts
+- Wizard: user picks preferred display name, embedded in key comment for admin
