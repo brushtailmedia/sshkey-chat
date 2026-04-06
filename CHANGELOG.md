@@ -1,0 +1,45 @@
+# Changelog
+
+## v0.1.0 — 2026-04-07
+
+Initial release.
+
+### Server
+
+- 3-channel SSH architecture (NDJSON protocol, downloads, uploads)
+- E2E encrypted rooms (epoch keys, AES-256-GCM) and DMs (per-message keys)
+- Ed25519 key authentication — no passwords, no key rotation
+- Room management with epoch key rotation on membership changes
+- DM conversations (1:1 and group, max 50 members)
+- File transfer with BLAKE2b-256 content hash verification
+- Reactions, typing indicators, read receipts, presence, pins, mentions
+- Message signatures (Ed25519) with replay detection
+- Account retirement (monotonic, irreversible) with display name freeing
+- Device management (multi-device, self-service revocation)
+- Sync on reconnect with paginated catch-up batches
+- History scroll-back with epoch keys included
+- Config hot-reload via filesystem watcher
+- Push token registration (APNs/FCM integration pending)
+- Pending key tracking with admin notifications
+
+### Admin CLI (sshkey-ctl)
+
+- `approve` — add users with full validation (Ed25519, duplicate key/name, length, username collision)
+- `reject` — remove pending keys (atomic write)
+- `add-to-room` / `remove-from-room` — manage room membership
+- `retire-user` — permanent account retirement
+- `revoke-device` / `restore-device` — device management
+- `list-users` / `list-retired` — user listing
+- `status` — server overview (users, rooms, pending keys, DB sizes)
+- `host-key` — print server fingerprint
+- `purge` — delete old messages with dry-run support
+
+### Protocol
+
+- Full NDJSON protocol with 50+ message types
+- Identity model: immutable nanoid usernames + mutable display names
+- Room membership query (`room_members` / `room_members_list`)
+- Admin pending key listing (`list_pending_keys` / `pending_keys_list`)
+- Reactions included in sync batches and history results
+- Content hash required on all file uploads
+- Upload/download error messages for fast failure
