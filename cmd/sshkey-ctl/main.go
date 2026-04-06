@@ -177,14 +177,31 @@ func cmdApprove(configDir string, args []string) error {
 	// Strip comment from key for storage
 	keyLine := parts[0] + " " + parts[1]
 
+	// Enforce Ed25519 key type
+	if parsed.Type() != "ssh-ed25519" {
+		return fmt.Errorf("only Ed25519 keys are supported, got %s", parsed.Type())
+	}
+
+	// Validate display name
+	if len(displayName) < 2 {
+		return fmt.Errorf("display name must be at least 2 characters")
+	}
+	if len(displayName) > 32 {
+		return fmt.Errorf("display name must be 32 characters or fewer")
+	}
+
 	// Check against existing users
 	usersPath := filepath.Join(configDir, "users.toml")
 	existingUsers, _ := config.LoadUsers(usersPath)
 
-	// Check display name uniqueness
-	for _, user := range existingUsers {
+	for username, user := range existingUsers {
+		// Display name must not match another user's display name
 		if strings.EqualFold(user.DisplayName, displayName) {
-			return fmt.Errorf("display name %q is already in use. Choose a different name with --name.", displayName)
+			return fmt.Errorf("display name %q is already in use by %s", displayName, username)
+		}
+		// Display name must not match any existing username (server enforces this too)
+		if strings.EqualFold(username, displayName) {
+			return fmt.Errorf("display name %q conflicts with an existing username", displayName)
 		}
 	}
 
@@ -214,21 +231,46 @@ func cmdApprove(configDir string, args []string) error {
 	}
 
 	// Generate nanoid username (internal ID, never shown to users)
+	// Guard against astronomically unlikely collision.
 	username := generateCLIID("usr_")
-
-	fmt.Printf("Display name: %s\n", displayName)
-	fmt.Printf("Fingerprint:  %s\n", ssh.FingerprintSHA256(parsed))
-	fmt.Printf("Username:     %s (internal ID)\n\n", username)
-
-	fmt.Printf("Add to %s/users.toml:\n\n", configDir)
-	fmt.Printf("[%s]\n", username)
-	fmt.Printf("key = %q\n", keyLine)
-	fmt.Printf("display_name = %q\n", displayName)
-	if rooms != "" {
-		roomList := strings.Split(rooms, ",")
-		fmt.Printf("rooms = [%s]\n", formatTOMLArray(roomList))
+	if _, exists := existingUsers[username]; exists {
+		username = generateCLIID("usr_")
+		if _, exists := existingUsers[username]; exists {
+			return fmt.Errorf("nanoid collision (extremely unlikely) — please retry")
+		}
 	}
-	fmt.Println("\nThe server will hot-reload the config automatically.")
+
+	// Build the new user entry
+	newUser := config.User{
+		Key:         keyLine,
+		DisplayName: displayName,
+	}
+	if rooms != "" {
+		for _, r := range strings.Split(rooms, ",") {
+			r = strings.TrimSpace(r)
+			if r != "" {
+				newUser.Rooms = append(newUser.Rooms, r)
+			}
+		}
+	}
+
+	// Write directly to users.toml (atomic: temp file + rename)
+	if existingUsers == nil {
+		existingUsers = make(map[string]config.User)
+	}
+	existingUsers[username] = newUser
+
+	if err := config.WriteUsers(usersPath, existingUsers); err != nil {
+		return fmt.Errorf("write users.toml: %w", err)
+	}
+
+	fmt.Printf("Approved %s\n", displayName)
+	fmt.Printf("  Username:    %s\n", username)
+	fmt.Printf("  Fingerprint: %s\n", ssh.FingerprintSHA256(parsed))
+	if len(newUser.Rooms) > 0 {
+		fmt.Printf("  Rooms:       %s\n", strings.Join(newUser.Rooms, ", "))
+	}
+	fmt.Println("\nThe server will detect the change and apply it automatically.")
 	return nil
 }
 
@@ -248,17 +290,42 @@ func cmdReject(dataDir string, args []string) error {
 	logPath := filepath.Join(dataDir, "data", "pending-keys.log")
 	data, err := os.ReadFile(logPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no pending keys log found")
+		}
 		return err
 	}
 
 	var kept []string
+	removed := false
 	for _, line := range strings.Split(string(data), "\n") {
-		if line != "" && !strings.Contains(line, "fingerprint="+fingerprint) {
+		if line == "" {
+			continue
+		}
+		if strings.Contains(line, "fingerprint="+fingerprint) {
+			removed = true
+		} else {
 			kept = append(kept, line)
 		}
 	}
 
-	return os.WriteFile(logPath, []byte(strings.Join(kept, "\n")+"\n"), 0640)
+	if !removed {
+		return fmt.Errorf("fingerprint %s not found in pending keys", fingerprint)
+	}
+
+	// Atomic write: temp file + rename
+	content := strings.Join(kept, "\n") + "\n"
+	tmpPath := logPath + ".tmp"
+	if err := os.WriteFile(tmpPath, []byte(content), 0640); err != nil {
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, logPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename: %w", err)
+	}
+
+	fmt.Printf("Rejected pending key %s\n", fingerprint)
+	return nil
 }
 
 func cmdListUsers(configDir string) error {
@@ -285,12 +352,23 @@ func cmdRemoveUser(configDir string, args []string) error {
 		return err
 	}
 
-	if _, ok := users[name]; !ok {
+	u, ok := users[name]
+	if !ok {
 		return fmt.Errorf("user %q not found", name)
 	}
 
+	if u.Retired {
+		fmt.Fprintf(os.Stderr, "Warning: %q is a retired account. Removing it will lose the retirement record.\n", name)
+		fmt.Fprintf(os.Stderr, "Use retire-user instead if you want to preserve the record.\n")
+	}
+
 	delete(users, name)
-	return config.WriteUsers(usersPath, users)
+	if err := config.WriteUsers(usersPath, users); err != nil {
+		return fmt.Errorf("write users.toml: %w", err)
+	}
+
+	fmt.Printf("Removed %s (%s).\n", u.DisplayName, name)
+	return nil
 }
 
 func cmdRetireUser(configDir string, args []string) error {
@@ -476,6 +554,9 @@ func cmdRevokeDevice(dataDir string, args []string) error {
 	if user == "" || device == "" {
 		return fmt.Errorf("usage: revoke-device --user USER --device DEVICE")
 	}
+	if !strings.HasPrefix(device, "dev_") {
+		return fmt.Errorf("invalid device ID %q (expected dev_ prefix)", device)
+	}
 
 	st, err := store.Open(dataDir)
 	if err != nil {
@@ -502,6 +583,9 @@ func cmdRestoreDevice(dataDir string, args []string) error {
 	}
 	if user == "" || device == "" {
 		return fmt.Errorf("usage: restore-device --user USER --device DEVICE")
+	}
+	if !strings.HasPrefix(device, "dev_") {
+		return fmt.Errorf("invalid device ID %q (expected dev_ prefix)", device)
 	}
 
 	st, err := store.Open(dataDir)
@@ -682,15 +766,8 @@ func cmdPurge(dataDir string, args []string) error {
 		totalDeleted += count
 	}
 
-	// Purge old epoch keys from users.db
-	if !dryRun && totalDeleted > 0 {
-		// Remove epoch keys for epochs that no longer have any messages
-		st.UsersDB().Exec(`
-			DELETE FROM epoch_keys WHERE (room, epoch) NOT IN (
-				SELECT DISTINCT 'placeholder', 0
-			)`)
-		// Simpler: just leave epoch keys — they're tiny (~100 bytes each)
-	}
+	// Epoch keys are tiny (~100 bytes each) and needed to decrypt
+	// historical messages. Leave them even when messages are purged.
 
 	if dryRun {
 		fmt.Printf("\nDry run: would delete %d messages total (older than %s)\n", totalDeleted, olderThan)
@@ -721,12 +798,4 @@ func parseDurationDays(s string) (int, error) {
 	default:
 		return 0, fmt.Errorf("unknown duration unit %q (use d, m, or y)", string(unit))
 	}
-}
-
-func formatTOMLArray(items []string) string {
-	quoted := make([]string, len(items))
-	for i, item := range items {
-		quoted[i] = fmt.Sprintf("%q", strings.TrimSpace(item))
-	}
-	return strings.Join(quoted, ", ")
 }

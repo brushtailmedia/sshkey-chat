@@ -1877,3 +1877,147 @@ Two-layer identity system: **usernames** (immutable internal IDs) and **display 
 - `sshkey-ctl approve`: checks proposed username against existing + retired usernames + display names
 - Config reload: rejects retired username reuse and un-retirement attempts
 - Wizard: user picks preferred display name, embedded in key comment for admin
+
+---
+
+## Future: Room Creation Approval
+
+**Status:** Feature request — not yet implemented.
+
+Users should be able to request room creation from within the client. Admin approves or rejects via `sshkey-ctl`.
+
+### Proposed flow
+
+1. **Client sends:** `{"type":"room_request","name":"design","topic":"Design discussions"}`
+2. **Server stores** in a `pending_rooms` table (same pattern as `pending_keys`)
+3. **Server notifies admins:** `{"type":"admin_notify","event":"pending_room","name":"design","requested_by":"usr_alice","topic":"..."}`
+4. **Admin approves:** `sshkey-ctl approve-room --name design` — writes to rooms.toml, adds the requester to the room in users.toml. Server picks up via file watcher, broadcasts `room_list` update and `room_event` join.
+5. **Admin rejects:** `sshkey-ctl reject-room --name design` — removes from pending, optionally notifies the requester.
+
+### Design notes
+
+- Requester is auto-added as the first member on approval. Admin can add other users with `add-to-room`.
+- Pending room requests visible to admins in the `/pending` panel (alongside pending keys) and via `sshkey-ctl pending`.
+- TUI: new `/request-room` slash command triggers the request.
+- Follows the same pending → admin_notify → CLI approve/reject pattern as pending keys.
+- Room names validated server-side (alphanumeric + hyphens, no duplicates, not a reserved name).
+
+---
+
+## Future: Push Notifications
+
+**Status:** Feature request — blocked on sshkey-app (GUI client).
+
+The protocol already has `push_register` / `push_registered` and the server DB has a `push_tokens` table. What's missing is provider integration.
+
+### Required
+
+- **APNs integration** (iOS) — server sends push via Apple Push Notification service when a device is offline
+- **FCM integration** (Android) — same via Firebase Cloud Messaging
+- **Privacy-preserving payload** — push content must be opaque (e.g. "New message" or encrypted notification ID). The server cannot see message content, so it cannot include a body preview. The client fetches and decrypts on wake.
+- **Token lifecycle** — re-register on every foreground connect (upsert). Server prunes stale tokens after N failed deliveries.
+
+### Design notes
+
+- Push fires only when a device has no active SSH connection (offline)
+- One push per message, not batched (avoids delay)
+- Badge count = sum of unread across all rooms/conversations
+- Silent push for typing/presence (iOS background refresh) — optional, battery-intensive
+
+---
+
+## Future: Overlay State Machine (TUI)
+
+**Status:** Feature request — internal refactor, no user-visible change.
+
+The TUI currently checks 18+ overlays sequentially in `Update()` to determine which one intercepts keyboard and mouse input. This works but is fragile — adding or reordering overlays can introduce priority bugs.
+
+### Proposed
+
+Replace the sequential `if` chain with a stack-based overlay manager:
+
+```go
+type OverlayStack struct {
+    stack []Overlay
+}
+
+type Overlay interface {
+    IsVisible() bool
+    Update(tea.KeyMsg) (Overlay, tea.Cmd)
+    HandleMouse(tea.MouseMsg) (Overlay, tea.Cmd)
+    View(width, height int) string
+}
+```
+
+- Push on open, pop on close
+- Top of stack receives all input (keyboard + mouse)
+- Focus auto-restores to FocusInput when stack empties
+- No ordering to maintain — priority is implicit in stack position
+
+---
+
+## Future: Message Editing
+
+**Status:** Feature request.
+
+### Protocol
+
+```json
+// Client -> Server
+{"type":"edit","id":"msg_abc123","room":"general","epoch":3,"payload":"base64...","signature":"base64..."}
+
+// Server -> Client (broadcast)
+{"type":"edited","id":"msg_abc123","room":"general","from":"alice","ts":1712345680,"epoch":3,"payload":"base64...","signature":"base64...","edited_at":1712345690}
+```
+
+- Same encryption model as send (epoch key for rooms, wrapped keys for DMs)
+- Server validates: sender must be original author, epoch must be current or previous
+- Decrypted payload contains the new body, same `seq`/`device_id` structure
+- TUI shows "(edited)" marker after timestamp. Local DB updates body in-place.
+- Edit history is not retained — only the latest version is stored (matches Signal/iMessage behavior)
+
+---
+
+## Future: Protocol Versioning Tests
+
+**Status:** Feature request.
+
+A shared `protocol_test.json` file containing sample messages for every protocol type, with expected field names and values. Both sshkey-chat and sshkey-term validate against it in their test suites. Catches field name drift, missing `omitempty`, type mismatches between repos.
+
+---
+
+## Future: Batch Operations in sshkey-ctl
+
+**Status:** Feature request.
+
+### Batch approve
+
+```bash
+sshkey-ctl import --file users.csv --rooms general
+```
+
+CSV format: `key,display_name,rooms` (one user per line). Runs the same validation as single approve (duplicate key, duplicate name, Ed25519, name length) per row. Atomic: all-or-nothing write to users.toml.
+
+### Batch room management
+
+```bash
+sshkey-ctl add-to-room --user usr_a,usr_b,usr_c --room engineering
+```
+
+Comma-separated user list. Validates each user, skips already-members with a warning.
+
+---
+
+## Future: Image Thumbnail Generation
+
+**Status:** Feature request.
+
+The `Attachment` struct has `thumbnail_id` but nothing generates thumbnails. Server-side generation is impossible (encrypted content). Client-side approach:
+
+1. On upload: resize image to 200px wide, encode as JPEG
+2. Encrypt thumbnail with the same key as the full image (room epoch key or per-file K_file)
+3. Upload thumbnail as a second file, get `thumbnail_id`
+4. Include `thumbnail_id` in the attachment metadata
+5. Recipients download the small thumbnail first for fast preview, full image on demand
+
+Libraries: `imaging` (Go), `image/jpeg` stdlib. Adds ~200ms to upload for typical photos.

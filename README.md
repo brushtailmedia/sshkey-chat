@@ -81,7 +81,8 @@ docker exec sshkey-server sshkey-ctl pending
 # List users
 docker exec sshkey-server sshkey-ctl list-users
 
-# Approve a user (add to docker/config/users.toml — server hot-reloads)
+# Approve a user (writes to users.toml — server hot-reloads)
+docker exec sshkey-server sshkey-ctl approve --key "ssh-ed25519 AAAA... Alice" --rooms general
 
 # Revoke a device
 docker exec sshkey-server sshkey-ctl revoke-device --user alice --device dev_x
@@ -201,18 +202,22 @@ sudo journalctl -u sshkey-server -f   # follow logs
 ### Admin
 
 ```bash
-sshkey-ctl pending                                    # view pending key requests
-sshkey-ctl approve --fingerprint FP --name NAME --rooms general  # approve a user
-sshkey-ctl reject --fingerprint FP                    # reject a pending key
-sshkey-ctl list-users                                 # list all users
-sshkey-ctl remove-user carol                          # remove a user
-sshkey-ctl retire-user bob --reason key_lost          # permanently retire an account (bob can no longer authenticate)
-sshkey-ctl list-retired                               # list retired accounts
-sshkey-ctl revoke-device --user alice --device dev_x  # revoke a stolen device
-sshkey-ctl restore-device --user alice --device dev_x # re-authorize a device
-sshkey-ctl host-key                                   # print server host key fingerprint
-sshkey-ctl purge --older-than 5y                      # delete old messages + vacuum
-sshkey-ctl purge --older-than 1y --dry-run            # preview what would be deleted
+sshkey-ctl pending                                             # view pending key requests
+sshkey-ctl approve --key "ssh-ed25519 AAAA... name" --rooms general  # approve (name from key comment)
+sshkey-ctl approve --key "ssh-ed25519 AAAA..." --name NAME --rooms general  # approve (override name)
+sshkey-ctl reject --fingerprint FP                             # reject a pending key
+sshkey-ctl list-users                                          # list all users
+sshkey-ctl remove-user usr_abc123                              # remove a user
+sshkey-ctl retire-user usr_abc123 --reason key_lost            # permanently retire an account
+sshkey-ctl list-retired                                        # list retired accounts
+sshkey-ctl add-to-room --user usr_abc123 --room engineering    # add user to a room
+sshkey-ctl remove-from-room --user usr_abc123 --room engineering  # remove user from a room
+sshkey-ctl revoke-device --user usr_abc123 --device dev_x      # revoke a stolen device
+sshkey-ctl restore-device --user usr_abc123 --device dev_x     # re-authorize a device
+sshkey-ctl status                                              # show server overview
+sshkey-ctl host-key                                            # print server host key fingerprint
+sshkey-ctl purge --older-than 5y                               # delete old messages + vacuum
+sshkey-ctl purge --older-than 1y --dry-run                     # preview what would be deleted
 ```
 
 ## Protocol
@@ -252,7 +257,8 @@ Client connects via SSH with Ed25519 key
 | **Push** | `push_register` | `push_registered` |
 | **Retirement** | `retire_me` | `user_retired`, `retired_users` |
 | **Device management** | `list_devices`, `revoke_device` | `device_list`, `device_revoke_result` |
-| **Admin** | -- | `admin_notify`, `device_revoked`, `server_shutdown` |
+| **Membership** | `room_members` | `room_members_list` |
+| **Admin** | `list_pending_keys` | `admin_notify`, `pending_keys_list`, `device_revoked`, `server_shutdown` |
 | **Errors** | -- | `error` |
 
 ## Storage
