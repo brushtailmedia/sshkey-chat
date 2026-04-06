@@ -93,6 +93,16 @@ docker logs -f sshkey-server
 
 Config files are in `docker/config/` (volume-mounted). Edit them directly — the server watches for changes and reloads automatically.
 
+### Install
+
+```bash
+# Install via go install
+go install github.com/brushtailmedia/sshkey-chat/cmd/sshkey-server@latest
+go install github.com/brushtailmedia/sshkey-chat/cmd/sshkey-ctl@latest
+```
+
+Or download pre-built binaries from [Releases](https://github.com/brushtailmedia/sshkey-chat/releases).
+
 ### Build from source
 
 #### Requirements
