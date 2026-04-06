@@ -339,7 +339,7 @@ CREATE TABLE file_hashes (
 CREATE INDEX idx_epoch_keys_room_user_epoch ON epoch_keys(room, user, epoch);
 CREATE INDEX idx_epoch_keys_user ON epoch_keys(user, room, epoch);
 CREATE INDEX idx_conversation_members_user ON conversation_members(user, conversation_id);
-CREATE INDEX idx_devices_last_synced ON devices(last_synced) WHERE last_synced IS NOT NULL;
+CREATE INDEX idx_devices_last_synced ON devices(last_synced) WHERE last_synced IS NOT NULL AND last_synced != '';
 CREATE INDEX idx_push_tokens_user_active ON push_tokens(user, active);
 ```
 

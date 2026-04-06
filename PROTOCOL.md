@@ -79,6 +79,12 @@ All IDs are Nano IDs with prefixes:
 
 Timestamps are Unix epoch seconds (integer). The server is the single source of truth for ordering.
 
+### Identity Model
+
+Usernames are immutable internal IDs assigned at account creation (Nano IDs with `usr_` prefix, e.g. `usr_V1StGXR8_Z5jdHi6B-myT`). Display names are human-visible, mutable (via `set_profile`), and unique (server-enforced, case-insensitive). All protocol routing, storage, and `from`/`user` fields use the username (nanoid). Clients resolve usernames to display names at render time only, using the `profile` messages received after `welcome`.
+
+On retirement, the display name is suffixed with 4 characters from the nanoid (e.g. "Alice" becomes "Alice_V1St") to free the name for reuse. See `PROJECT.md` section "Identity Model" for the full design.
+
 ## Encryption
 
 The server is a blind relay. All message content is encrypted client-side. The server sees the envelope (routing metadata) but never the payload (content).
@@ -270,14 +276,14 @@ On connect, the server sends the current epoch key for each room:
 
 ```json
 // Server -> Client (paginated, oldest-first)
-{"type":"sync_batch","messages":[...],"epoch_keys":[{"room":"general","epoch":12,"wrapped_key":"base64..."}],"page":1,"has_more":true}
-{"type":"sync_batch","messages":[...],"epoch_keys":[],"page":2,"has_more":false}
+{"type":"sync_batch","messages":[...],"epoch_keys":[{"room":"general","epoch":12,"wrapped_key":"base64..."}],"reactions":[...],"page":1,"has_more":true}
+{"type":"sync_batch","messages":[...],"epoch_keys":[],"reactions":[],"page":2,"has_more":false}
 
 // Server -> Client
 {"type":"sync_complete","synced_to":"2026-04-03T14:22:00Z"}
 ```
 
-Room sync batches include epoch keys needed to decrypt that batch. DM messages carry their own `wrapped_keys` inline. Epoch key deduplication is the client's responsibility -- skip keys you already have.
+Room sync batches include epoch keys needed to decrypt that batch and reactions for the messages in that batch. DM messages carry their own `wrapped_keys` inline. Epoch key deduplication is the client's responsibility -- skip keys you already have.
 
 ### History (Scroll-back)
 
@@ -285,14 +291,14 @@ Room sync batches include epoch keys needed to decrypt that batch. DM messages c
 // Client -> Server
 {"type":"history","room":"general","before":"msg_abc123","limit":100}
 
-// Server -> Client (room -- includes epoch keys)
-{"type":"history_result","room":"general","messages":[...],"epoch_keys":[{"epoch":8,"wrapped_key":"base64..."}],"has_more":true}
+// Server -> Client (room -- includes epoch keys and reactions)
+{"type":"history_result","room":"general","messages":[...],"epoch_keys":[{"epoch":8,"wrapped_key":"base64..."}],"reactions":[...],"has_more":true}
 
 // Client -> Server (DM)
 {"type":"history","conversation":"conv_xK9mQ2pR","before":"msg_def456","limit":100}
 
 // Server -> Client (DM -- no epoch keys, each message carries its own)
-{"type":"history_result","conversation":"conv_xK9mQ2pR","messages":[...],"has_more":true}
+{"type":"history_result","conversation":"conv_xK9mQ2pR","messages":[...],"reactions":[...],"has_more":true}
 ```
 
 Store fetched messages and epoch keys locally -- subsequent scroll-back for the same range is served from the local DB.
@@ -637,6 +643,20 @@ The key and fingerprint are still delivered so clients can verify signatures on 
 ```
 
 Delivered only to connected admin clients.
+
+**Pending key listing (admin-only):**
+
+```json
+// Client -> Server (admin-only, non-admins get error)
+{"type":"list_pending_keys"}
+
+// Server -> Client
+{"type":"pending_keys_list","keys":[
+  {"fingerprint":"SHA256:xx...","attempts":3,"first_seen":"2026-04-03T14:22:00Z","last_seen":"2026-04-04T10:15:00Z"}
+]}
+```
+
+The `/pending` command in the terminal client sends `list_pending_keys` and displays the result in a read-only panel. Approve/reject is done via `sshkey-ctl`.
 
 ### Errors
 
