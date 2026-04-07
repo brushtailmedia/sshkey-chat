@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -521,7 +523,7 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 	// Rate limit
 	if !s.limiter.allow("msg:"+c.Username, float64(s.cfg.Server.RateLimits.MessagesPerSecond)) {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Message rate limit exceeded"})
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Slow down — too many messages. Try again in a moment"})
 		return
 	}
 
@@ -790,6 +792,11 @@ func (s *Server) handleRead(c *Client, raw json.RawMessage) {
 
 // handleReact processes a reaction.
 func (s *Server) handleReact(c *Client, raw json.RawMessage) {
+	if !s.limiter.allowPerMinute("react:"+c.Username, s.cfg.Server.RateLimits.ReactionsPerMinute) {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many reactions — wait a moment"})
+		return
+	}
+
 	var msg protocol.React
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed react"})
@@ -939,6 +946,11 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 
 // handlePin processes a pin request.
 func (s *Server) handlePin(c *Client, raw json.RawMessage) {
+	if !s.limiter.allowPerMinute("pin:"+c.Username, s.cfg.Server.RateLimits.PinsPerMinute) {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many pins — wait a moment"})
+		return
+	}
+
 	var msg protocol.Pin
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
@@ -963,6 +975,11 @@ func (s *Server) handlePin(c *Client, raw json.RawMessage) {
 
 // handleUnpin processes an unpin request.
 func (s *Server) handleUnpin(c *Client, raw json.RawMessage) {
+	if !s.limiter.allowPerMinute("pin:"+c.Username, s.cfg.Server.RateLimits.PinsPerMinute) {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many pins — wait a moment"})
+		return
+	}
+
 	var msg protocol.Unpin
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
@@ -984,6 +1001,11 @@ func (s *Server) handleUnpin(c *Client, raw json.RawMessage) {
 
 // handleCreateDM creates a new DM conversation.
 func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
+	if !s.limiter.allowPerMinute("dm_create:"+c.Username, s.cfg.Server.RateLimits.DMCreatesPerMinute) {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many conversations — wait a moment"})
+		return
+	}
+
 	var msg protocol.CreateDM
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed create_dm"})
@@ -1094,6 +1116,16 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 	rooms := s.cfg.Users[c.Username].Rooms
 	s.cfg.RUnlock()
 
+	// Rate limit — admins get a higher limit
+	limit := s.cfg.Server.RateLimits.DeletesPerMinute
+	if isAdmin {
+		limit = s.cfg.Server.RateLimits.AdminDeletesPerMinute
+	}
+	if !s.limiter.allowPerMinute("delete:"+c.Username, limit) {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many deletes — wait a moment"})
+		return
+	}
+
 	// Search room DBs for the message
 	for _, room := range rooms {
 		db, err := s.store.RoomDB(room)
@@ -1117,10 +1149,12 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 			return
 		}
 
-		if err := s.store.DeleteRoomMessage(room, msg.ID, c.Username); err != nil {
+		fileIDs, err := s.store.DeleteRoomMessage(room, msg.ID, c.Username)
+		if err != nil {
 			s.logger.Error("delete failed", "room", room, "id", msg.ID, "error", err)
 			return
 		}
+		s.cleanupFiles(fileIDs)
 
 		s.broadcastToRoom(room, protocol.Deleted{
 			Type:      "deleted",
@@ -1160,10 +1194,12 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 			return
 		}
 
-		if err := s.store.DeleteConvMessage(conv.ID, msg.ID, c.Username); err != nil {
+		fileIDs, err := s.store.DeleteConvMessage(conv.ID, msg.ID, c.Username)
+		if err != nil {
 			s.logger.Error("delete failed", "conversation", conv.ID, "id", msg.ID, "error", err)
 			return
 		}
+		s.cleanupFiles(fileIDs)
 
 		s.broadcastToConversation(conv.ID, protocol.Deleted{
 			Type:         "deleted",
@@ -1173,6 +1209,20 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 			Conversation: conv.ID,
 		})
 		return
+	}
+}
+
+// cleanupFiles deletes file blobs from disk and their hash entries.
+func (s *Server) cleanupFiles(fileIDs []string) {
+	if s.files == nil || s.store == nil || len(fileIDs) == 0 {
+		return
+	}
+	for _, fid := range fileIDs {
+		if fid == "" {
+			continue
+		}
+		os.Remove(filepath.Join(s.files.dir, fid))
+		s.store.DeleteFileHash(fid)
 	}
 }
 
@@ -1243,6 +1293,11 @@ func (s *Server) handleRenameConversation(c *Client, raw json.RawMessage) {
 
 // handleSetProfile updates a user's profile and broadcasts.
 func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
+	if !s.limiter.allowPerMinute("profile:"+c.Username, s.cfg.Server.RateLimits.ProfilesPerMinute) {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Profile updated too often — wait a moment"})
+		return
+	}
+
 	var msg protocol.SetProfile
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return

@@ -171,7 +171,7 @@ func (s *Server) syncConversation(c *Client, convID string, sinceTS int64, limit
 // handleHistory processes a history (scroll-back) request.
 func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 	if !s.limiter.allowPerMinute("history:"+c.Username, s.cfg.Server.RateLimits.HistoryPerMinute) {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "History rate limit exceeded"})
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many requests — wait a moment"})
 		return
 	}
 

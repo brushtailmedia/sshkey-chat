@@ -144,7 +144,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 
 	// Test message deletion
-	err = s.DeleteRoomMessage("general", "msg_test001", "alice")
+	_, err = s.DeleteRoomMessage("general", "msg_test001", "alice")
 	if err != nil {
 		t.Fatalf("delete message: %v", err)
 	}

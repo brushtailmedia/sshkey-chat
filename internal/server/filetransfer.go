@@ -96,7 +96,7 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 			Type:     "upload_error",
 			UploadID: msg.UploadID,
 			Code:     protocol.ErrRateLimited,
-			Message:  "Upload rate limit exceeded",
+			Message:  "Too many uploads — wait a moment",
 		})
 		return
 	}

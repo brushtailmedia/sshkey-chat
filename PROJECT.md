@@ -1958,23 +1958,103 @@ type Overlay interface {
 
 ## Future: Message Editing
 
-**Status:** Feature request.
+**Status:** Feature request — design complete.
 
-### Protocol
+### Constraints
+
+- **Only the user's most recent message in the current room/conversation** can be edited — not globally, not across contexts. Server validates per-room/per-conversation.
+- **Room messages:** must be in the current or previous epoch (same grace window as sends). Epoch rotation naturally bounds the edit window (~100 messages or 1 hour).
+- **DM messages:** no epoch restriction (per-message keys are independent)
+- **Original content is replaced** — no edit history retained (matches Signal behavior)
+- **`edited_at` is set by the server** (authoritative, in the envelope, not the payload)
+- **Body-only edits.** Attachments are immutable — `file_ids` stay on the message. To change attachments, delete and re-send.
+- **`reply_to` is immutable.** Edits cannot change what a message replies to. Thread structure must be stable.
+- **No notifications on edit.** Mention extraction runs on the edited body for highlight rendering, but no push/notification fires. An edit is a correction, not a new message.
+- **Cannot edit deleted messages.** Server rejects edit/edit_dm if `deleted = 1`. Client does not offer the edit shortcut on deleted messages. Enforced at both layers.
+
+### Room editing
+
+Same epoch key, new ciphertext. Simple — the key everyone already has encrypts the new payload.
 
 ```json
 // Client -> Server
 {"type":"edit","id":"msg_abc123","room":"general","epoch":3,"payload":"base64...","signature":"base64..."}
 
-// Server -> Client (broadcast)
+// Server -> Client (broadcast — full envelope, not a diff)
 {"type":"edited","id":"msg_abc123","room":"general","from":"alice","ts":1712345680,"epoch":3,"payload":"base64...","signature":"base64...","edited_at":1712345690}
 ```
 
-- Same encryption model as send (epoch key for rooms, wrapped keys for DMs)
-- Server validates: sender must be original author, epoch must be current or previous
-- Decrypted payload contains the new body, same `seq`/`device_id` structure
-- TUI shows "(edited)" marker after timestamp. Local DB updates body in-place.
-- Edit history is not retained — only the latest version is stored (matches Signal/iMessage behavior)
+Server validates: sender is original author, message is their most recent in the room, epoch is current or previous, message is not deleted. Replaces stored payload, sets `edited_at`. Broadcasts full envelope with `edited_at`.
+
+### DM editing
+
+Fresh per-message key for the edit. The original K_msg is effectively dead — server no longer stores content encrypted with it. This preserves per-message key isolation (compromising the old key doesn't expose the edited content, and vice versa).
+
+```json
+// Client -> Server
+{"type":"edit_dm","id":"msg_def456","conversation":"conv_abc",
+ "wrapped_keys":{"alice":"base64...","bob":"base64..."},
+ "payload":"base64...","signature":"base64..."}
+
+// Server -> Client (broadcast — full envelope, not a diff)
+{"type":"dm_edited","id":"msg_def456","conversation":"conv_abc","from":"alice","ts":1712345680,
+ "wrapped_keys":{"alice":"base64...","bob":"base64..."},
+ "payload":"base64...","signature":"base64...","edited_at":1712345690}
+```
+
+Server validates: sender is original author, message is their most recent in the conversation, `wrapped_keys` matches current member list, message is not deleted. Replaces stored payload and wrapped_keys, sets `edited_at`. Message ID and original timestamp preserved — replies, reactions, and pins still reference the same ID.
+
+### Rate limiting
+
+Edits have their own rate limit bucket: `edits_per_minute`, default 10/min. Separate from sends — an edit is a correction, not a conversation action, and shouldn't compete with the send rate.
+
+### Sync and history
+
+Server stores `edited_at` on the message row. When serializing for `sync_batch` or `history_result`, include `edited_at` in the envelope when non-zero. Clients that reconnect after an edit see the edited body with the "(edited)" marker. Old clients ignore the unknown field (forward compatibility rule).
+
+### Client DB
+
+Same migration pattern as `deleted`/`deleted_by`:
+
+```sql
+ALTER TABLE messages ADD COLUMN edited_at INTEGER NOT NULL DEFAULT 0;
+```
+
+On receiving `edited`/`dm_edited`, update body and set `edited_at` in local DB and in-memory DisplayMessage. `LoadFromDB` maps it. `View()` renders "(edited)" in timestamp style when non-zero.
+
+### TUI rendering
+
+`Alice  3:04 PM (edited)` — the "(edited)" marker renders in the dim timestamp style. No hover/tooltip needed in terminal.
+
+### TUI interaction
+
+- **Up arrow** when input is empty: populates input with last message body, enters edit mode. Sends as `edit`/`edit_dm` on Enter. `Esc` cancels and returns to normal compose mode.
+- **Visual feedback:** Input bar shows "Editing message" indicator (same style as "replying to" indicator).
+- **Stale epoch:** If the epoch rotated between pressing Up and pressing Enter, server rejects. Client shows "Edit window expired" — user can delete the message instead.
+
+### Signatures
+
+Same canonical serialization as normal sends. The edit signature covers the new payload bytes + room/epoch (rooms) or conversation/wrapped_keys (DMs). Recipients verify against the sender's key. Invalid signature = same "failed verification" warning as for normal messages.
+
+### Multi-device
+
+Last-write-wins. Two devices editing the same message concurrently — second edit overwrites the first. No conflict resolution, no merge, no lock. Both devices see the final result via server broadcast.
+
+### Reactions on edit
+
+Server clears reactions on the edited message (reactions were for the original content). Broadcasts `reaction_removed` for each cleared reaction so clients stay in sync.
+
+### Why not reuse the original DM key?
+
+AES-GCM with the same key and a new random nonce is technically safe for a single edit. But generating a fresh K_msg is cheap (one key generation + wraps per member) and preserves the security model: each encryption operation uses its own key. No reason to cut corners.
+
+### Why not delete + re-create for DMs?
+
+Changing the message ID breaks `reply_to`, reaction, and pin references. Other clients who already received the original would see a deletion followed by a "new" message instead of an in-place edit. Timestamp manipulation is also problematic — the server is the source of truth for `ts`.
+
+### Why full envelope broadcast, not a diff?
+
+A diff is fragile — if the client's local copy diverged (missed a sync, different decryption state), the patch produces garbage. A full envelope is self-contained and idempotent. A client that missed the original message can display the edited version standalone.
 
 ---
 
@@ -2021,3 +2101,139 @@ The `Attachment` struct has `thumbnail_id` but nothing generates thumbnails. Ser
 5. Recipients download the small thumbnail first for fast preview, full image on demand
 
 Libraries: `imaging` (Go), `image/jpeg` stdlib. Adds ~200ms to upload for typical photos.
+
+---
+
+## Future: Send Text Recovery (TUI)
+
+**Status:** Nice-to-have. Not a UX problem since persistent error display was implemented.
+
+### Current behavior (implemented)
+
+Server errors now persist in the status bar until the user takes their next action (send, react, reply, pin, delete, slash command). Error messages are user-friendly ("Slow down — too many messages. Try again in a moment" instead of "rate_limited"). The user sees the rejection, understands what happened, and can retype.
+
+The typed text is still lost from the input bar on rejection (the input clears before the server responds). This is mildly inconvenient but no longer a mystery — the error is clearly visible.
+
+### Proposed enhancement
+
+Save the last sent text and restore it on server rejection. This saves retyping but is a convenience, not a fix for a broken flow.
+
+1. **Stash last sent text.** Before clearing the input, save the text and reply context in a `lastSent` field.
+2. **Restore on rejection.** When an `error` message arrives with a `ref` matching the last sent message ID, restore the stashed text to the input bar.
+3. **Clear stash on success.** When the sent message echoes back (appears in the message list via `message`/`dm`), clear the stash.
+4. **Timeout.** If no echo or error arrives within 5 seconds, clear the stash (message likely accepted).
+
+Low priority — the persistent error display and clear error messages already solve the core UX issue.
+
+---
+
+## Future: Room Deletion
+
+**Status:** Feature request.
+
+### sshkey-ctl delete-room
+
+Admin-only CLI command: `sshkey-ctl delete-room --name general [--purge]`
+
+### Flow
+
+1. Remove room from `rooms.toml` (atomic write)
+2. Server detects via file watcher:
+   - Removes all users from the room in memory
+   - Broadcasts `room_event` leave for every member
+   - Broadcasts `room_deleted` event (new message type): `{"type":"room_deleted","room":"general"}`
+3. **Data handling (default):** Archive the DB file — rename `room-general.db` to `room-general.db.archived`. Admin can restore manually later.
+4. **Data handling (--purge flag):** Hard-delete the DB file. Permanent, irreversible.
+5. **Client side:** On `room_deleted`, remove from sidebar, clear messages if active context, show system message "Room #general was deleted."
+
+### Design notes
+
+- No bulk message deletion through the protocol — bulk operations are admin CLI only
+- If you want to keep the room but clear history, use `sshkey-ctl purge --room general --older-than 0d`
+- Room deletion is visible and auditable — cannot silently wipe a room's messages without deleting the room itself
+- Archived DBs can be restored by renaming back and re-adding the room to rooms.toml
+
+---
+
+## Attachment Lifecycle
+
+File blobs follow the message lifecycle — when a message is deleted, its attachments are cleaned up. No orphaned files.
+
+### On message delete (server)
+
+1. Soft-delete the message row (already done)
+2. Query `file_ids` from the message row
+3. Delete each file blob from disk (`files/<file_id>`)
+4. Delete `file_hashes` entries for those file IDs
+5. Delete pins referencing the deleted message (pinned tombstones are useless)
+6. Delete reactions (already done)
+
+### On message purge (sshkey-ctl)
+
+Same cleanup — when `purge --older-than` deletes old messages, also delete the file blobs and `file_hashes` entries for those messages.
+
+### On message delete (client)
+
+Delete local cached files for the message's `file_id`s from the client's `files/` directory if they exist.
+
+### Download of deleted files
+
+Returns `download_error` with `not_found` — the file blob was deleted. Client already handles this gracefully.
+
+### Tombstone display
+
+"Message deleted" — no mention of attachments. The content is gone, knowing there were attachments doesn't add value.
+
+---
+
+## Message Deletion Model
+
+### Rate limits
+
+| Actor | Limit | Default |
+|---|---|---|
+| User (own messages) | `deletes_per_minute` | 10/min |
+| Admin (any room message) | `admin_deletes_per_minute` | 50/min |
+
+### Permissions
+
+| Context | Who can delete | Notes |
+|---|---|---|
+| Room — own message | Any user | Rate limited |
+| Room — other's message | Admin only | Rate limited (admin rate) |
+| DM — own message | Any user | Rate limited |
+| DM — other's message | Nobody | Not even admins |
+
+### No bulk delete through the protocol
+
+There is no `delete_all` or bulk delete endpoint. Users delete one message at a time, throttled by the rate limit. This is intentional — the rate limit prevents accidental or malicious bulk wipes and gives admins time to intervene.
+
+Bulk operations are admin CLI only:
+- `sshkey-ctl delete-room` — deletes the entire room (archive or purge)
+- `sshkey-ctl purge --older-than` — time-based cleanup across all rooms
+
+### Message deletion on retirement (optional)
+
+When a user retires their account (via `retire_me` or `sshkey-ctl retire-user`), they may optionally request deletion of all their messages. This is **not the default** — retirement alone leaves messages intact (with a retired sender marker).
+
+To opt in:
+
+```json
+// Client -> Server
+{"type":"retire_me","reason":"self_compromise","delete_messages":true}
+```
+
+Or via CLI:
+
+```bash
+sshkey-ctl retire-user usr_abc --reason key_lost --delete-messages
+```
+
+When `delete_messages` is true:
+- Server soft-deletes all messages by the retiring user across all rooms and conversations
+- Broadcasts tombstones for each deleted message (rate-unlimited — this is a one-time server-side operation, not user-driven)
+- Reactions on deleted messages are cleaned up
+- Connected clients receive the tombstones and update their displays
+- Offline clients receive tombstones in their next sync batch
+
+This is the only path to bulk message deletion. It is permanent, tied to an irreversible account action, and fully auditable.

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Rate limits** — deletes (10/min user, 50/min admin), reactions (30/min), DM creation (5/min), profile changes (5/min), pin/unpin (10/min), connections (20/min)
+- **Soft-delete** — message deletion is a soft-delete with tombstones sent in sync/history; reactions on deleted messages are cleaned up
+- **File cleanup on delete** — file blobs, hashes, and pins cleaned up when messages are deleted or purged. No more orphaned files on disk.
+- **User-friendly errors** — rate limit and conflict messages now use plain language ("Slow down — too many messages" instead of "rate_limited")
+- **Room membership query** — `room_members` / `room_members_list` protocol messages with auth enforcement
+- **sshkey-ctl improvements** — `approve` writes directly to users.toml (was advisory), `add-to-room`, `remove-from-room`, `status` commands, duplicate key detection, Ed25519 enforcement, display name validation
+- **Module path** — changed from `github.com/brushtailmedia/sshkey` to `github.com/brushtailmedia/sshkey-chat`
+
 ## v0.1.0 — 2026-04-07
 
 Initial release.

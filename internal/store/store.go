@@ -104,6 +104,11 @@ func (s *Store) GetFileHash(fileID string) (string, error) {
 	return hash, err
 }
 
+// DeleteFileHash removes a file hash entry.
+func (s *Store) DeleteFileHash(fileID string) {
+	s.usersDB.Exec(`DELETE FROM file_hashes WHERE file_id = ?`, fileID)
+}
+
 // openDB opens a SQLite database in WAL mode.
 func (s *Store) openDB(name string) (*sql.DB, error) {
 	path := filepath.Join(s.dir, name)

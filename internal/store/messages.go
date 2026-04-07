@@ -151,34 +151,50 @@ func scanMessages(rows *sql.Rows) ([]StoredMessage, error) {
 }
 
 // DeleteMessage marks a message as deleted (tombstone).
-func (s *Store) DeleteRoomMessage(room, msgID, deletedBy string) error {
+func (s *Store) DeleteRoomMessage(room, msgID, deletedBy string) ([]string, error) {
 	db, err := s.RoomDB(room)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	return deleteMessage(db, msgID, deletedBy)
 }
 
-// DeleteConvMessage marks a DM message as deleted.
-func (s *Store) DeleteConvMessage(convID, msgID, deletedBy string) error {
+// DeleteConvMessage marks a DM message as deleted. Returns file IDs for cleanup.
+func (s *Store) DeleteConvMessage(convID, msgID, deletedBy string) ([]string, error) {
 	db, err := s.ConvDB(convID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	return deleteMessage(db, msgID, deletedBy)
 }
 
-func deleteMessage(db *sql.DB, msgID, deletedBy string) error {
+// deleteMessage soft-deletes a message and returns its file IDs for cleanup.
+func deleteMessage(db *sql.DB, msgID, deletedBy string) ([]string, error) {
+	// Get file IDs before clearing payload
+	var fileIDsStr string
+	db.QueryRow(`SELECT file_ids FROM messages WHERE id = ?`, msgID).Scan(&fileIDsStr)
+
 	result, err := db.Exec(`UPDATE messages SET deleted = 1, payload = '', sender = ? WHERE id = ?`,
 		deletedBy, msgID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
-		return sql.ErrNoRows
+		return nil, sql.ErrNoRows
 	}
-	return nil
+	// Clean up reactions and pins on the deleted message
+	db.Exec(`DELETE FROM reactions WHERE message_id = ?`, msgID)
+	db.Exec(`DELETE FROM pins WHERE message_id = ?`, msgID)
+
+	var fileIDs []string
+	if fileIDsStr != "" {
+		if err := json.Unmarshal([]byte(fileIDsStr), &fileIDs); err != nil {
+			// Try comma-separated fallback
+			fileIDs = strings.Split(fileIDsStr, ",")
+		}
+	}
+	return fileIDs, nil
 }
 
 // GetRoomMessagesBefore retrieves messages from a room before a specific message ID.

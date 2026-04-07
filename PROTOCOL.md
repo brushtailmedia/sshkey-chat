@@ -313,7 +313,9 @@ Store fetched messages and epoch keys locally -- subsequent scroll-back for the 
 {"type":"deleted","id":"msg_abc123","deleted_by":"alice","ts":1712345679,"room":"general"}
 ```
 
-Rooms: own messages or admin. DMs: own messages only. Tombstones are interleaved in `sync_batch` and `history_result`.
+Rooms: own messages or admin. DMs: own messages only. Rate limited: 10 deletes/min for users, 50/min for admins.
+
+Deletion is a **soft-delete** — the server keeps the message row with `deleted = 1` and cleared payload. Tombstones (`{"type":"deleted",...}`) are interleaved in `sync_batch` and `history_result` so clients that reconnect after a deletion receive the tombstone and update their display. Clients should render deleted messages as visible tombstones in the message stream (e.g. "message deleted") rather than removing them, to preserve conversation flow.
 
 ### Typing Indicators
 
@@ -677,7 +679,7 @@ The `/pending` command in the terminal client sends `list_pending_keys` and disp
 | Code | When |
 |---|---|
 | `not_authorized` | No access to room/conversation, or can't delete another user's message |
-| `rate_limited` | Any rate limit exceeded |
+| `rate_limited` | Any rate limit exceeded (messages, uploads, history, deletes, reactions, DM creation, profile changes, pins) |
 | `message_too_large` | Body exceeds 16KB |
 | `upload_too_large` | File exceeds server max |
 | `epoch_conflict` | Another client's rotation was accepted first |

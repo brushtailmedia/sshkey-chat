@@ -93,6 +93,12 @@ type RateLimitsSection struct {
 	FailedAuthPerMinute  int `toml:"failed_auth_per_minute"`
 	TypingPerSecond      int `toml:"typing_per_second"`
 	HistoryPerMinute     int `toml:"history_per_minute"`
+	DeletesPerMinute      int `toml:"deletes_per_minute"`
+	AdminDeletesPerMinute int `toml:"admin_deletes_per_minute"`
+	ReactionsPerMinute    int `toml:"reactions_per_minute"`
+	DMCreatesPerMinute   int `toml:"dm_creates_per_minute"`
+	ProfilesPerMinute    int `toml:"profiles_per_minute"`
+	PinsPerMinute        int `toml:"pins_per_minute"`
 }
 
 type ShutdownSection struct {
@@ -178,10 +184,16 @@ func DefaultServerConfig() ServerConfig {
 		RateLimits: RateLimitsSection{
 			MessagesPerSecond:    5,
 			UploadsPerMinute:     60,
-			ConnectionsPerMinute: 10,
+			ConnectionsPerMinute: 20,
 			FailedAuthPerMinute:  5,
 			TypingPerSecond:      1,
 			HistoryPerMinute:     50,
+			DeletesPerMinute:      10,
+			AdminDeletesPerMinute: 50,
+			ReactionsPerMinute:    30,
+			DMCreatesPerMinute:   5,
+			ProfilesPerMinute:    5,
+			PinsPerMinute:        10,
 		},
 		Shutdown: ShutdownSection{
 			GracePeriod: "10s",

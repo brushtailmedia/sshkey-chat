@@ -758,6 +758,24 @@ func cmdPurge(dataDir string, args []string) error {
 		if dryRun {
 			fmt.Printf("  %s: would delete %d messages\n", name, count)
 		} else {
+			// Collect file IDs from messages being purged
+			fileRows, _ := db.Query("SELECT file_ids FROM messages WHERE ts < ? AND file_ids != ''", cutoff)
+			if fileRows != nil {
+				for fileRows.Next() {
+					var fids string
+					fileRows.Scan(&fids)
+					if fids != "" {
+						for _, fid := range strings.Split(strings.Trim(fids, "[]\""), ",") {
+							fid = strings.Trim(fid, " \"")
+							if fid != "" {
+								os.Remove(filepath.Join(dataDir, "data", "files", fid))
+								st.UsersDB().Exec("DELETE FROM file_hashes WHERE file_id = ?", fid)
+							}
+						}
+					}
+				}
+				fileRows.Close()
+			}
 			db.Exec("DELETE FROM messages WHERE ts < ?", cutoff)
 			db.Exec("DELETE FROM reactions WHERE ts < ?", cutoff)
 			db.Exec("VACUUM")

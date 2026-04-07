@@ -285,7 +285,7 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 		c.Encoder.Encode(protocol.Error{
 			Type:    "error",
 			Code:    protocol.ErrEpochConflict,
-			Message: "Epoch rotation conflict or no pending rotation",
+			Message: "Conflict detected — please try again",
 		})
 		return
 	}
@@ -336,7 +336,7 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 		c.Encoder.Encode(protocol.Error{
 			Type:    "error",
 			Code:    protocol.ErrEpochConflict,
-			Message: "Epoch rotation could not be completed",
+			Message: "Conflict detected — please try again",
 		})
 		return
 	}

@@ -139,6 +139,12 @@ max_per_user = 10
 messages_per_second = 5
 uploads_per_minute = 60
 history_per_minute = 50
+deletes_per_minute = 10
+admin_deletes_per_minute = 50
+reactions_per_minute = 30
+dm_creates_per_minute = 5
+profiles_per_minute = 5
+pins_per_minute = 10
 ```
 
 See `testdata/config/server.toml` for a complete example with all options.
