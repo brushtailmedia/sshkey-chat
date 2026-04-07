@@ -29,7 +29,7 @@ Server machine
 │   └── rooms.toml          -- room definitions (name, topic)
 └── /var/sshkey-chat/
     ├── pending-keys.log    -- unrecognised keys that tried to connect
-    └── data/               -- SQLite DBs (encrypted blobs -- rooms, DMs, users.db)
+    └── data/               -- SQLite DBs (encrypted blobs -- rooms, DMs, data.db)
 ```
 
 **Port separation:**
@@ -339,7 +339,7 @@ Libraries: jaevor/go-nanoid (Go), nanoid crate (Rust)
 **Server tracks per device:**
 
 ```
-Server: users.db
+Server: data.db
 ┌──────────────────────────────────────────────────┐
 │ user    │ device_id          │ last_synced_at     │
 ├─────────┼───────────────────┼───────────────────┤
@@ -1397,7 +1397,7 @@ Server                              Client (per server)
 │ room-engineering.db │  ── sync -> │ messages.db         │
 │ conv-xK9mQ2pR.db   │             │ (single encrypted   │
 │ conv-yL0nR3qS.db   │             │  DB, all rooms +    │
-│ users.db (metadata, │             │  all DMs, one FTS5  │
+│ data.db (metadata, │             │  all DMs, one FTS5  │
 │  device tracking,   │             │  index)             │
 │  profiles)          │             │                     │
 └─────────────────────┘             └─────────────────────┘
@@ -1406,7 +1406,7 @@ Server                              Client (per server)
 **Server: separated by access boundary. Server stores encrypted blobs only.**
 - One DB per room -- encrypted message blobs, scoped to room permissions
 - One DB per DM conversation (`conv-{id}.db`) -- covers both 1:1 and group DMs. Encrypted blobs. All members read/write the same DB.
-- `users.db` for metadata (sync watermarks per device, first_seen, key-to-user mapping, device registry, profiles/display names/avatar references, wrapped epoch keys for rooms)
+- `data.db` for metadata (sync watermarks per device, first_seen, key-to-user mapping, device registry, profiles/display names/avatar references, wrapped epoch keys for rooms)
 - Server maintains a mapping of `user -> [accessible conversation DBs]`
 - When a user is removed: revoke access to room DBs, trigger epoch rotation for rooms (remaining members get new key). DMs need no action -- per-message keys mean the next message simply won't be wrapped for the removed user.
 

@@ -187,7 +187,7 @@ func (s *Server) sendEpochKeys(c *Client) {
 	}
 
 	s.cfg.RLock()
-	rooms := s.cfg.Users[c.Username].Rooms
+	rooms := s.cfg.Users[c.UserID].Rooms
 	s.cfg.RUnlock()
 
 	for _, room := range rooms {
@@ -208,7 +208,7 @@ func (s *Server) sendEpochKeys(c *Client) {
 			continue
 		}
 
-		wrappedKey, err := s.store.GetEpochKey(room, epoch, c.Username)
+		wrappedKey, err := s.store.GetEpochKey(room, epoch, c.UserID)
 		if err != nil {
 			continue // no key for this user (new member, needs rotation)
 		}
@@ -229,7 +229,7 @@ func (s *Server) triggerEpochRotation(c *Client, room string, reason string) {
 		// Cancel and let the next sender pick it up via checkRotationNeeded.
 		s.logger.Warn("epoch rotation timed out",
 			"room", room,
-			"triggered_by", c.Username,
+			"triggered_by", c.UserID,
 			"trigger", reason,
 		)
 	})
@@ -256,7 +256,7 @@ func (s *Server) triggerEpochRotation(c *Client, room string, reason string) {
 	s.logger.Info("epoch trigger",
 		"room", room,
 		"new_epoch", newEpoch,
-		"triggered_by", c.Username,
+		"triggered_by", c.UserID,
 		"trigger", reason,
 		"members", len(members),
 	)
@@ -344,7 +344,7 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 	s.logger.Info("epoch rotation complete",
 		"room", msg.Room,
 		"epoch", msg.Epoch,
-		"rotated_by", c.Username,
+		"rotated_by", c.UserID,
 		"members", len(msg.WrappedKeys),
 	)
 
@@ -363,7 +363,7 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 		if client.DeviceID == c.DeviceID {
 			continue // already sent epoch_confirmed
 		}
-		wrappedKey, ok := msg.WrappedKeys[client.Username]
+		wrappedKey, ok := msg.WrappedKeys[client.UserID]
 		if !ok {
 			continue // not in this room
 		}

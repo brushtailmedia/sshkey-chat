@@ -14,7 +14,7 @@ func (s *Store) SetReadPosition(user, deviceID, room, convID, lastRead string) e
 	if convID == "" {
 		convID = ""
 	}
-	_, err := s.usersDB.Exec(`
+	_, err := s.dataDB.Exec(`
 		INSERT INTO read_positions (user, device_id, room, conversation_id, last_read, ts)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT (user, device_id, room, conversation_id)
@@ -29,13 +29,13 @@ func (s *Store) GetReadPosition(user, deviceID, room, convID string) (string, er
 	var lastRead string
 	var err error
 	if room != "" {
-		err = s.usersDB.QueryRow(`
+		err = s.dataDB.QueryRow(`
 			SELECT last_read FROM read_positions
 			WHERE user = ? AND device_id = ? AND room = ?`,
 			user, deviceID, room,
 		).Scan(&lastRead)
 	} else {
-		err = s.usersDB.QueryRow(`
+		err = s.dataDB.QueryRow(`
 			SELECT last_read FROM read_positions
 			WHERE user = ? AND device_id = ? AND conversation_id = ?`,
 			user, deviceID, convID,

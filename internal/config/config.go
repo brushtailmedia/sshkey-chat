@@ -152,7 +152,8 @@ type User struct {
 
 // Room represents a single room entry from rooms.toml.
 type Room struct {
-	Topic string `toml:"topic"`
+	DisplayName string `toml:"display_name,omitempty"` // human-visible name (populated from TOML section key on seed)
+	Topic       string `toml:"topic"`
 }
 
 // DefaultServerConfig returns a ServerConfig with all defaults applied.
@@ -217,7 +218,7 @@ func LoadServerConfig(path string) (ServerConfig, error) {
 	return cfg, nil
 }
 
-// LoadUsers reads and parses users.toml. Returns a map of username -> User.
+// LoadUsers reads and parses users.toml. Returns a map of userID -> User.
 func LoadUsers(path string) (map[string]User, error) {
 	var raw map[string]User
 	if _, err := toml.DecodeFile(path, &raw); err != nil {

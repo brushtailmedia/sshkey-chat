@@ -8,7 +8,7 @@ import (
 
 // Client represents a connected client session.
 type Client struct {
-	Username        string
+	UserID          string // nanoid (usr_ prefix) — immutable identity
 	DeviceID        string
 	Encoder         *protocol.Encoder
 	Decoder         *protocol.Decoder

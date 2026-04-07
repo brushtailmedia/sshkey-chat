@@ -186,7 +186,7 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 
 	// Register client
 	client := &Client{
-		Username:     username,
+		UserID:       username,
 		DeviceID:     clientHello.DeviceID,
 		Encoder:      enc,
 		Decoder:      dec,
@@ -224,7 +224,7 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 		// up by handleBinaryChannel's error path.
 		s.files.mu.Lock()
 		for id, p := range s.files.uploads {
-			if p.user == client.Username {
+			if p.user == client.UserID {
 				delete(s.files.uploads, id)
 			}
 		}
@@ -303,9 +303,20 @@ func (s *Server) sendRoomList(c *Client) {
 	defer s.cfg.RUnlock()
 
 	var rooms []protocol.RoomInfo
-	for _, roomName := range s.cfg.Users[c.Username].Rooms {
-		room := s.cfg.Rooms[roomName]
-		// Count members in this room
+	for _, roomName := range s.cfg.Users[c.UserID].Rooms {
+		// Get topic — try rooms.db first, fall back to config during migration
+		topic := ""
+		if s.store != nil {
+			if room, _ := s.store.GetRoomByDisplayName(roomName); room != nil {
+				topic = room.Topic
+			}
+		}
+		if topic == "" {
+			if cfgRoom, ok := s.cfg.Rooms[roomName]; ok {
+				topic = cfgRoom.Topic
+			}
+		}
+		// Count members in this room (moves to rooms.db in Phase 4b)
 		memberCount := 0
 		for _, u := range s.cfg.Users {
 			for _, r := range u.Rooms {
@@ -317,7 +328,7 @@ func (s *Server) sendRoomList(c *Client) {
 		}
 		rooms = append(rooms, protocol.RoomInfo{
 			Name:    roomName,
-			Topic:   room.Topic,
+			Topic:   topic,
 			Members: memberCount,
 		})
 	}
@@ -334,9 +345,9 @@ func (s *Server) sendConversationList(c *Client) {
 		return
 	}
 
-	convs, err := s.store.GetUserConversations(c.Username)
+	convs, err := s.store.GetUserConversations(c.UserID)
 	if err != nil {
-		s.logger.Error("failed to get conversations", "user", c.Username, "error", err)
+		s.logger.Error("failed to get conversations", "user", c.UserID, "error", err)
 		return
 	}
 
@@ -367,7 +378,7 @@ func (s *Server) sendProfiles(c *Client) {
 
 	s.cfg.RLock()
 	clientRooms := make(map[string]bool)
-	for _, r := range s.cfg.Users[c.Username].Rooms {
+	for _, r := range s.cfg.Users[c.UserID].Rooms {
 		clientRooms[r] = true
 	}
 	for username, user := range s.cfg.Users {
@@ -382,7 +393,7 @@ func (s *Server) sendProfiles(c *Client) {
 
 	// Also include DM conversation members
 	if s.store != nil {
-		convs, err := s.store.GetUserConversations(c.Username)
+		convs, err := s.store.GetUserConversations(c.UserID)
 		if err == nil {
 			for _, conv := range convs {
 				for _, m := range conv.Members {
@@ -418,7 +429,7 @@ func (s *Server) sendProfiles(c *Client) {
 		// for fields users can customize at runtime.
 		if s.store != nil {
 			var dbDisplayName, dbAvatarID sql.NullString
-			s.store.UsersDB().QueryRow(
+			s.store.DataDB().QueryRow(
 				`SELECT display_name, avatar_id FROM profiles WHERE user = ?`,
 				username).Scan(&dbDisplayName, &dbAvatarID)
 			if dbDisplayName.Valid && dbDisplayName.String != "" {
@@ -449,14 +460,14 @@ func (s *Server) messageLoop(c *Client) {
 		raw, err := c.Decoder.DecodeRaw()
 		if err != nil {
 			if err != io.EOF {
-				s.logger.Error("read error", "user", c.Username, "error", err)
+				s.logger.Error("read error", "user", c.UserID, "error", err)
 			}
 			return
 		}
 
 		msgType, err := protocol.TypeOf(raw)
 		if err != nil {
-			s.logger.Warn("invalid message", "user", c.Username, "error", err)
+			s.logger.Warn("invalid message", "user", c.UserID, "error", err)
 			continue
 		}
 
@@ -516,14 +527,14 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 	case "read":
 		s.handleRead(c, raw)
 	default:
-		s.logger.Debug("unhandled message type", "user", c.Username, "type", msgType)
+		s.logger.Debug("unhandled message type", "user", c.UserID, "type", msgType)
 	}
 }
 
 // handleSend processes a room message.
 func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 	// Rate limit
-	if !s.limiter.allow("msg:"+c.Username, float64(s.cfg.Server.RateLimits.MessagesPerSecond)) {
+	if !s.limiter.allow("msg:"+c.UserID, float64(s.cfg.Server.RateLimits.MessagesPerSecond)) {
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Slow down — too many messages. Try again in a moment"})
 		return
 	}
@@ -542,7 +553,7 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 
 	// Verify user is in this room
 	s.cfg.RLock()
-	user := s.cfg.Users[c.Username]
+	user := s.cfg.Users[c.UserID]
 	s.cfg.RUnlock()
 
 	inRoom := false
@@ -591,7 +602,7 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 	outMsg := protocol.Message{
 		Type:      "message",
 		ID:        generateID("msg_"),
-		From:      c.Username,
+		From:      c.UserID,
 		Room:      msg.Room,
 		TS:        time.Now().Unix(),
 		Epoch:     msg.Epoch,
@@ -641,7 +652,7 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 
 	// Validate conversation exists and user is a member
 	if s.store != nil {
-		isMember, err := s.store.IsConversationMember(msg.Conversation, c.Username)
+		isMember, err := s.store.IsConversationMember(msg.Conversation, c.UserID)
 		if err != nil || !isMember {
 			c.Encoder.Encode(protocol.Error{
 				Type:    "error",
@@ -699,7 +710,7 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 	outMsg := protocol.DM{
 		Type:         "dm",
 		ID:           generateID("msg_"),
-		From:         c.Username,
+		From:         c.UserID,
 		Conversation: msg.Conversation,
 		TS:           time.Now().Unix(),
 		WrappedKeys:  msg.WrappedKeys,
@@ -738,7 +749,7 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 
 // handleTyping broadcasts a typing indicator to others (not the sender).
 func (s *Server) handleTyping(c *Client, raw json.RawMessage) {
-	if !s.limiter.allow("typing:"+c.Username, float64(s.cfg.Server.RateLimits.TypingPerSecond)) {
+	if !s.limiter.allow("typing:"+c.UserID, float64(s.cfg.Server.RateLimits.TypingPerSecond)) {
 		return // silently dropped per spec
 	}
 
@@ -748,13 +759,13 @@ func (s *Server) handleTyping(c *Client, raw json.RawMessage) {
 	}
 
 	// Track typing for server-side expiry
-	s.typing.Touch(c.Username, msg.Room, msg.Conversation)
+	s.typing.Touch(c.UserID, msg.Room, msg.Conversation)
 
 	out := protocol.Typing{
 		Type:         "typing",
 		Room:         msg.Room,
 		Conversation: msg.Conversation,
-		User:         c.Username,
+		User:         c.UserID,
 	}
 
 	if msg.Room != "" {
@@ -773,14 +784,14 @@ func (s *Server) handleRead(c *Client, raw json.RawMessage) {
 
 	// Store read position
 	if s.store != nil {
-		s.store.SetReadPosition(c.Username, c.DeviceID, msg.Room, msg.Conversation, msg.LastRead)
+		s.store.SetReadPosition(c.UserID, c.DeviceID, msg.Room, msg.Conversation, msg.LastRead)
 	}
 
 	out := protocol.Read{
 		Type:         "read",
 		Room:         msg.Room,
 		Conversation: msg.Conversation,
-		User:         c.Username,
+		User:         c.UserID,
 		LastRead:     msg.LastRead,
 	}
 
@@ -793,7 +804,7 @@ func (s *Server) handleRead(c *Client, raw json.RawMessage) {
 
 // handleReact processes a reaction.
 func (s *Server) handleReact(c *Client, raw json.RawMessage) {
-	if !s.limiter.allowPerMinute("react:"+c.Username, s.cfg.Server.RateLimits.ReactionsPerMinute) {
+	if !s.limiter.allowPerMinute("react:"+c.UserID, s.cfg.Server.RateLimits.ReactionsPerMinute) {
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many reactions — wait a moment"})
 		return
 	}
@@ -826,7 +837,7 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 		ID:           msg.ID,
 		Room:         msg.Room,
 		Conversation: msg.Conversation,
-		User:         c.Username,
+		User:         c.UserID,
 		TS:           time.Now().Unix(),
 		Epoch:        msg.Epoch,
 		WrappedKeys:  msg.WrappedKeys,
@@ -841,7 +852,7 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 			if err == nil {
 				db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, epoch, payload, signature)
 					VALUES (?, ?, ?, ?, ?, ?, ?)`,
-					reactionID, msg.ID, c.Username, reaction.TS, msg.Epoch, msg.Payload, msg.Signature)
+					reactionID, msg.ID, c.UserID, reaction.TS, msg.Epoch, msg.Payload, msg.Signature)
 			}
 		} else if msg.Conversation != "" {
 			db, err := s.store.ConvDB(msg.Conversation)
@@ -853,7 +864,7 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 				}
 				db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, epoch, payload, signature, wrapped_keys)
 					VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-					reactionID, msg.ID, c.Username, reaction.TS, msg.Epoch, msg.Payload, msg.Signature, wrappedKeys)
+					reactionID, msg.ID, c.UserID, reaction.TS, msg.Epoch, msg.Payload, msg.Signature, wrappedKeys)
 			}
 		}
 	}
@@ -886,7 +897,7 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 
 	s.mu.RLock()
 	s.cfg.RLock()
-	rooms := s.cfg.Users[c.Username].Rooms
+	rooms := s.cfg.Users[c.UserID].Rooms
 	s.cfg.RUnlock()
 	s.mu.RUnlock()
 
@@ -897,7 +908,7 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 		}
 		err = db.QueryRow(`SELECT message_id, user FROM reactions WHERE reaction_id = ?`, msg.ReactionID).
 			Scan(&targetID, &user)
-		if err == nil && user == c.Username {
+		if err == nil && user == c.UserID {
 			room = r
 			found = true
 			db.Exec(`DELETE FROM reactions WHERE reaction_id = ?`, msg.ReactionID)
@@ -906,7 +917,7 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 	}
 
 	if !found {
-		convs, err := s.store.GetUserConversations(c.Username)
+		convs, err := s.store.GetUserConversations(c.UserID)
 		if err == nil {
 			for _, conv := range convs {
 				db, err := s.store.ConvDB(conv.ID)
@@ -915,7 +926,7 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 				}
 				err = db.QueryRow(`SELECT message_id, user FROM reactions WHERE reaction_id = ?`, msg.ReactionID).
 					Scan(&targetID, &user)
-				if err == nil && user == c.Username {
+				if err == nil && user == c.UserID {
 					conversation = conv.ID
 					found = true
 					db.Exec(`DELETE FROM reactions WHERE reaction_id = ?`, msg.ReactionID)
@@ -935,7 +946,7 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 		ID:           targetID,
 		Room:         room,
 		Conversation: conversation,
-		User:         c.Username,
+		User:         c.UserID,
 	}
 
 	if room != "" {
@@ -947,7 +958,7 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 
 // handlePin processes a pin request.
 func (s *Server) handlePin(c *Client, raw json.RawMessage) {
-	if !s.limiter.allowPerMinute("pin:"+c.Username, s.cfg.Server.RateLimits.PinsPerMinute) {
+	if !s.limiter.allowPerMinute("pin:"+c.UserID, s.cfg.Server.RateLimits.PinsPerMinute) {
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many pins — wait a moment"})
 		return
 	}
@@ -961,7 +972,7 @@ func (s *Server) handlePin(c *Client, raw json.RawMessage) {
 		db, err := s.store.RoomDB(msg.Room)
 		if err == nil {
 			db.Exec(`INSERT OR IGNORE INTO pins (message_id, pinned_by, ts) VALUES (?, ?, ?)`,
-				msg.ID, c.Username, time.Now().Unix())
+				msg.ID, c.UserID, time.Now().Unix())
 		}
 	}
 
@@ -969,14 +980,14 @@ func (s *Server) handlePin(c *Client, raw json.RawMessage) {
 		Type:     "pinned",
 		Room:     msg.Room,
 		ID:       msg.ID,
-		PinnedBy: c.Username,
+		PinnedBy: c.UserID,
 		TS:       time.Now().Unix(),
 	})
 }
 
 // handleUnpin processes an unpin request.
 func (s *Server) handleUnpin(c *Client, raw json.RawMessage) {
-	if !s.limiter.allowPerMinute("pin:"+c.Username, s.cfg.Server.RateLimits.PinsPerMinute) {
+	if !s.limiter.allowPerMinute("pin:"+c.UserID, s.cfg.Server.RateLimits.PinsPerMinute) {
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many pins — wait a moment"})
 		return
 	}
@@ -1002,7 +1013,7 @@ func (s *Server) handleUnpin(c *Client, raw json.RawMessage) {
 
 // handleCreateDM creates a new DM conversation.
 func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
-	if !s.limiter.allowPerMinute("dm_create:"+c.Username, s.cfg.Server.RateLimits.DMCreatesPerMinute) {
+	if !s.limiter.allowPerMinute("dm_create:"+c.UserID, s.cfg.Server.RateLimits.DMCreatesPerMinute) {
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many conversations — wait a moment"})
 		return
 	}
@@ -1014,7 +1025,7 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 	}
 
 	// Add sender to members
-	allMembers := append([]string{c.Username}, msg.Members...)
+	allMembers := append([]string{c.UserID}, msg.Members...)
 
 	// Reject if any proposed member is retired
 	if retired := s.findRetiredMember(msg.Members); retired != "" {
@@ -1038,7 +1049,7 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 
 	// Deduplicate 1:1 conversations
 	if len(msg.Members) == 1 && s.store != nil {
-		existing, err := s.store.FindOneOnOneConversation(c.Username, msg.Members[0])
+		existing, err := s.store.FindOneOnOneConversation(c.UserID, msg.Members[0])
 		if err == nil && existing != "" {
 			// Return existing conversation
 			members, _ := s.store.GetConversationMembers(existing)
@@ -1081,7 +1092,7 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 		if client.DeviceID == c.DeviceID {
 			continue // already sent to creator
 		}
-		if memberSet[client.Username] {
+		if memberSet[client.UserID] {
 			client.Encoder.Encode(created)
 		}
 	}
@@ -1089,7 +1100,7 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 
 	s.logger.Info("conversation created",
 		"conversation", convID,
-		"created_by", c.Username,
+		"created_by", c.UserID,
 		"members", allMembers,
 	)
 }
@@ -1109,12 +1120,12 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 	s.cfg.RLock()
 	isAdmin := false
 	for _, a := range s.cfg.Server.Server.Admins {
-		if a == c.Username {
+		if a == c.UserID {
 			isAdmin = true
 			break
 		}
 	}
-	rooms := s.cfg.Users[c.Username].Rooms
+	rooms := s.cfg.Users[c.UserID].Rooms
 	s.cfg.RUnlock()
 
 	// Rate limit — admins get a higher limit
@@ -1122,7 +1133,7 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 	if isAdmin {
 		limit = s.cfg.Server.RateLimits.AdminDeletesPerMinute
 	}
-	if !s.limiter.allowPerMinute("delete:"+c.Username, limit) {
+	if !s.limiter.allowPerMinute("delete:"+c.UserID, limit) {
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many deletes — wait a moment"})
 		return
 	}
@@ -1140,7 +1151,7 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 		}
 
 		// Permission check: own messages or admin
-		if sender != c.Username && !isAdmin {
+		if sender != c.UserID && !isAdmin {
 			c.Encoder.Encode(protocol.Error{
 				Type:    "error",
 				Code:    protocol.ErrNotAuthorized,
@@ -1150,7 +1161,7 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 			return
 		}
 
-		fileIDs, err := s.store.DeleteRoomMessage(room, msg.ID, c.Username)
+		fileIDs, err := s.store.DeleteRoomMessage(room, msg.ID, c.UserID)
 		if err != nil {
 			s.logger.Error("delete failed", "room", room, "id", msg.ID, "error", err)
 			return
@@ -1160,7 +1171,7 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 		s.broadcastToRoom(room, protocol.Deleted{
 			Type:      "deleted",
 			ID:        msg.ID,
-			DeletedBy: c.Username,
+			DeletedBy: c.UserID,
 			TS:        time.Now().Unix(),
 			Room:      room,
 		})
@@ -1168,7 +1179,7 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 	}
 
 	// Search conversation DBs
-	convs, err := s.store.GetUserConversations(c.Username)
+	convs, err := s.store.GetUserConversations(c.UserID)
 	if err != nil {
 		return
 	}
@@ -1185,7 +1196,7 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 		}
 
 		// DMs: own messages only, no admin override
-		if sender != c.Username {
+		if sender != c.UserID {
 			c.Encoder.Encode(protocol.Error{
 				Type:    "error",
 				Code:    protocol.ErrNotAuthorized,
@@ -1195,7 +1206,7 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 			return
 		}
 
-		fileIDs, err := s.store.DeleteConvMessage(conv.ID, msg.ID, c.Username)
+		fileIDs, err := s.store.DeleteConvMessage(conv.ID, msg.ID, c.UserID)
 		if err != nil {
 			s.logger.Error("delete failed", "conversation", conv.ID, "id", msg.ID, "error", err)
 			return
@@ -1205,7 +1216,7 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 		s.broadcastToConversation(conv.ID, protocol.Deleted{
 			Type:         "deleted",
 			ID:           msg.ID,
-			DeletedBy:    c.Username,
+			DeletedBy:    c.UserID,
 			TS:           time.Now().Unix(),
 			Conversation: conv.ID,
 		})
@@ -1235,8 +1246,8 @@ func (s *Server) handleLeaveConversation(c *Client, raw json.RawMessage) {
 	}
 
 	if s.store != nil {
-		if err := s.store.RemoveConversationMember(msg.Conversation, c.Username); err != nil {
-			s.logger.Error("failed to leave conversation", "user", c.Username, "error", err)
+		if err := s.store.RemoveConversationMember(msg.Conversation, c.UserID); err != nil {
+			s.logger.Error("failed to leave conversation", "user", c.UserID, "error", err)
 			return
 		}
 	}
@@ -1246,11 +1257,11 @@ func (s *Server) handleLeaveConversation(c *Client, raw json.RawMessage) {
 		Type:         "conversation_event",
 		Conversation: msg.Conversation,
 		Event:        "leave",
-		User:         c.Username,
+		User:         c.UserID,
 	})
 
 	s.logger.Info("conversation leave",
-		"user", c.Username,
+		"user", c.UserID,
 		"conversation", msg.Conversation,
 	)
 }
@@ -1263,7 +1274,7 @@ func (s *Server) handleRenameConversation(c *Client, raw json.RawMessage) {
 	}
 
 	if s.store != nil {
-		isMember, err := s.store.IsConversationMember(msg.Conversation, c.Username)
+		isMember, err := s.store.IsConversationMember(msg.Conversation, c.UserID)
 		if err != nil || !isMember {
 			c.Encoder.Encode(protocol.Error{
 				Type: "error", Code: protocol.ErrUnknownConversation,
@@ -1282,19 +1293,19 @@ func (s *Server) handleRenameConversation(c *Client, raw json.RawMessage) {
 		Type:         "conversation_renamed",
 		Conversation: msg.Conversation,
 		Name:         msg.Name,
-		RenamedBy:    c.Username,
+		RenamedBy:    c.UserID,
 	})
 
 	s.logger.Info("conversation renamed",
 		"conversation", msg.Conversation,
 		"name", msg.Name,
-		"renamed_by", c.Username,
+		"renamed_by", c.UserID,
 	)
 }
 
 // handleSetProfile updates a user's profile and broadcasts.
 func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
-	if !s.limiter.allowPerMinute("profile:"+c.Username, s.cfg.Server.RateLimits.ProfilesPerMinute) {
+	if !s.limiter.allowPerMinute("profile:"+c.UserID, s.cfg.Server.RateLimits.ProfilesPerMinute) {
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Profile updated too often — wait a moment"})
 		return
 	}
@@ -1319,7 +1330,7 @@ func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
 	// Check for duplicate display name across all users (case-insensitive)
 	s.cfg.RLock()
 	for username, user := range s.cfg.Users {
-		if username == c.Username {
+		if username == c.UserID {
 			continue // skip self
 		}
 		// Check against config display_name
@@ -1348,9 +1359,9 @@ func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
 	// Also check stored display names (from set_profile, which may differ from config)
 	if s.store != nil {
 		var existingUser string
-		s.store.UsersDB().QueryRow(
+		s.store.DataDB().QueryRow(
 			`SELECT user FROM profiles WHERE LOWER(display_name) = LOWER(?) AND user != ?`,
-			msg.DisplayName, c.Username).Scan(&existingUser)
+			msg.DisplayName, c.UserID).Scan(&existingUser)
 		if existingUser != "" {
 			c.Encoder.Encode(protocol.Error{
 				Type:    "error",
@@ -1363,15 +1374,15 @@ func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
 
 	// Update in store
 	if s.store != nil {
-		s.store.UsersDB().Exec(`
+		s.store.DataDB().Exec(`
 			INSERT INTO profiles (user, display_name, avatar_id) VALUES (?, ?, ?)
 			ON CONFLICT (user) DO UPDATE SET display_name = excluded.display_name, avatar_id = excluded.avatar_id`,
-			c.Username, msg.DisplayName, msg.AvatarID)
+			c.UserID, msg.DisplayName, msg.AvatarID)
 	}
 
 	// Build profile message with pubkey
 	s.cfg.RLock()
-	user := s.cfg.Users[c.Username]
+	user := s.cfg.Users[c.UserID]
 	s.cfg.RUnlock()
 
 	parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(user.Key))
@@ -1381,7 +1392,7 @@ func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
 
 	isAdmin := false
 	for _, a := range s.cfg.Server.Server.Admins {
-		if a == c.Username {
+		if a == c.UserID {
 			isAdmin = true
 			break
 		}
@@ -1389,7 +1400,7 @@ func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
 
 	profile := protocol.Profile{
 		Type:           "profile",
-		User:           c.Username,
+		User:           c.UserID,
 		DisplayName:    msg.DisplayName,
 		AvatarID:       msg.AvatarID,
 		PubKey:         user.Key,
@@ -1414,10 +1425,10 @@ func (s *Server) handleSetStatus(c *Client, raw json.RawMessage) {
 	}
 
 	if s.store != nil {
-		s.store.UsersDB().Exec(`
+		s.store.DataDB().Exec(`
 			INSERT INTO profiles (user, status_text) VALUES (?, ?)
 			ON CONFLICT (user) DO UPDATE SET status_text = excluded.status_text`,
-			c.Username, msg.Text)
+			c.UserID, msg.Text)
 	}
 }
 
@@ -1430,7 +1441,7 @@ func (s *Server) broadcastToRoom(room string, msg any) {
 	defer s.cfg.RUnlock()
 
 	for _, client := range s.clients {
-		user := s.cfg.Users[client.Username]
+		user := s.cfg.Users[client.UserID]
 		for _, r := range user.Rooms {
 			if r == room {
 				client.Encoder.Encode(msg)
@@ -1461,7 +1472,7 @@ func (s *Server) broadcastToConversation(convID string, msg any) {
 	defer s.mu.RUnlock()
 
 	for _, client := range s.clients {
-		if memberSet[client.Username] {
+		if memberSet[client.UserID] {
 			client.Encoder.Encode(msg)
 		}
 	}
@@ -1479,7 +1490,7 @@ func (s *Server) broadcastToRoomExcept(room, excludeDevice string, msg any) {
 		if client.DeviceID == excludeDevice {
 			continue
 		}
-		user := s.cfg.Users[client.Username]
+		user := s.cfg.Users[client.UserID]
 		for _, r := range user.Rooms {
 			if r == room {
 				client.Encoder.Encode(msg)
@@ -1512,7 +1523,7 @@ func (s *Server) broadcastToConversationExcept(convID, excludeDevice string, msg
 		if client.DeviceID == excludeDevice {
 			continue
 		}
-		if memberSet[client.Username] {
+		if memberSet[client.UserID] {
 			client.Encoder.Encode(msg)
 		}
 	}
@@ -1524,7 +1535,7 @@ func (s *Server) handleListPendingKeys(c *Client) {
 	isAdmin := false
 	s.cfg.RLock()
 	for _, a := range s.cfg.Server.Server.Admins {
-		if a == c.Username {
+		if a == c.UserID {
 			isAdmin = true
 			break
 		}
@@ -1542,7 +1553,7 @@ func (s *Server) handleListPendingKeys(c *Client) {
 
 	var keys []protocol.PendingKeyEntry
 	if s.store != nil {
-		rows, err := s.store.UsersDB().Query(
+		rows, err := s.store.DataDB().Query(
 			`SELECT fingerprint, attempts, first_seen, last_seen
 			 FROM pending_keys ORDER BY last_seen DESC`)
 		if err == nil {
@@ -1576,7 +1587,7 @@ func (s *Server) handleRoomMembers(c *Client, raw json.RawMessage) {
 	// Single lock across auth check + member collection to prevent
 	// TOCTOU race with config reload.
 	s.cfg.RLock()
-	user := s.cfg.Users[c.Username]
+	user := s.cfg.Users[c.UserID]
 	inRoom := false
 	for _, r := range user.Rooms {
 		if r == req.Room {

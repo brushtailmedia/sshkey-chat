@@ -91,7 +91,7 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	if !s.limiter.allowPerMinute("upload:"+c.Username, s.cfg.Server.RateLimits.UploadsPerMinute) {
+	if !s.limiter.allowPerMinute("upload:"+c.UserID, s.cfg.Server.RateLimits.UploadsPerMinute) {
 		c.Encoder.Encode(protocol.UploadError{
 			Type:     "upload_error",
 			UploadID: msg.UploadID,
@@ -137,7 +137,7 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 		fileID:      fileID,
 		size:        msg.Size,
 		contentHash: msg.ContentHash,
-		user:        c.Username,
+		user:        c.UserID,
 		room:        msg.Room,
 		convID:      msg.Conversation,
 	}
@@ -169,7 +169,7 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 	}
 
 	if c.DownloadChannel == nil {
-		s.logger.Error("download: no download channel", "user", c.Username)
+		s.logger.Error("download: no download channel", "user", c.UserID)
 		c.Encoder.Encode(protocol.DownloadError{
 			Type:    "download_error",
 			FileID:  msg.FileID,
@@ -295,7 +295,7 @@ func (s *Server) handleBinaryChannel(username string, ch ssh.Channel) {
 			os.Remove(filePath)
 			s.mu.RLock()
 			for _, client := range s.clients {
-				if client.Username == username {
+				if client.UserID == username {
 					client.Encoder.Encode(protocol.UploadError{
 						Type:     "upload_error",
 						UploadID: uploadID,
@@ -332,7 +332,7 @@ func (s *Server) handleBinaryChannel(username string, ch ssh.Channel) {
 		// Send upload_complete on Channel 1 — find the client
 		s.mu.RLock()
 		for _, client := range s.clients {
-			if client.Username == username {
+			if client.UserID == username {
 				client.Encoder.Encode(protocol.UploadComplete{
 					Type:     "upload_complete",
 					UploadID: uploadID,

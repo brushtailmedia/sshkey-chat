@@ -20,8 +20,8 @@ func (s *Server) handlePushRegister(c *Client, raw json.RawMessage) {
 	}
 
 	if s.store != nil {
-		if err := s.store.UpsertPushToken(c.Username, c.DeviceID, msg.Platform, msg.Token); err != nil {
-			s.logger.Error("failed to store push token", "user", c.Username, "error", err)
+		if err := s.store.UpsertPushToken(c.UserID, c.DeviceID, msg.Platform, msg.Token); err != nil {
+			s.logger.Error("failed to store push token", "user", c.UserID, "error", err)
 			return
 		}
 	}
@@ -32,7 +32,7 @@ func (s *Server) handlePushRegister(c *Client, raw json.RawMessage) {
 	})
 
 	s.logger.Info("push token registered",
-		"user", c.Username,
+		"user", c.UserID,
 		"device", c.DeviceID,
 		"platform", msg.Platform,
 	)
@@ -82,7 +82,7 @@ func (s *Server) isUserOnline(username string) bool {
 	defer s.mu.RUnlock()
 
 	for _, client := range s.clients {
-		if client.Username == username {
+		if client.UserID == username {
 			return true
 		}
 	}

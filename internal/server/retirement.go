@@ -90,7 +90,7 @@ func (s *Server) handleRetirement(username string, oldRooms []string, reason str
 	}
 	s.mu.RLock()
 	for _, client := range s.clients {
-		if client.Username == username {
+		if client.UserID == username {
 			continue // don't send to the retiring user's own sessions
 		}
 		client.Encoder.Encode(retiredEvent)
@@ -102,7 +102,7 @@ func (s *Server) handleRetirement(username string, oldRooms []string, reason str
 		s.cfg.RLock()
 		newDisplayName := s.cfg.Users[username].DisplayName
 		s.cfg.RUnlock()
-		s.store.UsersDB().Exec(
+		s.store.DataDB().Exec(
 			`INSERT INTO profiles (user, display_name) VALUES (?, ?)
 			 ON CONFLICT (user) DO UPDATE SET display_name = excluded.display_name`,
 			username, newDisplayName)
@@ -111,7 +111,7 @@ func (s *Server) handleRetirement(username string, oldRooms []string, reason str
 	// 7. Terminate active sessions for the retired user
 	s.mu.RLock()
 	for _, client := range s.clients {
-		if client.Username == username {
+		if client.UserID == username {
 			client.Encoder.Encode(protocol.Error{
 				Type:    "error",
 				Code:    protocol.ErrUserRetired,
@@ -206,14 +206,14 @@ func (s *Server) handleRetireMe(c *Client, raw json.RawMessage) {
 	}
 
 	s.logger.Info("retire_me received",
-		"user", c.Username,
+		"user", c.UserID,
 		"device", c.DeviceID,
 		"reason", reason,
 	)
 
-	if err := s.retireUser(c.Username, reason); err != nil {
+	if err := s.retireUser(c.UserID, reason); err != nil {
 		s.logger.Error("retire_me failed",
-			"user", c.Username,
+			"user", c.UserID,
 			"error", err,
 		)
 		c.Encoder.Encode(protocol.Error{
@@ -245,7 +245,7 @@ func (s *Server) sendRetiredUsers(c *Client) {
 	// need to check against the retired user's PRE-retirement rooms. But
 	// since we clear rooms on retirement, that information is lost here.
 	// We'll rely on DM memberships (which preserve 1:1s) for visibility.
-	for _, r := range s.cfg.Users[c.Username].Rooms {
+	for _, r := range s.cfg.Users[c.UserID].Rooms {
 		clientRooms[r] = true
 	}
 	for username, user := range s.cfg.Users {
@@ -265,7 +265,7 @@ func (s *Server) sendRetiredUsers(c *Client) {
 
 	// Retired users remaining in 1:1 conversation_members with the client
 	if s.store != nil {
-		convs, err := s.store.GetUserConversations(c.Username)
+		convs, err := s.store.GetUserConversations(c.UserID)
 		if err == nil {
 			s.cfg.RLock()
 			for _, conv := range convs {

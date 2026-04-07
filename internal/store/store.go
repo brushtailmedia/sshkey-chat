@@ -3,7 +3,7 @@
 // Storage layout (from the design doc):
 //   - One DB per room (room-{name}.db) — encrypted message blobs
 //   - One DB per DM conversation (conv-{id}.db) — encrypted message blobs
-//   - One users.db — metadata, device tracking, profiles, wrapped epoch keys
+//   - One data.db — metadata, device tracking, profiles, wrapped epoch keys
 package store
 
 import (
@@ -18,12 +18,13 @@ import (
 
 // Store manages all server-side SQLite databases.
 type Store struct {
-	dir     string
-	usersDB *sql.DB
+	dir      string
+	dataDB   *sql.DB
+	roomsDB  *sql.DB // rooms.db — room identity + membership
 
 	mu      sync.RWMutex
-	roomDBs map[string]*sql.DB // room name -> DB
-	convDBs map[string]*sql.DB // conversation ID -> DB
+	roomDBs map[string]*sql.DB // room name -> message DB
+	convDBs map[string]*sql.DB // conversation ID -> message DB
 }
 
 // Open creates or opens all databases in the given data directory.
@@ -38,14 +39,24 @@ func Open(dir string) (*Store, error) {
 		convDBs: make(map[string]*sql.DB),
 	}
 
-	usersDB, err := s.openDB("users.db")
+	dataDB, err := s.openDB("data.db")
 	if err != nil {
-		return nil, fmt.Errorf("open users.db: %w", err)
+		return nil, fmt.Errorf("open data.db: %w", err)
 	}
-	s.usersDB = usersDB
+	s.dataDB = dataDB
 
-	if err := s.initUsersDB(); err != nil {
-		return nil, fmt.Errorf("init users.db: %w", err)
+	if err := s.initDataDB(); err != nil {
+		return nil, fmt.Errorf("init data.db: %w", err)
+	}
+
+	roomsDB, err := s.openDB("rooms.db")
+	if err != nil {
+		return nil, fmt.Errorf("open rooms.db: %w", err)
+	}
+	s.roomsDB = roomsDB
+
+	if err := s.initRoomsDB(); err != nil {
+		return nil, fmt.Errorf("init rooms.db: %w", err)
 	}
 
 	return s, nil
@@ -75,16 +86,22 @@ func (s *Store) Close() error {
 			firstErr = err
 		}
 	}
-	checkpoint(s.usersDB)
-	if err := s.usersDB.Close(); err != nil && firstErr == nil {
+	checkpoint(s.dataDB)
+	if err := s.dataDB.Close(); err != nil && firstErr == nil {
 		firstErr = err
+	}
+	if s.roomsDB != nil {
+		checkpoint(s.roomsDB)
+		if err := s.roomsDB.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 	return firstErr
 }
 
 // StoreFileHash saves the content hash for a file_id.
 func (s *Store) StoreFileHash(fileID, contentHash string, size int64) error {
-	_, err := s.usersDB.Exec(`
+	_, err := s.dataDB.Exec(`
 		INSERT OR REPLACE INTO file_hashes (file_id, content_hash, size)
 		VALUES (?, ?, ?)`,
 		fileID, contentHash, size)
@@ -95,7 +112,7 @@ func (s *Store) StoreFileHash(fileID, contentHash string, size int64) error {
 // if no hash is stored (backwards-compat with files uploaded before hashing).
 func (s *Store) GetFileHash(fileID string) (string, error) {
 	var hash string
-	err := s.usersDB.QueryRow(
+	err := s.dataDB.QueryRow(
 		`SELECT content_hash FROM file_hashes WHERE file_id = ?`,
 		fileID).Scan(&hash)
 	if err == sql.ErrNoRows {
@@ -104,9 +121,14 @@ func (s *Store) GetFileHash(fileID string) (string, error) {
 	return hash, err
 }
 
+// RoomsDB returns the rooms identity database for direct queries.
+func (s *Store) RoomsDB() *sql.DB {
+	return s.roomsDB
+}
+
 // DeleteFileHash removes a file hash entry.
 func (s *Store) DeleteFileHash(fileID string) {
-	s.usersDB.Exec(`DELETE FROM file_hashes WHERE file_id = ?`, fileID)
+	s.dataDB.Exec(`DELETE FROM file_hashes WHERE file_id = ?`, fileID)
 }
 
 // openDB opens a SQLite database in WAL mode.
@@ -186,14 +208,14 @@ func (s *Store) ConvDB(convID string) (*sql.DB, error) {
 	return db, nil
 }
 
-// UsersDB returns the users database for direct queries.
-func (s *Store) UsersDB() *sql.DB {
-	return s.usersDB
+// DataDB returns the data database for direct queries.
+func (s *Store) DataDB() *sql.DB {
+	return s.dataDB
 }
 
-// initUsersDB creates the users.db schema.
-func (s *Store) initUsersDB() error {
-	_, err := s.usersDB.Exec(`
+// initDataDB creates the data.db schema.
+func (s *Store) initDataDB() error {
+	_, err := s.dataDB.Exec(`
 		CREATE TABLE IF NOT EXISTS devices (
 			user        TEXT NOT NULL,
 			device_id   TEXT NOT NULL,

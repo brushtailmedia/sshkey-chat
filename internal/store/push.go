@@ -11,7 +11,7 @@ type PushToken struct {
 
 // UpsertPushToken registers or updates a push token for a device.
 func (s *Store) UpsertPushToken(user, deviceID, platform, token string) error {
-	_, err := s.usersDB.Exec(`
+	_, err := s.dataDB.Exec(`
 		INSERT INTO push_tokens (user, device_id, platform, token, active, updated_at)
 		VALUES (?, ?, ?, ?, 1, datetime('now'))
 		ON CONFLICT (user, device_id) DO UPDATE SET
@@ -26,7 +26,7 @@ func (s *Store) UpsertPushToken(user, deviceID, platform, token string) error {
 
 // GetActivePushTokens returns all active push tokens for a user.
 func (s *Store) GetActivePushTokens(user string) ([]PushToken, error) {
-	rows, err := s.usersDB.Query(`
+	rows, err := s.dataDB.Query(`
 		SELECT user, device_id, platform, token
 		FROM push_tokens WHERE user = ? AND active = 1`,
 		user,
@@ -50,7 +50,7 @@ func (s *Store) GetActivePushTokens(user string) ([]PushToken, error) {
 
 // DeactivatePushToken marks a push token as inactive (e.g., delivery failure).
 func (s *Store) DeactivatePushToken(user, deviceID string) error {
-	_, err := s.usersDB.Exec(`
+	_, err := s.dataDB.Exec(`
 		UPDATE push_tokens SET active = 0 WHERE user = ? AND device_id = ?`,
 		user, deviceID,
 	)
@@ -59,6 +59,6 @@ func (s *Store) DeactivatePushToken(user, deviceID string) error {
 
 // RemovePushToken removes a push token entirely.
 func (s *Store) RemovePushToken(user, deviceID string) error {
-	_, err := s.usersDB.Exec(`DELETE FROM push_tokens WHERE user = ? AND device_id = ?`, user, deviceID)
+	_, err := s.dataDB.Exec(`DELETE FROM push_tokens WHERE user = ? AND device_id = ?`, user, deviceID)
 	return err
 }

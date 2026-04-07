@@ -233,7 +233,7 @@ func (s *Server) reloadUsers() {
 	}
 
 	for _, client := range s.clients {
-		if affectedUsers[client.Username] {
+		if affectedUsers[client.UserID] {
 			s.sendRoomList(client)
 		}
 	}
@@ -247,7 +247,7 @@ func (s *Server) reloadUsers() {
 			for _, rc := range roomChanges {
 				if rc.room == room && rc.event == "join" {
 					for _, client := range s.clients {
-						if client.Username == rc.user {
+						if client.UserID == rc.user {
 							s.triggerEpochRotation(client, room, "member_join")
 							break
 						}
@@ -258,7 +258,7 @@ func (s *Server) reloadUsers() {
 			// Also check newly added users
 			for _, username := range added {
 				for _, client := range s.clients {
-					if client.Username == username {
+					if client.UserID == username {
 						if newUser, ok := newUsers[username]; ok {
 							for _, r := range newUser.Rooms {
 								if r == room {
@@ -282,7 +282,7 @@ func (s *Server) reloadUsers() {
 	// Disconnect removed users
 	for _, username := range removed {
 		for _, client := range s.clients {
-			if client.Username == username {
+			if client.UserID == username {
 				client.Encoder.Encode(protocol.Error{
 					Type:    "error",
 					Code:    protocol.ErrNotAuthorized,

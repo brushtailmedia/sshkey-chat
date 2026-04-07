@@ -44,7 +44,7 @@ func (s *Server) sendSync(c *Client, lastSyncedAt string) {
 	}
 
 	s.cfg.RLock()
-	rooms := s.cfg.Users[c.Username].Rooms
+	rooms := s.cfg.Users[c.UserID].Rooms
 	s.cfg.RUnlock()
 
 	// Sync room messages
@@ -53,7 +53,7 @@ func (s *Server) sendSync(c *Client, lastSyncedAt string) {
 	}
 
 	// Sync DM conversations
-	convs, err := s.store.GetUserConversations(c.Username)
+	convs, err := s.store.GetUserConversations(c.UserID)
 	if err == nil {
 		for _, conv := range convs {
 			s.syncConversation(c, conv.ID, sinceTS, windowMessages)
@@ -61,7 +61,7 @@ func (s *Server) sendSync(c *Client, lastSyncedAt string) {
 	}
 
 	// Update device sync watermark
-	s.store.UpdateDeviceSync(c.Username, c.DeviceID)
+	s.store.UpdateDeviceSync(c.UserID, c.DeviceID)
 
 	c.Encoder.Encode(protocol.SyncComplete{
 		Type:     "sync_complete",
@@ -72,7 +72,7 @@ func (s *Server) sendSync(c *Client, lastSyncedAt string) {
 // syncRoom sends a sync batch for a single room.
 func (s *Server) syncRoom(c *Client, room string, sinceTS int64, limit int) {
 	// Apply first_seen filter — new users only see post-join messages
-	firstSeen, firstEpoch, _ := s.store.GetUserRoom(c.Username, room)
+	firstSeen, firstEpoch, _ := s.store.GetUserRoom(c.UserID, room)
 	if firstSeen > 0 && firstSeen > sinceTS {
 		sinceTS = firstSeen
 	}
@@ -103,7 +103,7 @@ func (s *Server) syncRoom(c *Client, room string, sinceTS int64, limit int) {
 	var epochKeys []protocol.SyncEpochKey
 
 	if minEpoch > 0 || maxEpoch > 0 {
-		keys, err := s.store.GetEpochKeysForUser(room, c.Username, minEpoch, maxEpoch)
+		keys, err := s.store.GetEpochKeysForUser(room, c.UserID, minEpoch, maxEpoch)
 		if err == nil {
 			for epoch, wrappedKey := range keys {
 				epochKeys = append(epochKeys, protocol.SyncEpochKey{
@@ -170,7 +170,7 @@ func (s *Server) syncConversation(c *Client, convID string, sinceTS int64, limit
 
 // handleHistory processes a history (scroll-back) request.
 func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
-	if !s.limiter.allowPerMinute("history:"+c.Username, s.cfg.Server.RateLimits.HistoryPerMinute) {
+	if !s.limiter.allowPerMinute("history:"+c.UserID, s.cfg.Server.RateLimits.HistoryPerMinute) {
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many requests — wait a moment"})
 		return
 	}
@@ -196,7 +196,7 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 	if req.Room != "" {
 		// Verify access
 		s.cfg.RLock()
-		user := s.cfg.Users[c.Username]
+		user := s.cfg.Users[c.UserID]
 		s.cfg.RUnlock()
 		inRoom := false
 		for _, r := range user.Rooms {
@@ -220,7 +220,7 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 		}
 
 		// Apply first_seen/first_epoch filter
-		firstSeen, firstEpoch, _ := s.store.GetUserRoom(c.Username, req.Room)
+		firstSeen, firstEpoch, _ := s.store.GetUserRoom(c.UserID, req.Room)
 		if firstSeen > 0 || firstEpoch > 0 {
 			filtered := msgs[:0]
 			for _, m := range msgs {
@@ -244,7 +244,7 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 		var epochKeys []protocol.SyncEpochKey
 		if len(msgs) > 0 {
 			minEpoch, maxEpoch := store.GetEpochRange(msgs)
-			keys, err := s.store.GetEpochKeysForUser(req.Room, c.Username, minEpoch, maxEpoch)
+			keys, err := s.store.GetEpochKeysForUser(req.Room, c.UserID, minEpoch, maxEpoch)
 			if err == nil {
 				for epoch, wrappedKey := range keys {
 					epochKeys = append(epochKeys, protocol.SyncEpochKey{
@@ -274,7 +274,7 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 
 	} else if req.Conversation != "" {
 		// Verify membership
-		isMember, err := s.store.IsConversationMember(req.Conversation, c.Username)
+		isMember, err := s.store.IsConversationMember(req.Conversation, c.UserID)
 		if err != nil || !isMember {
 			c.Encoder.Encode(protocol.Error{
 				Type: "error", Code: protocol.ErrUnknownConversation,

@@ -19,9 +19,9 @@ func (s *Server) handleListDevices(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	devices, err := s.store.GetDevices(c.Username)
+	devices, err := s.store.GetDevices(c.UserID)
 	if err != nil {
-		s.logger.Error("list_devices: failed to fetch devices", "user", c.Username, "error", err)
+		s.logger.Error("list_devices: failed to fetch devices", "user", c.UserID, "error", err)
 		c.Encoder.Encode(protocol.Error{
 			Type:    "error",
 			Code:    "internal",
@@ -32,7 +32,7 @@ func (s *Server) handleListDevices(c *Client, raw json.RawMessage) {
 
 	var out []protocol.DeviceInfo
 	for _, d := range devices {
-		revoked, _ := s.store.IsDeviceRevoked(c.Username, d.DeviceID)
+		revoked, _ := s.store.IsDeviceRevoked(c.UserID, d.DeviceID)
 		out = append(out, protocol.DeviceInfo{
 			DeviceID:     d.DeviceID,
 			LastSyncedAt: d.LastSynced,
@@ -90,9 +90,9 @@ func (s *Server) handleRevokeDevice(c *Client, raw json.RawMessage) {
 	}
 
 	// Verify the device belongs to this user
-	devices, err := s.store.GetDevices(c.Username)
+	devices, err := s.store.GetDevices(c.UserID)
 	if err != nil {
-		s.logger.Error("revoke_device: fetch devices", "user", c.Username, "error", err)
+		s.logger.Error("revoke_device: fetch devices", "user", c.UserID, "error", err)
 		c.Encoder.Encode(protocol.DeviceRevokeResult{
 			Type:     "device_revoke_result",
 			DeviceID: msg.DeviceID,
@@ -110,7 +110,7 @@ func (s *Server) handleRevokeDevice(c *Client, raw json.RawMessage) {
 	}
 	if !owned {
 		s.logger.Warn("revoke_device: device not owned by user",
-			"user", c.Username,
+			"user", c.UserID,
 			"target_device", msg.DeviceID,
 			"requesting_device", c.DeviceID,
 		)
@@ -124,8 +124,8 @@ func (s *Server) handleRevokeDevice(c *Client, raw json.RawMessage) {
 	}
 
 	// Mark revoked
-	if err := s.store.RevokeDevice(c.Username, msg.DeviceID, "self_revoke"); err != nil {
-		s.logger.Error("revoke_device: store", "user", c.Username, "target", msg.DeviceID, "error", err)
+	if err := s.store.RevokeDevice(c.UserID, msg.DeviceID, "self_revoke"); err != nil {
+		s.logger.Error("revoke_device: store", "user", c.UserID, "target", msg.DeviceID, "error", err)
 		c.Encoder.Encode(protocol.DeviceRevokeResult{
 			Type:     "device_revoke_result",
 			DeviceID: msg.DeviceID,
@@ -138,11 +138,11 @@ func (s *Server) handleRevokeDevice(c *Client, raw json.RawMessage) {
 	// Audit log
 	if s.audit != nil {
 		s.audit.Log("user", "self_revoke_device",
-			"user="+c.Username+" target_device="+msg.DeviceID+" requesting_device="+c.DeviceID)
+			"user="+c.UserID+" target_device="+msg.DeviceID+" requesting_device="+c.DeviceID)
 	}
 
 	s.logger.Info("device revoked (user-initiated)",
-		"user", c.Username,
+		"user", c.UserID,
 		"target_device", msg.DeviceID,
 		"requesting_device", c.DeviceID,
 	)
@@ -157,7 +157,7 @@ func (s *Server) handleRevokeDevice(c *Client, raw json.RawMessage) {
 	// If the revoked device is connected, notify + disconnect it
 	s.mu.RLock()
 	for _, client := range s.clients {
-		if client.Username == c.Username && client.DeviceID == msg.DeviceID {
+		if client.UserID == c.UserID && client.DeviceID == msg.DeviceID {
 			client.Encoder.Encode(protocol.DeviceRevoked{
 				Type:     "device_revoked",
 				DeviceID: msg.DeviceID,

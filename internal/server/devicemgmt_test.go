@@ -32,7 +32,7 @@ func (cc *captureClient) messages() []json.RawMessage {
 func testClientFor(username, deviceID string) *captureClient {
 	buf := &bytes.Buffer{}
 	c := &Client{
-		Username: username,
+		UserID: username,
 		DeviceID: deviceID,
 		Encoder:  protocol.NewEncoder(buf),
 	}

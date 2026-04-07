@@ -2,7 +2,7 @@ package store
 
 // StoreEpochKey stores a wrapped epoch key for a user in a room.
 func (s *Store) StoreEpochKey(room string, epoch int64, user, wrappedKey string) error {
-	_, err := s.usersDB.Exec(`
+	_, err := s.dataDB.Exec(`
 		INSERT INTO epoch_keys (room, epoch, user, wrapped_key)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT (room, epoch, user) DO UPDATE SET wrapped_key = excluded.wrapped_key`,
@@ -14,7 +14,7 @@ func (s *Store) StoreEpochKey(room string, epoch int64, user, wrappedKey string)
 // GetEpochKey retrieves a wrapped epoch key for a specific user/room/epoch.
 func (s *Store) GetEpochKey(room string, epoch int64, user string) (string, error) {
 	var wrappedKey string
-	err := s.usersDB.QueryRow(`
+	err := s.dataDB.QueryRow(`
 		SELECT wrapped_key FROM epoch_keys WHERE room = ? AND epoch = ? AND user = ?`,
 		room, epoch, user,
 	).Scan(&wrappedKey)
@@ -24,7 +24,7 @@ func (s *Store) GetEpochKey(room string, epoch int64, user string) (string, erro
 // GetCurrentEpoch returns the highest epoch number for a room.
 func (s *Store) GetCurrentEpoch(room string) (int64, error) {
 	var epoch int64
-	err := s.usersDB.QueryRow(`
+	err := s.dataDB.QueryRow(`
 		SELECT COALESCE(MAX(epoch), 0) FROM epoch_keys WHERE room = ?`,
 		room,
 	).Scan(&epoch)
@@ -34,7 +34,7 @@ func (s *Store) GetCurrentEpoch(room string) (int64, error) {
 // GetEpochKeysForUser returns all wrapped epoch keys for a user in a room,
 // filtered by epoch range. Used for sync and history.
 func (s *Store) GetEpochKeysForUser(room, user string, minEpoch, maxEpoch int64) (map[int64]string, error) {
-	rows, err := s.usersDB.Query(`
+	rows, err := s.dataDB.Query(`
 		SELECT epoch, wrapped_key FROM epoch_keys
 		WHERE room = ? AND user = ? AND epoch >= ? AND epoch <= ?
 		ORDER BY epoch`,
@@ -60,7 +60,7 @@ func (s *Store) GetEpochKeysForUser(room, user string, minEpoch, maxEpoch int64)
 // GetAllEpochKeysForUser returns all wrapped epoch keys for a user across all rooms.
 // Used for SSH key rotation.
 func (s *Store) GetAllEpochKeysForUser(user string) ([]EpochKeyRecord, error) {
-	rows, err := s.usersDB.Query(`
+	rows, err := s.dataDB.Query(`
 		SELECT room, epoch, wrapped_key FROM epoch_keys WHERE user = ? ORDER BY room, epoch`,
 		user,
 	)

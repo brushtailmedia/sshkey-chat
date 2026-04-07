@@ -68,6 +68,28 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		s.files = newFileManager(dir)
 		s.audit = newAuditLog(dir)
 
+		// Seed rooms.db from rooms.toml on first run
+		if st.RoomsDBEmpty() && cfg.Rooms != nil {
+			count, err := st.SeedRooms(cfg.Rooms)
+			if err != nil {
+				return nil, fmt.Errorf("seed rooms: %w", err)
+			}
+			if count > 0 {
+				logger.Info("seeded rooms.db from rooms.toml", "rooms", count)
+			}
+		}
+
+		// Seed room_members from users.toml on first run (after rooms are seeded)
+		if st.RoomMembersEmpty() && cfg.Users != nil {
+			count, err := st.SeedRoomMembers(cfg.Users)
+			if err != nil {
+				return nil, fmt.Errorf("seed room members: %w", err)
+			}
+			if count > 0 {
+				logger.Info("seeded room_members from users.toml", "memberships", count)
+			}
+		}
+
 		// Remove orphan files from crashed uploads (files on disk with
 		// no hash record in the DB — they never completed successfully)
 		s.cleanOrphanFiles()
@@ -262,7 +284,7 @@ func (s *Server) logPendingKey(fingerprint, remote string) {
 	if s.store != nil {
 		// Check if this key has been seen before
 		var existing int
-		s.store.UsersDB().QueryRow(
+		s.store.DataDB().QueryRow(
 			`SELECT attempts FROM pending_keys WHERE fingerprint = ?`,
 			fingerprint).Scan(&existing)
 		if existing > 0 {
@@ -270,7 +292,7 @@ func (s *Server) logPendingKey(fingerprint, remote string) {
 		}
 
 		// Upsert — increment attempt counter
-		s.store.UsersDB().Exec(`
+		s.store.DataDB().Exec(`
 			INSERT INTO pending_keys (fingerprint, remote_addr)
 			VALUES (?, ?)
 			ON CONFLICT (fingerprint) DO UPDATE SET
@@ -282,7 +304,7 @@ func (s *Server) logPendingKey(fingerprint, remote string) {
 		// Only notify admin on first attempt
 		if isFirstAttempt {
 			var firstSeen string
-			s.store.UsersDB().QueryRow(
+			s.store.DataDB().QueryRow(
 				`SELECT first_seen FROM pending_keys WHERE fingerprint = ?`,
 				fingerprint).Scan(&firstSeen)
 
@@ -321,7 +343,7 @@ func (s *Server) notifyAdmins(msg any) {
 	defer s.mu.RUnlock()
 
 	for _, client := range s.clients {
-		if adminSet[client.Username] {
+		if adminSet[client.UserID] {
 			client.Encoder.Encode(msg)
 		}
 	}

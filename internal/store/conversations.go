@@ -8,7 +8,7 @@ import (
 
 // CreateConversation creates a new DM conversation with the given members and optional name.
 func (s *Store) CreateConversation(id string, members []string, name ...string) error {
-	tx, err := s.usersDB.Begin()
+	tx, err := s.dataDB.Begin()
 	if err != nil {
 		return err
 	}
@@ -36,7 +36,7 @@ func (s *Store) CreateConversation(id string, members []string, name ...string) 
 
 // GetConversationMembers returns the members of a conversation.
 func (s *Store) GetConversationMembers(convID string) ([]string, error) {
-	rows, err := s.usersDB.Query(`
+	rows, err := s.dataDB.Query(`
 		SELECT user FROM conversation_members WHERE conversation_id = ? ORDER BY user`,
 		convID,
 	)
@@ -58,7 +58,7 @@ func (s *Store) GetConversationMembers(convID string) ([]string, error) {
 
 // GetUserConversations returns all conversation IDs, members, and names for a user.
 func (s *Store) GetUserConversations(user string) ([]ConversationRecord, error) {
-	rows, err := s.usersDB.Query(`
+	rows, err := s.dataDB.Query(`
 		SELECT cm.conversation_id, GROUP_CONCAT(cm2.user, ','), COALESCE(c.name, '')
 		FROM conversation_members cm
 		JOIN conversation_members cm2 ON cm.conversation_id = cm2.conversation_id
@@ -96,7 +96,7 @@ type ConversationRecord struct {
 
 // RenameConversation updates the name of a conversation.
 func (s *Store) RenameConversation(convID, name string) error {
-	_, err := s.usersDB.Exec(`UPDATE conversations SET name = ? WHERE id = ?`, name, convID)
+	_, err := s.dataDB.Exec(`UPDATE conversations SET name = ? WHERE id = ?`, name, convID)
 	return err
 }
 
@@ -105,7 +105,7 @@ func (s *Store) RenameConversation(convID, name string) error {
 func (s *Store) FindOneOnOneConversation(user1, user2 string) (string, error) {
 	// Find conversations where both users are members and the conversation has exactly 2 members
 	var convID sql.NullString
-	err := s.usersDB.QueryRow(`
+	err := s.dataDB.QueryRow(`
 		SELECT cm1.conversation_id
 		FROM conversation_members cm1
 		JOIN conversation_members cm2 ON cm1.conversation_id = cm2.conversation_id
@@ -126,7 +126,7 @@ func (s *Store) FindOneOnOneConversation(user1, user2 string) (string, error) {
 
 // RemoveConversationMember removes a member from a conversation.
 func (s *Store) RemoveConversationMember(convID, user string) error {
-	_, err := s.usersDB.Exec(`
+	_, err := s.dataDB.Exec(`
 		DELETE FROM conversation_members WHERE conversation_id = ? AND user = ?`,
 		convID, user,
 	)
@@ -136,7 +136,7 @@ func (s *Store) RemoveConversationMember(convID, user string) error {
 // IsConversationMember checks if a user is a member of a conversation.
 func (s *Store) IsConversationMember(convID, user string) (bool, error) {
 	var count int
-	err := s.usersDB.QueryRow(`
+	err := s.dataDB.QueryRow(`
 		SELECT COUNT(*) FROM conversation_members WHERE conversation_id = ? AND user = ?`,
 		convID, user,
 	).Scan(&count)
@@ -160,7 +160,7 @@ func (s *Store) IsConversationMember(convID, user string) (bool, error) {
 //     via a per-send retirement check (see user_retired error code).
 func (s *Store) RetireUserFromConversations(user string) ([]string, error) {
 	// Collect conv IDs the user is a member of, along with current member count
-	rows, err := s.usersDB.Query(`
+	rows, err := s.dataDB.Query(`
 		SELECT cm.conversation_id,
 		       (SELECT COUNT(*) FROM conversation_members cm2 WHERE cm2.conversation_id = cm.conversation_id) AS member_count
 		FROM conversation_members cm
@@ -198,7 +198,7 @@ func (s *Store) RetireUserFromConversations(user string) ([]string, error) {
 	for _, c := range convs {
 		affected = append(affected, c.id)
 		if c.count >= 3 {
-			if _, err := s.usersDB.Exec(`
+			if _, err := s.dataDB.Exec(`
 				DELETE FROM conversation_members WHERE conversation_id = ? AND user = ?`,
 				c.id, user,
 			); err != nil {

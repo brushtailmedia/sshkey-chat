@@ -1,10 +1,8 @@
 package main
 
 import (
-	"crypto/rand"
 	"database/sql"
 	"fmt"
-	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,16 +13,6 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
-
-func generateCLIID(prefix string) string {
-	const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-"
-	b := make([]byte, 21)
-	for i := range b {
-		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
-		b[i] = alphabet[n.Int64()]
-	}
-	return prefix + string(b)
-}
 
 func main() {
 	if err := run(); err != nil {
@@ -230,9 +218,9 @@ func cmdApprove(configDir string, args []string) error {
 
 	// Generate nanoid username (internal ID, never shown to users)
 	// Guard against astronomically unlikely collision.
-	username := generateCLIID("usr_")
+	username := store.GenerateID("usr_")
 	if _, exists := existingUsers[username]; exists {
-		username = generateCLIID("usr_")
+		username = store.GenerateID("usr_")
 		if _, exists := existingUsers[username]; exists {
 			return fmt.Errorf("nanoid collision (extremely unlikely) — please retry")
 		}
@@ -767,7 +755,7 @@ func cmdPurge(dataDir string, args []string) error {
 							fid = strings.Trim(fid, " \"")
 							if fid != "" {
 								os.Remove(filepath.Join(dataDir, "data", "files", fid))
-								st.UsersDB().Exec("DELETE FROM file_hashes WHERE file_id = ?", fid)
+								st.DataDB().Exec("DELETE FROM file_hashes WHERE file_id = ?", fid)
 							}
 						}
 					}

@@ -112,7 +112,7 @@ type ConversationRenamed struct {
 type SendDM struct {
 	Type         string            `json:"type"`                  // "send_dm"
 	Conversation string            `json:"conversation"`
-	WrappedKeys  map[string]string `json:"wrapped_keys"`          // username -> base64 wrapped key
+	WrappedKeys  map[string]string `json:"wrapped_keys"`          // userID -> base64 wrapped key
 	Payload      string            `json:"payload"`               // base64 encrypted
 	FileIDs      []string          `json:"file_ids,omitempty"`
 	Signature    string            `json:"signature"`             // base64 Ed25519 signature
@@ -385,7 +385,7 @@ type EpochRotate struct {
 	Type        string            `json:"type"`        // "epoch_rotate"
 	Room        string            `json:"room"`
 	Epoch       int64             `json:"epoch"`
-	WrappedKeys map[string]string `json:"wrapped_keys"` // username -> base64 wrapped key
+	WrappedKeys map[string]string `json:"wrapped_keys"` // userID -> base64 wrapped key
 	MemberHash  string            `json:"member_hash"`  // SHA256 of sorted member usernames
 }
 

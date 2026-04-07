@@ -15,7 +15,7 @@ type StoredMessage struct {
 	Payload     string             // base64 encrypted blob
 	FileIDs     []string
 	Signature   string
-	WrappedKeys map[string]string  // DMs only: username -> base64 wrapped key
+	WrappedKeys map[string]string  // DMs only: userID -> base64 wrapped key
 	Deleted     bool
 	DeletedBy   string
 }

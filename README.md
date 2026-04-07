@@ -285,14 +285,14 @@ SQLite in WAL mode. The server stores encrypted blobs only -- it cannot read mes
 
 ```
 /var/sshkey-chat/data/
-├── users.db              # devices, epoch keys, conversations, profiles, push tokens, read positions
+├── data.db              # devices, epoch keys, conversations, profiles, push tokens, read positions
 ├── room-general.db       # encrypted messages, reactions, pins for "general"
 ├── room-engineering.db   # encrypted messages for "engineering"
 ├── conv-xK9mQ2pR.db     # encrypted DM messages
 └── files/                # encrypted file blobs
 ```
 
-### Schema: users.db
+### Schema: data.db
 
 ```sql
 -- Device registry (per user, per device)

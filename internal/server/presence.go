@@ -40,11 +40,11 @@ func (s *Server) broadcastPresence(username, status string) {
 	}
 
 	for _, client := range s.clients {
-		if client.Username == username {
+		if client.UserID == username {
 			continue
 		}
 		// Check if this client shares a room
-		clientUser := s.cfg.Users[client.Username]
+		clientUser := s.cfg.Users[client.UserID]
 		for _, r := range clientUser.Rooms {
 			if userRooms[r] {
 				client.Encoder.Encode(presence)
@@ -61,11 +61,11 @@ func (s *Server) sendUnreadCounts(c *Client) {
 	}
 
 	s.cfg.RLock()
-	rooms := s.cfg.Users[c.Username].Rooms
+	rooms := s.cfg.Users[c.UserID].Rooms
 	s.cfg.RUnlock()
 
 	for _, room := range rooms {
-		count, lastRead, err := s.store.GetRoomUnreadCount(room, c.Username, c.DeviceID)
+		count, lastRead, err := s.store.GetRoomUnreadCount(room, c.UserID, c.DeviceID)
 		if err != nil || count == 0 {
 			continue
 		}
@@ -77,12 +77,12 @@ func (s *Server) sendUnreadCounts(c *Client) {
 		})
 	}
 
-	convs, err := s.store.GetUserConversations(c.Username)
+	convs, err := s.store.GetUserConversations(c.UserID)
 	if err != nil {
 		return
 	}
 	for _, conv := range convs {
-		count, lastRead, err := s.store.GetConvUnreadCount(conv.ID, c.Username, c.DeviceID)
+		count, lastRead, err := s.store.GetConvUnreadCount(conv.ID, c.UserID, c.DeviceID)
 		if err != nil || count == 0 {
 			continue
 		}
@@ -102,7 +102,7 @@ func (s *Server) sendPins(c *Client) {
 	}
 
 	s.cfg.RLock()
-	rooms := s.cfg.Users[c.Username].Rooms
+	rooms := s.cfg.Users[c.UserID].Rooms
 	s.cfg.RUnlock()
 
 	for _, room := range rooms {
@@ -112,7 +112,7 @@ func (s *Server) sendPins(c *Client) {
 		}
 
 		// Get user's first_epoch for this room — filter out pins from before they joined
-		firstSeen, firstEpoch, _ := s.store.GetUserRoom(c.Username, room)
+		firstSeen, firstEpoch, _ := s.store.GetUserRoom(c.UserID, room)
 
 		// Join pins with messages to get the epoch and timestamp of each pinned message
 		rows, err := db.Query(`
