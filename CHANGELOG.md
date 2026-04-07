@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.1 — 2026-04-07
 
 - **Rate limits** — deletes (10/min user, 50/min admin), reactions (30/min), DM creation (5/min), profile changes (5/min), pin/unpin (10/min), connections (20/min)
 - **Soft-delete** — message deletion is a soft-delete with tombstones sent in sync/history; reactions on deleted messages are cleaned up
