@@ -155,12 +155,12 @@ See `testdata/config/server.toml` for a complete example with all options.
 [alice]
 key = "ssh-ed25519 AAAA... alice@laptop"
 display_name = "Alice"
-rooms = ["general", "engineering"]
+rooms = ["general", "support"]
 
 [bob]
 key = "ssh-ed25519 AAAA... bob@desktop"
 display_name = "Bob"
-rooms = ["general"]
+rooms = ["general", "support"]
 ```
 
 **`/etc/sshkey-chat/rooms.toml`**
@@ -169,8 +169,8 @@ rooms = ["general"]
 [general]
 topic = "General chat"
 
-[engineering]
-topic = "Core platform work"
+[support]
+topic = "Requests, questions, and admin help"
 ```
 
 ### Run
@@ -219,8 +219,8 @@ sudo journalctl -u sshkey-server -f   # follow logs
 
 ```bash
 sshkey-ctl pending                                             # view pending key requests
-sshkey-ctl approve --key "ssh-ed25519 AAAA... name" --rooms general  # approve (name from key comment)
-sshkey-ctl approve --key "ssh-ed25519 AAAA..." --name NAME --rooms general  # approve (override name)
+sshkey-ctl approve --key "ssh-ed25519 AAAA... name" --rooms general,support  # approve (name from key comment)
+sshkey-ctl approve --key "ssh-ed25519 AAAA..." --name NAME --rooms general,support  # approve (override name)
 sshkey-ctl reject --fingerprint FP                             # reject a pending key
 sshkey-ctl list-users                                          # list all users
 sshkey-ctl remove-user usr_abc123                              # remove a user

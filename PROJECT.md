@@ -1880,30 +1880,6 @@ Two-layer identity system: **usernames** (immutable internal IDs) and **display 
 
 ---
 
-## Future: Room Creation Approval
-
-**Status:** Feature request — not yet implemented.
-
-Users should be able to request room creation from within the client. Admin approves or rejects via `sshkey-ctl`.
-
-### Proposed flow
-
-1. **Client sends:** `{"type":"room_request","name":"design","topic":"Design discussions"}`
-2. **Server stores** in a `pending_rooms` table (same pattern as `pending_keys`)
-3. **Server notifies admins:** `{"type":"admin_notify","event":"pending_room","name":"design","requested_by":"usr_alice","topic":"..."}`
-4. **Admin approves:** `sshkey-ctl approve-room --name design` — writes to rooms.toml, adds the requester to the room in users.toml. Server picks up via file watcher, broadcasts `room_list` update and `room_event` join.
-5. **Admin rejects:** `sshkey-ctl reject-room --name design` — removes from pending, optionally notifies the requester.
-
-### Design notes
-
-- Requester is auto-added as the first member on approval. Admin can add other users with `add-to-room`.
-- Pending room requests visible to admins in the `/pending` panel (alongside pending keys) and via `sshkey-ctl pending`.
-- TUI: new `/request-room` slash command triggers the request.
-- Follows the same pending → admin_notify → CLI approve/reject pattern as pending keys.
-- Room names validated server-side (alphanumeric + hyphens, no duplicates, not a reserved name).
-
----
-
 ## Future: Push Notifications
 
 **Status:** Feature request — blocked on sshkey-app (GUI client).
@@ -2104,29 +2080,6 @@ Libraries: `imaging` (Go), `image/jpeg` stdlib. Adds ~200ms to upload for typica
 
 ---
 
-## Future: Send Text Recovery (TUI)
-
-**Status:** Nice-to-have. Not a UX problem since persistent error display was implemented.
-
-### Current behavior (implemented)
-
-Server errors now persist in the status bar until the user takes their next action (send, react, reply, pin, delete, slash command). Error messages are user-friendly ("Slow down — too many messages. Try again in a moment" instead of "rate_limited"). The user sees the rejection, understands what happened, and can retype.
-
-The typed text is still lost from the input bar on rejection (the input clears before the server responds). This is mildly inconvenient but no longer a mystery — the error is clearly visible.
-
-### Proposed enhancement
-
-Save the last sent text and restore it on server rejection. This saves retyping but is a convenience, not a fix for a broken flow.
-
-1. **Stash last sent text.** Before clearing the input, save the text and reply context in a `lastSent` field.
-2. **Restore on rejection.** When an `error` message arrives with a `ref` matching the last sent message ID, restore the stashed text to the input bar.
-3. **Clear stash on success.** When the sent message echoes back (appears in the message list via `message`/`dm`), clear the stash.
-4. **Timeout.** If no echo or error arrives within 5 seconds, clear the stash (message likely accepted).
-
-Low priority — the persistent error display and clear error messages already solve the core UX issue.
-
----
-
 ## Future: Room Deletion
 
 **Status:** Feature request.
@@ -2237,3 +2190,16 @@ When `delete_messages` is true:
 - Offline clients receive tombstones in their next sync batch
 
 This is the only path to bulk message deletion. It is permanent, tied to an irreversible account action, and fully auditable.
+
+---
+
+## Future: Display Room Topics in TUI
+
+**Status:** Feature request.
+
+Room topics are sent by the server in `room_list` but the terminal client never displays them. They should show in:
+
+- **Info panel (`Ctrl+I`)** — under the room name, above the member list
+- **Message panel header** — subtle line under `#general` showing the topic
+
+Topic changes (if supported later) would update via `room_list` refresh.

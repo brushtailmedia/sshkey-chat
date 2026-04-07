@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
@@ -1303,15 +1304,17 @@ func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Reject empty display name
-	if msg.DisplayName == "" {
+	// Validate display name (trim, length, printable characters)
+	cleaned, err := config.ValidateDisplayName(msg.DisplayName)
+	if err != nil {
 		c.Encoder.Encode(protocol.Error{
 			Type:    "error",
 			Code:    "invalid_profile",
-			Message: "Display name cannot be empty",
+			Message: err.Error(),
 		})
 		return
 	}
+	msg.DisplayName = cleaned
 
 	// Check for duplicate display name across all users (case-insensitive)
 	s.cfg.RLock()

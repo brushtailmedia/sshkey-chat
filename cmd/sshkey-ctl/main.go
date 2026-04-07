@@ -182,12 +182,10 @@ func cmdApprove(configDir string, args []string) error {
 		return fmt.Errorf("only Ed25519 keys are supported, got %s", parsed.Type())
 	}
 
-	// Validate display name
-	if len(displayName) < 2 {
-		return fmt.Errorf("display name must be at least 2 characters")
-	}
-	if len(displayName) > 32 {
-		return fmt.Errorf("display name must be 32 characters or fewer")
+	// Validate display name (trim, length, printable characters)
+	displayName, err = config.ValidateDisplayName(displayName)
+	if err != nil {
+		return err
 	}
 
 	// Check against existing users

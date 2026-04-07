@@ -43,6 +43,10 @@ firebase-sa.json
 # Docker runtime
 docker/config/host_key
 
+# Design docs (internal reference only)
+room_retire.md
+refactor_plan.md
+
 # OS
 .DS_Store
 Thumbs.db
