@@ -1,7 +1,8 @@
 [server]
 port = 2222
 bind = "0.0.0.0"
-admins = ["usr_alice_test"]
+# allow_self_leave_rooms = false          # default — admin-managed rooms
+# allow_self_leave_retired_rooms = true   # default — inert until Phase 12
 
 [messages]
 max_body_size = "16KB"

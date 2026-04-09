@@ -1,5 +1,29 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- Rooms and users migrated from TOML files to SQLite databases (`rooms.db`, `users.db`)
+- Room identity switched from display names to nanoid IDs (`room_` prefix) in all protocol messages
+- Admin status moved from `server.toml` to `users.db` (managed via `sshkey-ctl promote/demote`)
+- `users.toml` and `rooms.toml` are now seed files only (processed on first server start)
+- All user/room management via `sshkey-ctl` CLI — no runtime TOML editing
+- Server reads user/room data from SQLite on demand — no in-memory caches
+- Protocol signature canonical form uses `room_id` instead of `room_name`
+
+### Added
+- `users.db` — user identity, SSH key authentication, admin status, retirement
+- `rooms.db` — room identity, membership, metadata (existed since v0.1.1, now sole source of truth)
+- `sshkey-ctl promote/demote` commands for admin management
+- Room nanoid IDs in `room_list` message (`id` field alongside `name`)
+- `room_list` handled at client layer for room metadata persistence
+
+### Removed
+- `server.toml` `admins` field
+- Runtime `users.toml` writes (`WriteUsers`, `persistRetirement`)
+- `reloadUsers` config watcher (users.db is source of truth)
+- In-memory `config.Users` and `config.Rooms` runtime caches
+
 ## v0.1.1 — 2026-04-07
 
 - **Rate limits** — deletes (10/min user, 50/min admin), reactions (30/min), DM creation (5/min), profile changes (5/min), pin/unpin (10/min), connections (20/min)

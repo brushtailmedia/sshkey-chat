@@ -2,7 +2,6 @@
 package server
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
@@ -11,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,7 +40,29 @@ type Server struct {
 
 	mu       sync.RWMutex
 	clients  map[string]*Client // device_id -> Client
+
+	// dmCleanupMu serializes 1:1 DM cleanup against handleCreateDM. When
+	// both parties leave a DM, handleLeaveDM holds this mutex while it
+	// deletes the row + dm-<id>.db file. Concurrent handleCreateDM calls
+	// fail-fast with ErrServerBusy via TryLock so the client can retry,
+	// avoiding the race where dedup returns a row that is about to be
+	// (or has just been) deleted.
+	dmCleanupMu sync.Mutex
+
+	// adminKickStop signals the admin-kick processor goroutine to stop.
+	// Closed by Close() during shutdown. The processor polls
+	// pending_admin_kicks every adminKickPollInterval and dispatches
+	// each row through performGroupLeave so the kicked user and the
+	// remaining group members get live group_left / group_event echoes.
+	adminKickStop chan struct{}
 }
+
+// adminKickPollInterval is how often the admin-kick processor checks
+// the pending_admin_kicks queue. Five seconds is fine for an emergency
+// moderation action — the kick takes effect at the data layer
+// immediately (CLI mutates group_members directly), this just
+// determines how soon the affected sessions see the live notification.
+const adminKickPollInterval = 5 * time.Second
 
 // New creates a new server with the given config and data directory.
 func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, error) {
@@ -50,12 +72,13 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 	}
 
 	s := &Server{
-		cfg:     cfg,
-		logger:  logger,
-		epochs:  newEpochManager(),
-		limiter: newRateLimiter(),
-		clients: make(map[string]*Client),
-		dataDir: dir,
+		cfg:           cfg,
+		logger:        logger,
+		epochs:        newEpochManager(),
+		limiter:       newRateLimiter(),
+		clients:       make(map[string]*Client),
+		dataDir:       dir,
+		adminKickStop: make(chan struct{}),
 	}
 
 	// Open storage if data directory provided
@@ -87,6 +110,17 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 			}
 			if count > 0 {
 				logger.Info("seeded room_members from users.toml", "memberships", count)
+			}
+		}
+
+		// Seed users.db from users.toml on first run
+		if st.UsersDBEmpty() && cfg.Users != nil {
+			count, err := st.SeedUsers(cfg.Users)
+			if err != nil {
+				return nil, fmt.Errorf("seed users: %w", err)
+			}
+			if count > 0 {
+				logger.Info("seeded users.db from users.toml", "users", count)
 			}
 		}
 
@@ -130,6 +164,12 @@ func (s *Server) ListenAndServe() error {
 	// Start config file watcher
 	s.watchConfig()
 
+	// Start the admin-kick processor — this is the bridge between the
+	// CLI's pending_admin_kicks queue and the server's live broadcast
+	// surface. Polls every adminKickPollInterval and dispatches each
+	// queued kick through performGroupLeave.
+	go s.runAdminKickProcessor()
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -160,6 +200,13 @@ func (s *Server) ListenAndServe() error {
 }
 
 // Close shuts down the server gracefully.
+// Store returns the underlying Store. Used by tests that need to seed
+// or inspect persistent state directly without going through the
+// protocol surface.
+func (s *Server) Store() *store.Store {
+	return s.store
+}
+
 func (s *Server) Close() error {
 	// Audit
 	if s.audit != nil {
@@ -176,6 +223,16 @@ func (s *Server) Close() error {
 		s.listener = nil
 		if err := ln.Close(); err != nil {
 			firstErr = err
+		}
+	}
+
+	// Stop the admin-kick processor goroutine
+	if s.adminKickStop != nil {
+		select {
+		case <-s.adminKickStop:
+			// already closed
+		default:
+			close(s.adminKickStop)
 		}
 	}
 
@@ -209,7 +266,7 @@ func (s *Server) Close() error {
 	return firstErr
 }
 
-// authenticateKey validates an SSH public key against users.toml.
+// authenticateKey validates an SSH public key against users.db.
 // Only Ed25519 keys are accepted.
 func (s *Server) authenticateKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 	// Failed auth rate limiting per IP
@@ -233,18 +290,17 @@ func (s *Server) authenticateKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh
 		return nil, fmt.Errorf("only Ed25519 keys are supported, got %s", key.Type())
 	}
 
-	s.cfg.RLock()
-	defer s.cfg.RUnlock()
+	// Look up user by SSH public key in users.db
+	pubKeyStr := string(ssh.MarshalAuthorizedKey(key))
+	pubKeyStr = strings.TrimSpace(pubKeyStr) // strip trailing newline
 
-	for username, user := range s.cfg.Users {
-		parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(user.Key))
-		if err != nil {
-			continue
-		}
-		if bytes.Equal(key.Marshal(), parsed.Marshal()) {
-			if user.Retired {
+	if s.store != nil {
+		userID := s.store.GetUserByKey(pubKeyStr)
+		if userID != "" {
+			if s.store.IsUserRetired(userID) {
+				user := s.store.GetUserByID(userID)
 				s.logger.Info("rejected retired account login",
-					"user", username,
+					"user", userID,
 					"fingerprint", ssh.FingerprintSHA256(key),
 					"remote", conn.RemoteAddr().String(),
 					"retired_at", user.RetiredAt,
@@ -253,13 +309,13 @@ func (s *Server) authenticateKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh
 				return nil, fmt.Errorf("account retired")
 			}
 			s.logger.Info("key authenticated",
-				"user", username,
+				"user", userID,
 				"fingerprint", ssh.FingerprintSHA256(key),
 				"remote", conn.RemoteAddr().String(),
 			)
 			return &ssh.Permissions{
 				Extensions: map[string]string{
-					"username": username,
+					"username": userID,
 				},
 			}, nil
 		}
@@ -332,18 +388,11 @@ func (s *Server) logPendingKey(fingerprint, remote string) {
 
 // notifyAdmins sends a message to all connected admin clients.
 func (s *Server) notifyAdmins(msg any) {
-	s.cfg.RLock()
-	adminSet := make(map[string]bool, len(s.cfg.Server.Server.Admins))
-	for _, a := range s.cfg.Server.Server.Admins {
-		adminSet[a] = true
-	}
-	s.cfg.RUnlock()
-
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	for _, client := range s.clients {
-		if adminSet[client.UserID] {
+		if s.store != nil && s.store.IsAdmin(client.UserID) {
 			client.Encoder.Encode(msg)
 		}
 	}
@@ -361,9 +410,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 		return
 	}
 
-	username := sshConn.Permissions.Extensions["username"]
+	userID := sshConn.Permissions.Extensions["username"]
 	s.logger.Info("connect",
-		"user", username,
+		"user", userID,
 		"remote", sshConn.RemoteAddr().String(),
 	)
 
@@ -406,7 +455,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 		ch, chReqs, err := newCh.Accept()
 		if err != nil {
-			s.logger.Error("channel accept failed", "user", username, "error", err)
+			s.logger.Error("channel accept failed", "user", userID, "error", err)
 			continue
 		}
 		go ssh.DiscardRequests(chReqs)
@@ -415,20 +464,20 @@ func (s *Server) handleConnection(conn net.Conn) {
 		switch channelNum {
 		case 1:
 			// Channel 1: NDJSON protocol
-			go s.handleSession(username, sshConn, ch, dlChanCh)
+			go s.handleSession(userID, sshConn, ch, dlChanCh)
 		case 2:
 			// Channel 2: downloads — server writes here; no reader needed
 			dlChanCh <- ch
 		case 3:
 			// Channel 3: uploads — server reads upload frames here
-			go s.handleBinaryChannel(username, ch)
+			go s.handleBinaryChannel(userID, ch)
 		default:
 			ch.Close()
 		}
 	}
 
 	s.logger.Info("disconnect",
-		"user", username,
+		"user", userID,
 		"remote", sshConn.RemoteAddr().String(),
 	)
 }

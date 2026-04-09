@@ -285,35 +285,7 @@ func TestRoomDisplayNameToID(t *testing.T) {
 	}
 }
 
-func TestIsRoomRetired(t *testing.T) {
-	dir := t.TempDir()
-	st, err := Open(dir)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer st.Close()
 
-	st.SeedRooms(map[string]config.Room{"general": {Topic: "Chat"}})
-
-	all, _ := st.GetAllRooms()
-	id := all[0].ID
-
-	if st.IsRoomRetired(id) {
-		t.Error("fresh room should not be retired")
-	}
-
-	// Manually set retired
-	st.roomsDB.Exec(`UPDATE rooms SET retired = 1 WHERE id = ?`, id)
-
-	if !st.IsRoomRetired(id) {
-		t.Error("should be retired after update")
-	}
-
-	// Nonexistent room
-	if st.IsRoomRetired("room_fake") {
-		t.Error("nonexistent room should not be retired")
-	}
-}
 
 func TestSeedRoomMembers_PopulatesDB(t *testing.T) {
 	dir := t.TempDir()
@@ -443,6 +415,98 @@ func TestRoomMembersEmpty(t *testing.T) {
 
 	if st.RoomMembersEmpty() {
 		t.Error("should not be empty after seed")
+	}
+}
+
+func TestAddRoomMember(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+
+	st.SeedRooms(map[string]config.Room{"general": {Topic: "Chat"}})
+	roomID := st.RoomDisplayNameToID("general")
+
+	err = st.AddRoomMember(roomID, "usr_alice", 0)
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	if !st.IsRoomMemberByID(roomID, "usr_alice") {
+		t.Error("alice should be a member")
+	}
+
+	// Idempotent — adding again should not error
+	err = st.AddRoomMember(roomID, "usr_alice", 0)
+	if err != nil {
+		t.Fatalf("add again: %v", err)
+	}
+}
+
+func TestRemoveRoomMember(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+
+	st.SeedRooms(map[string]config.Room{"general": {Topic: "Chat"}})
+	roomID := st.RoomDisplayNameToID("general")
+
+	st.AddRoomMember(roomID, "usr_alice", 0)
+	st.AddRoomMember(roomID, "usr_bob", 0)
+
+	err = st.RemoveRoomMember(roomID, "usr_alice")
+	if err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	if st.IsRoomMemberByID(roomID, "usr_alice") {
+		t.Error("alice should be removed")
+	}
+	if !st.IsRoomMemberByID(roomID, "usr_bob") {
+		t.Error("bob should still be a member")
+	}
+
+	// Remove non-member — should not error
+	err = st.RemoveRoomMember(roomID, "usr_nobody")
+	if err != nil {
+		t.Fatalf("remove non-member: %v", err)
+	}
+}
+
+func TestRemoveAllRoomMembers(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+
+	st.SeedRooms(map[string]config.Room{
+		"general": {Topic: "Chat"},
+		"support": {Topic: "Help"},
+	})
+	generalID := st.RoomDisplayNameToID("general")
+	supportID := st.RoomDisplayNameToID("support")
+
+	st.AddRoomMember(generalID, "usr_alice", 0)
+	st.AddRoomMember(supportID, "usr_alice", 0)
+	st.AddRoomMember(generalID, "usr_bob", 0)
+
+	st.RemoveAllRoomMembers("usr_alice")
+
+	if st.IsRoomMemberByID(generalID, "usr_alice") {
+		t.Error("alice should be removed from general")
+	}
+	if st.IsRoomMemberByID(supportID, "usr_alice") {
+		t.Error("alice should be removed from support")
+	}
+	if !st.IsRoomMemberByID(generalID, "usr_bob") {
+		t.Error("bob should still be in general")
 	}
 }
 

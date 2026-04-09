@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
+	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 )
 
 const testKeyAlice = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJPpG4hFrxw7JOAppGdh0JrkNDNGxypfmwJxNFCWXnpG test@sshkey"
@@ -73,11 +75,14 @@ topic = "Engineering"
 
 func TestRetireUser_SetsFields(t *testing.T) {
 	s := newTestServer(t)
-	before := s.cfg.Users["bob"]
+	before := s.store.GetUserByID("bob")
+	if before == nil {
+		t.Fatal("bob should exist in users.db")
+	}
 	if before.Retired {
 		t.Fatal("bob should not be retired initially")
 	}
-	if len(before.Rooms) == 0 {
+	if len(s.store.GetUserRoomIDs("bob")) == 0 {
 		t.Fatal("bob should have rooms initially")
 	}
 
@@ -85,7 +90,7 @@ func TestRetireUser_SetsFields(t *testing.T) {
 		t.Fatalf("retireUser: %v", err)
 	}
 
-	after := s.cfg.Users["bob"]
+	after := s.store.GetUserByID("bob")
 	if !after.Retired {
 		t.Error("bob should be retired")
 	}
@@ -95,28 +100,31 @@ func TestRetireUser_SetsFields(t *testing.T) {
 	if after.RetiredAt == "" {
 		t.Error("retired_at should be set")
 	}
-	if len(after.Rooms) != 0 {
-		t.Errorf("rooms should be cleared, got %v", after.Rooms)
-	}
 }
 
-func TestRetireUser_PersistsToDisk(t *testing.T) {
+func TestRetireUser_PersistsToDB(t *testing.T) {
 	s := newTestServer(t)
 	if err := s.retireUser("bob", "admin"); err != nil {
 		t.Fatalf("retire: %v", err)
 	}
 
-	// Reload from disk — the persisted state should match
-	cfg2, err := config.Load(s.cfg.Dir)
-	if err != nil {
-		t.Fatalf("reload: %v", err)
+	// Verify state in users.db
+	bob := s.store.GetUserByID("bob")
+	if bob == nil {
+		t.Fatal("bob should exist in users.db")
 	}
-	bob := cfg2.Users["bob"]
 	if !bob.Retired {
-		t.Error("bob should be retired after reload from disk")
+		t.Error("bob should be retired in users.db")
 	}
 	if bob.RetiredReason != "admin" {
 		t.Errorf("reason = %q, want admin", bob.RetiredReason)
+	}
+	if bob.RetiredAt == "" {
+		t.Error("retired_at should be set")
+	}
+	// IsUserRetired should also return true
+	if !s.store.IsUserRetired("bob") {
+		t.Error("IsUserRetired should return true")
 	}
 }
 
@@ -136,35 +144,6 @@ func TestRetireUser_RejectsAlreadyRetired(t *testing.T) {
 	err := s.retireUser("bob", "self_compromise")
 	if err == nil {
 		t.Fatal("expected error when retiring an already-retired user")
-	}
-}
-
-func TestRetireUser_RollbackOnWriteFailure(t *testing.T) {
-	s := newTestServer(t)
-	// Make users.toml unwritable
-	usersPath := filepath.Join(s.cfg.Dir, "users.toml")
-	if err := os.Chmod(usersPath, 0444); err != nil {
-		t.Skip("can't chmod")
-	}
-	defer os.Chmod(usersPath, 0644)
-	// Also make the dir read-only so the temp-file rename fails
-	if err := os.Chmod(s.cfg.Dir, 0555); err != nil {
-		t.Skip("can't chmod dir")
-	}
-	defer os.Chmod(s.cfg.Dir, 0755)
-
-	err := s.retireUser("bob", "admin")
-	if err == nil {
-		t.Fatal("expected error when write fails")
-	}
-
-	// In-memory state should have been rolled back
-	bob := s.cfg.Users["bob"]
-	if bob.Retired {
-		t.Error("in-memory state should have been rolled back on write failure")
-	}
-	if len(bob.Rooms) == 0 {
-		t.Error("rooms should have been restored on rollback")
 	}
 }
 
@@ -197,64 +176,133 @@ func TestFindRetiredMember_UnknownUsersIgnored(t *testing.T) {
 
 func TestHandleRetirement_ClearsRooms(t *testing.T) {
 	s := newTestServer(t)
-	// Bob was in "general"
-	if len(s.cfg.Users["bob"].Rooms) == 0 {
+	// Bob was in "general" (seeded from users.toml into rooms.db).
+	// Use the actual room ID nanoid, not the display name — handleRetirement
+	// dispatches per-room via performRoomLeave which expects IDs.
+	bobRooms := s.store.GetUserRoomIDs("bob")
+	if len(bobRooms) == 0 {
 		t.Fatal("precondition: bob has rooms")
 	}
 
-	oldRooms := []string{"general"}
-	s.handleRetirement("bob", oldRooms, "admin")
+	s.handleRetirement("bob", bobRooms, "admin")
 
-	bob := s.cfg.Users["bob"]
-	if len(bob.Rooms) != 0 {
-		t.Errorf("rooms should be cleared, got %v", bob.Rooms)
+	// Room membership should be cleared in rooms.db
+	if rooms := s.store.GetUserRoomIDs("bob"); len(rooms) != 0 {
+		t.Errorf("bob should have no rooms after retirement, got %v", rooms)
 	}
 }
 
-func TestHandleRetirement_RemovesFromGroupConversations(t *testing.T) {
+func TestHandleRetirement_RemovesFromGroups(t *testing.T) {
 	s := newTestServer(t)
 
 	// Create a group DM with alice, bob, carol
-	if err := s.store.CreateConversation("conv_group", []string{"alice", "bob", "carol"}); err != nil {
+	if err := s.store.CreateGroup("group_abc", []string{"alice", "bob", "carol"}); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	// Also create a 1:1 between bob and alice
-	if err := s.store.CreateConversation("conv_oneone", []string{"alice", "bob"}); err != nil {
-		t.Fatalf("create 1:1: %v", err)
-	}
 
-	s.handleRetirement("bob", []string{"general"}, "admin")
+	s.handleRetirement("bob", s.store.GetUserRoomIDs("bob"), "admin")
 
 	// Group: bob should be removed
-	groupMembers, _ := s.store.GetConversationMembers("conv_group")
+	groupMembers, _ := s.store.GetGroupMembers("group_abc")
 	for _, m := range groupMembers {
 		if m == "bob" {
-			t.Error("bob should be removed from group conv_group")
+			t.Error("bob should be removed from group_abc")
 		}
 	}
 	if len(groupMembers) != 2 {
 		t.Errorf("group should have 2 members, got %v", groupMembers)
 	}
+}
 
-	// 1:1: bob should be kept
-	oneMembers, _ := s.store.GetConversationMembers("conv_oneone")
-	foundBob := false
-	for _, m := range oneMembers {
-		if m == "bob" {
-			foundBob = true
+func TestHandleRetirement_SetsDMCutoff(t *testing.T) {
+	s := newTestServer(t)
+
+	// Create a 1:1 DM between alice and bob
+	dm, err := s.store.CreateOrGetDirectMessage("dm_ab", "alice", "bob")
+	if err != nil {
+		t.Fatalf("create DM: %v", err)
+	}
+
+	s.handleRetirement("bob", nil, "admin")
+
+	// Bob's cutoff should be set (silent leave)
+	dm2, _ := s.store.GetDirectMessage(dm.ID)
+	if dm2 == nil {
+		t.Fatal("DM should still exist after retirement")
+	}
+	bobCutoff := dm2.CutoffFor("bob")
+	if bobCutoff == 0 {
+		t.Error("bob's cutoff should be non-zero after retirement")
+	}
+
+	// Alice's cutoff should be untouched
+	aliceCutoff := dm2.CutoffFor("alice")
+	if aliceCutoff != 0 {
+		t.Errorf("alice's cutoff should be 0, got %d", aliceCutoff)
+	}
+}
+
+// TestHandleRetirement_BroadcastsUserRetiredReasonToRemainingMembers
+// verifies that the room_event{leave} broadcast emitted when a user
+// retires carries Reason: "user_retired", so client UIs can render a
+// distinct system message ("alice's account was retired" instead of
+// "alice left"). This is the propagation regression for the
+// handleRetirement → performRoomLeave refactor.
+func TestHandleRetirement_BroadcastsUserRetiredReasonToRemainingMembers(t *testing.T) {
+	s := newTestServer(t)
+
+	// alice is in "general" with bob and carol per the seed. Use her
+	// connected session to capture the room_event broadcast we expect
+	// when bob retires.
+	bobRooms := s.store.GetUserRoomIDs("bob")
+	if len(bobRooms) == 0 {
+		t.Fatal("precondition: bob has rooms")
+	}
+
+	alice := testClientFor("alice", "dev_alice_1")
+	s.mu.Lock()
+	s.clients["dev_alice_1"] = alice.Client
+	s.mu.Unlock()
+
+	s.handleRetirement("bob", bobRooms, "admin")
+
+	// alice should have received a room_event{leave, user: bob,
+	// reason: user_retired} for each room she shared with bob, plus
+	// one user_retired top-level broadcast.
+	msgs := alice.messages()
+	if len(msgs) == 0 {
+		t.Fatal("alice should have received at least one message")
+	}
+
+	var foundRoomEvent bool
+	for _, raw := range msgs {
+		var ev protocol.RoomEvent
+		if err := json.Unmarshal(raw, &ev); err != nil {
+			continue
+		}
+		if ev.Type == "room_event" && ev.Event == "leave" && ev.User == "bob" {
+			if ev.Reason != "user_retired" {
+				t.Errorf("room_event reason = %q, want user_retired", ev.Reason)
+			}
+			foundRoomEvent = true
+			break
 		}
 	}
-	if !foundBob {
-		t.Errorf("bob should remain in 1:1 conv_oneone, got %v", oneMembers)
+	if !foundRoomEvent {
+		t.Errorf("alice never received a room_event{leave, user: bob} broadcast; messages = %v", msgs)
 	}
 }
 
 func TestHandleRetirement_EpochRotationMarked(t *testing.T) {
 	s := newTestServer(t)
-	// Initialize epoch for "general" so we have a baseline
-	s.epochs.getOrCreate("general", 1)
+	// Initialize epoch for one of bob's rooms so we have a baseline.
+	bobRooms := s.store.GetUserRoomIDs("bob")
+	if len(bobRooms) == 0 {
+		t.Fatal("precondition: bob has rooms")
+	}
+	s.epochs.getOrCreate(bobRooms[0], 1)
 
-	s.handleRetirement("bob", []string{"general"}, "admin")
+	s.handleRetirement("bob", bobRooms, "admin")
 
 	// Epoch should still be accessible (retirement marks rotation, doesn't
 	// advance the epoch number — the next sender does that)
@@ -264,42 +312,3 @@ func TestHandleRetirement_EpochRotationMarked(t *testing.T) {
 	}
 }
 
-func TestPersistRetirement_WritesCompleteFile(t *testing.T) {
-	s := newTestServer(t)
-
-	// Mark bob retired in memory
-	s.cfg.Lock()
-	bob := s.cfg.Users["bob"]
-	bob.Retired = true
-	bob.RetiredAt = "2026-04-05T00:00:00Z"
-	bob.RetiredReason = "key_lost"
-	bob.Rooms = nil
-	s.cfg.Users["bob"] = bob
-	s.cfg.Unlock()
-
-	if err := s.persistRetirement("bob"); err != nil {
-		t.Fatalf("persist: %v", err)
-	}
-
-	// Verify by re-reading users.toml
-	reloaded, err := config.LoadUsers(filepath.Join(s.cfg.Dir, "users.toml"))
-	if err != nil {
-		t.Fatalf("reload: %v", err)
-	}
-	// bob must be in the file with retired fields
-	loadedBob := reloaded["bob"]
-	if !loadedBob.Retired {
-		t.Error("bob should be persisted as retired")
-	}
-	if loadedBob.RetiredReason != "key_lost" {
-		t.Errorf("reason = %q, want key_lost", loadedBob.RetiredReason)
-	}
-	// alice should be unaffected
-	alice := reloaded["alice"]
-	if alice.Retired {
-		t.Error("alice should not be affected")
-	}
-	if len(alice.Rooms) == 0 {
-		t.Error("alice's rooms should be preserved")
-	}
-}

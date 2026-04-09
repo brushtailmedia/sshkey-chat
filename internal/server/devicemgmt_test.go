@@ -29,10 +29,10 @@ func (cc *captureClient) messages() []json.RawMessage {
 // testClientFor constructs a minimal Client whose Encoder writes to an
 // in-memory buffer. Used to test handleListDevices / handleRevokeDevice
 // in isolation from the SSH layer.
-func testClientFor(username, deviceID string) *captureClient {
+func testClientFor(userID, deviceID string) *captureClient {
 	buf := &bytes.Buffer{}
 	c := &Client{
-		UserID: username,
+		UserID: userID,
 		DeviceID: deviceID,
 		Encoder:  protocol.NewEncoder(buf),
 	}

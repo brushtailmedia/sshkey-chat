@@ -1,7 +1,6 @@
 package store
 
 import (
-	"database/sql"
 	"time"
 )
 
@@ -64,28 +63,3 @@ func (s *Store) GetDevices(user string) ([]Device, error) {
 	return devices, rows.Err()
 }
 
-// DeviceCount returns the number of registered devices for a user.
-func (s *Store) DeviceCount(user string) (int, error) {
-	var count int
-	err := s.dataDB.QueryRow(`SELECT COUNT(*) FROM devices WHERE user = ?`, user).Scan(&count)
-	return count, err
-}
-
-// RemoveDevice removes a device registration.
-func (s *Store) RemoveDevice(user, deviceID string) error {
-	_, err := s.dataDB.Exec(`DELETE FROM devices WHERE user = ? AND device_id = ?`, user, deviceID)
-	return err
-}
-
-// OldestSyncTime returns the oldest last_synced time across all devices for all active users.
-// Returns empty string if no devices have synced.
-func (s *Store) OldestSyncTime() (string, error) {
-	var oldest sql.NullString
-	err := s.dataDB.QueryRow(`
-		SELECT MIN(last_synced) FROM devices WHERE last_synced IS NOT NULL AND last_synced != ''
-	`).Scan(&oldest)
-	if err != nil {
-		return "", err
-	}
-	return oldest.String, nil
-}

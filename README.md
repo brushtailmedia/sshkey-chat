@@ -19,8 +19,7 @@ Inspired by [ssh-chat](https://github.com/shazow/ssh-chat).
 - **Lazy scroll-back** -- on-demand history, no bulk download on connect
 - **Reactions, typing indicators, read receipts, presence, pins**
 - **Push notifications** -- content-free APNs/FCM wake pushes (app syncs over SSH)
-- **Config hot-reload** -- add/remove users and rooms without restarting
-- **Admin CLI** -- manage users, devices, pending keys from the server shell
+- **Admin CLI** -- manage users, rooms, devices, pending keys from the server shell
 - **User self-service** -- retire own account, list and revoke own devices from the client
 - **Pure Go** -- no cgo, no external dependencies, single binary
 
@@ -62,13 +61,13 @@ Only Ed25519 SSH keys are supported. The server rejects RSA, ECDSA, and other ke
 ### Docker (recommended)
 
 ```bash
-# 1. Edit docker/config/users.toml — add your Ed25519 public key
+# 1. (Optional) Edit docker/config/users.toml to seed initial users on first start
 #    cat ~/.ssh/id_ed25519.pub
 
 # 2. Start the server
 docker compose up -d
 
-# 3. Connect with the terminal client
+# 3. Connect with the terminal client (unknown keys go to pending queue)
 sshkey-chat --host localhost --key ~/.ssh/id_ed25519
 ```
 
@@ -81,17 +80,21 @@ docker exec sshkey-server sshkey-ctl pending
 # List users
 docker exec sshkey-server sshkey-ctl list-users
 
-# Approve a user (writes to users.toml — server hot-reloads)
+# Approve a user
 docker exec sshkey-server sshkey-ctl approve --key "ssh-ed25519 AAAA... Alice" --rooms general
 
+# Promote/demote admin status
+docker exec sshkey-server sshkey-ctl promote usr_abc123
+docker exec sshkey-server sshkey-ctl demote usr_abc123
+
 # Revoke a device
-docker exec sshkey-server sshkey-ctl revoke-device --user alice --device dev_x
+docker exec sshkey-server sshkey-ctl revoke-device --user usr_abc123 --device dev_x
 
 # View logs
 docker logs -f sshkey-server
 ```
 
-Config files are in `docker/config/` (volume-mounted). Edit them directly — the server watches for changes and reloads automatically.
+> **Note:** `users.toml` is a seed file -- it is only processed on first server start to bootstrap initial users. After that, use `sshkey-ctl` to manage all users.
 
 ### Install
 
@@ -124,13 +127,14 @@ mkdir -p /etc/sshkey-chat /var/sshkey-chat
 
 Create the config files:
 
+> **Note:** `users.toml` and `rooms.toml` are **seed files only** -- they are processed on first server start to bootstrap initial users and rooms. After that, use `sshkey-ctl` for all user and room management. `server.toml` remains the runtime config file for server settings.
+
 **`/etc/sshkey-chat/server.toml`**
 
 ```toml
 [server]
 port = 2222
 bind = "0.0.0.0"
-admins = ["alice"]
 
 [devices]
 max_per_user = 10
@@ -149,7 +153,7 @@ pins_per_minute = 10
 
 See `testdata/config/server.toml` for a complete example with all options.
 
-**`/etc/sshkey-chat/users.toml`**
+**`/etc/sshkey-chat/users.toml`** -- Seed file, processed on first server start only. After that, use `sshkey-ctl` to manage users and rooms.
 
 ```toml
 [alice]
@@ -163,7 +167,7 @@ display_name = "Bob"
 rooms = ["general", "support"]
 ```
 
-**`/etc/sshkey-chat/rooms.toml`**
+**`/etc/sshkey-chat/rooms.toml`** -- Seed file, processed on first server start only. After that, use `sshkey-ctl` to manage users and rooms.
 
 ```toml
 [general]

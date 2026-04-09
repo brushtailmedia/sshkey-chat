@@ -57,32 +57,3 @@ func (s *Store) GetEpochKeysForUser(room, user string, minEpoch, maxEpoch int64)
 	return keys, rows.Err()
 }
 
-// GetAllEpochKeysForUser returns all wrapped epoch keys for a user across all rooms.
-// Used for SSH key rotation.
-func (s *Store) GetAllEpochKeysForUser(user string) ([]EpochKeyRecord, error) {
-	rows, err := s.dataDB.Query(`
-		SELECT room, epoch, wrapped_key FROM epoch_keys WHERE user = ? ORDER BY room, epoch`,
-		user,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var keys []EpochKeyRecord
-	for rows.Next() {
-		var k EpochKeyRecord
-		if err := rows.Scan(&k.Room, &k.Epoch, &k.WrappedKey); err != nil {
-			return nil, err
-		}
-		keys = append(keys, k)
-	}
-	return keys, rows.Err()
-}
-
-// EpochKeyRecord holds a room/epoch/wrapped_key tuple.
-type EpochKeyRecord struct {
-	Room       string
-	Epoch      int64
-	WrappedKey string
-}

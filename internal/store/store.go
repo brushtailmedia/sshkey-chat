@@ -1,9 +1,15 @@
 // Package store implements SQLite-based storage for the sshkey-chat server.
 //
-// Storage layout (from the design doc):
-//   - One DB per room (room-{name}.db) — encrypted message blobs
-//   - One DB per DM conversation (conv-{id}.db) — encrypted message blobs
+// Storage layout:
+//   - One DB per room (room-{nanoid}.db) — encrypted message blobs
+//   - One DB per group DM (group-{id}.db) — encrypted message blobs
+//   - One DB per 1:1 DM (dm-{id}.db) — encrypted message blobs
 //   - One data.db — metadata, device tracking, profiles, wrapped epoch keys
+//
+// "Group DM" refers to multi-party group conversations (3+ members, variable
+// membership via group_members). "DM" or "1:1 DM" refers to a fixed
+// two-party conversation via the direct_messages table with per-user
+// history cutoffs.
 package store
 
 import (
@@ -21,10 +27,12 @@ type Store struct {
 	dir      string
 	dataDB   *sql.DB
 	roomsDB  *sql.DB // rooms.db — room identity + membership
+	usersDB  *sql.DB // users.db — user identity + auth
 
-	mu      sync.RWMutex
-	roomDBs map[string]*sql.DB // room name -> message DB
-	convDBs map[string]*sql.DB // conversation ID -> message DB
+	mu       sync.RWMutex
+	roomDBs  map[string]*sql.DB // room nanoid -> message DB
+	groupDBs map[string]*sql.DB // group DM ID -> message DB
+	dmDBs    map[string]*sql.DB // 1:1 DM ID -> message DB
 }
 
 // Open creates or opens all databases in the given data directory.
@@ -34,9 +42,10 @@ func Open(dir string) (*Store, error) {
 	}
 
 	s := &Store{
-		dir:     filepath.Join(dir, "data"),
-		roomDBs: make(map[string]*sql.DB),
-		convDBs: make(map[string]*sql.DB),
+		dir:      filepath.Join(dir, "data"),
+		roomDBs:  make(map[string]*sql.DB),
+		groupDBs: make(map[string]*sql.DB),
+		dmDBs:    make(map[string]*sql.DB),
 	}
 
 	dataDB, err := s.openDB("data.db")
@@ -57,6 +66,16 @@ func Open(dir string) (*Store, error) {
 
 	if err := s.initRoomsDB(); err != nil {
 		return nil, fmt.Errorf("init rooms.db: %w", err)
+	}
+
+	usersDB, err := s.openDB("users.db")
+	if err != nil {
+		return nil, fmt.Errorf("open users.db: %w", err)
+	}
+	s.usersDB = usersDB
+
+	if err := s.initUsersDB(); err != nil {
+		return nil, fmt.Errorf("init users.db: %w", err)
 	}
 
 	return s, nil
@@ -80,7 +99,13 @@ func (s *Store) Close() error {
 			firstErr = err
 		}
 	}
-	for _, db := range s.convDBs {
+	for _, db := range s.groupDBs {
+		checkpoint(db)
+		if err := db.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	for _, db := range s.dmDBs {
 		checkpoint(db)
 		if err := db.Close(); err != nil && firstErr == nil {
 			firstErr = err
@@ -93,6 +118,12 @@ func (s *Store) Close() error {
 	if s.roomsDB != nil {
 		checkpoint(s.roomsDB)
 		if err := s.roomsDB.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if s.usersDB != nil {
+		checkpoint(s.usersDB)
+		if err := s.usersDB.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -109,7 +140,8 @@ func (s *Store) StoreFileHash(fileID, contentHash string, size int64) error {
 }
 
 // GetFileHash retrieves the content hash for a file_id. Returns ("", nil)
-// if no hash is stored (backwards-compat with files uploaded before hashing).
+// if no hash row exists — used by cleanOrphanFiles to detect file blobs
+// left on disk by crashed mid-upload writes (no hash row = orphan).
 func (s *Store) GetFileHash(fileID string) (string, error) {
 	var hash string
 	err := s.dataDB.QueryRow(
@@ -180,10 +212,10 @@ func (s *Store) RoomDB(room string) (*sql.DB, error) {
 	return db, nil
 }
 
-// ConvDB returns (or creates) the database for a DM conversation.
-func (s *Store) ConvDB(convID string) (*sql.DB, error) {
+// GroupDB returns (or creates) the database for a group DM.
+func (s *Store) GroupDB(groupID string) (*sql.DB, error) {
 	s.mu.RLock()
-	db, ok := s.convDBs[convID]
+	db, ok := s.groupDBs[groupID]
 	s.mu.RUnlock()
 	if ok {
 		return db, nil
@@ -192,11 +224,11 @@ func (s *Store) ConvDB(convID string) (*sql.DB, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if db, ok := s.convDBs[convID]; ok {
+	if db, ok := s.groupDBs[groupID]; ok {
 		return db, nil
 	}
 
-	db, err := s.openDB(fmt.Sprintf("conv-%s.db", convID))
+	db, err := s.openDB(fmt.Sprintf("group-%s.db", groupID))
 	if err != nil {
 		return nil, err
 	}
@@ -204,13 +236,49 @@ func (s *Store) ConvDB(convID string) (*sql.DB, error) {
 		db.Close()
 		return nil, err
 	}
-	s.convDBs[convID] = db
+	s.groupDBs[groupID] = db
+	return db, nil
+}
+
+// DMDB returns (or creates) the database for a 1:1 DM.
+func (s *Store) DMDB(dmID string) (*sql.DB, error) {
+	s.mu.RLock()
+	db, ok := s.dmDBs[dmID]
+	s.mu.RUnlock()
+	if ok {
+		return db, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if db, ok := s.dmDBs[dmID]; ok {
+		return db, nil
+	}
+
+	db, err := s.openDB(fmt.Sprintf("dm-%s.db", dmID))
+	if err != nil {
+		return nil, err
+	}
+	if err := s.initMessageDB(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	s.dmDBs[dmID] = db
 	return db, nil
 }
 
 // DataDB returns the data database for direct queries.
 func (s *Store) DataDB() *sql.DB {
 	return s.dataDB
+}
+
+// DataDir returns the absolute path to the directory holding all
+// per-conversation database files (room-*.db, group-*.db, dm-*.db).
+// Used by tests that need to verify on-disk side effects of cleanup
+// operations.
+func (s *Store) DataDir() string {
+	return s.dir
 }
 
 // initDataDB creates the data.db schema.
@@ -232,19 +300,77 @@ func (s *Store) initDataDB() error {
 			PRIMARY KEY (room, epoch, user)
 		);
 
-		CREATE TABLE IF NOT EXISTS conversations (
+		CREATE TABLE IF NOT EXISTS group_conversations (
 			id          TEXT PRIMARY KEY,
 			name        TEXT NOT NULL DEFAULT '',
 			created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 		);
 
-		CREATE TABLE IF NOT EXISTS conversation_members (
-			conversation_id TEXT NOT NULL,
-			user            TEXT NOT NULL,
-			joined_at       TEXT NOT NULL DEFAULT (datetime('now')),
-			PRIMARY KEY (conversation_id, user),
-			FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+		CREATE TABLE IF NOT EXISTS group_members (
+			group_id    TEXT NOT NULL,
+			user        TEXT NOT NULL,
+			joined_at   TEXT NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY (group_id, user),
+			FOREIGN KEY (group_id) REFERENCES group_conversations(id)
 		);
+
+		-- deleted_groups records each user's intent to remove a group DM
+		-- from their view, independent of the group's actual lifetime. The
+		-- row exists from the moment the user runs /delete and persists
+		-- until either (a) the user is retired, or (b) the row is older
+		-- than groupDeletionRetentionSeconds and the opportunistic prune
+		-- in DeleteGroupConversation reclaims it. Used by sync to catch
+		-- up offline devices that missed the live group_deleted echo.
+		CREATE TABLE IF NOT EXISTS deleted_groups (
+			user_id    TEXT NOT NULL,
+			group_id   TEXT NOT NULL,
+			deleted_at INTEGER NOT NULL,
+			PRIMARY KEY (user_id, group_id)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_deleted_groups_user ON deleted_groups(user_id);
+		CREATE INDEX IF NOT EXISTS idx_deleted_groups_age ON deleted_groups(deleted_at);
+
+		-- pending_admin_kicks is the queue the CLI writes to when an
+		-- admin runs sshkey-ctl remove-from-group. The running server
+		-- polls this table on a periodic ticker and, for each row,
+		-- broadcasts the corresponding group_event{leave, reason} to
+		-- remaining members and echoes group_left{reason} to all of
+		-- the kicked user's connected sessions. This is the bridge
+		-- between the CLI's direct DB mutation and the server's live
+		-- broadcast surface — the only IPC mechanism between sshkey-ctl
+		-- and the running sshkey-server process.
+		--
+		-- The CLI also performs the RemoveGroupMember mutation directly,
+		-- so the kick takes effect at the data layer even if the server
+		-- is down. The server's processing of this queue is purely about
+		-- delivering the live notifications. Rows are deleted after the
+		-- server has fired the broadcasts.
+		CREATE TABLE IF NOT EXISTS pending_admin_kicks (
+			id        INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id   TEXT NOT NULL,
+			group_id  TEXT NOT NULL,
+			reason    TEXT NOT NULL DEFAULT 'admin',
+			queued_at INTEGER NOT NULL
+		);
+
+		-- 1:1 DMs — fixed two-party conversations with per-user history
+		-- cutoffs. The user pair is canonicalized alphabetically so dedup
+		-- is schema-enforced via UNIQUE(user_a, user_b). The *_left_at
+		-- columns are one-way ratchets: 0 = active, >0 = user has left
+		-- (server filters messages on read, not on write).
+		CREATE TABLE IF NOT EXISTS direct_messages (
+			id              TEXT PRIMARY KEY,
+			user_a          TEXT NOT NULL,
+			user_b          TEXT NOT NULL,
+			created_at      INTEGER NOT NULL,
+			user_a_left_at  INTEGER NOT NULL DEFAULT 0,
+			user_b_left_at  INTEGER NOT NULL DEFAULT 0,
+			UNIQUE(user_a, user_b)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_dm_user_a ON direct_messages(user_a);
+		CREATE INDEX IF NOT EXISTS idx_dm_user_b ON direct_messages(user_b);
 
 		CREATE TABLE IF NOT EXISTS profiles (
 			user         TEXT PRIMARY KEY,
@@ -253,22 +379,18 @@ func (s *Store) initDataDB() error {
 			status_text  TEXT
 		);
 
-		CREATE TABLE IF NOT EXISTS user_rooms (
-			user        TEXT NOT NULL,
-			room        TEXT NOT NULL,
-			first_seen  INTEGER NOT NULL,
-			first_epoch INTEGER NOT NULL DEFAULT 0,
-			PRIMARY KEY (user, room)
-		);
+		-- user_rooms removed — first_seen/first_epoch now read from
+		-- room_members in rooms.db (single source of truth).
 
 		CREATE TABLE IF NOT EXISTS read_positions (
-			user            TEXT NOT NULL,
-			device_id       TEXT NOT NULL,
-			room            TEXT NOT NULL DEFAULT '',
-			conversation_id TEXT NOT NULL DEFAULT '',
-			last_read       TEXT NOT NULL,
-			ts              INTEGER NOT NULL,
-			PRIMARY KEY (user, device_id, room, conversation_id)
+			user      TEXT NOT NULL,
+			device_id TEXT NOT NULL,
+			room      TEXT NOT NULL DEFAULT '',
+			group_id  TEXT NOT NULL DEFAULT '',
+			dm_id     TEXT NOT NULL DEFAULT '',
+			last_read TEXT NOT NULL,
+			ts        INTEGER NOT NULL,
+			PRIMARY KEY (user, device_id, room, group_id, dm_id)
 		);
 
 		CREATE TABLE IF NOT EXISTS revoked_devices (
@@ -305,13 +427,13 @@ func (s *Store) initDataDB() error {
 			size         INTEGER NOT NULL
 		);
 
-		-- Indexes for per-connect query paths (sync, epoch keys, conversations)
+		-- Indexes for per-connect query paths (sync, epoch keys, group DMs)
 		CREATE INDEX IF NOT EXISTS idx_epoch_keys_room_user_epoch
 			ON epoch_keys(room, user, epoch);
 		CREATE INDEX IF NOT EXISTS idx_epoch_keys_user
 			ON epoch_keys(user, room, epoch);
-		CREATE INDEX IF NOT EXISTS idx_conversation_members_user
-			ON conversation_members(user, conversation_id);
+		CREATE INDEX IF NOT EXISTS idx_group_members_user
+			ON group_members(user, group_id);
 		CREATE INDEX IF NOT EXISTS idx_devices_last_synced
 			ON devices(last_synced) WHERE last_synced IS NOT NULL AND last_synced != '';
 		CREATE INDEX IF NOT EXISTS idx_push_tokens_user_active

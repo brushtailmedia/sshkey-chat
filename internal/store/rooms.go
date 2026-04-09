@@ -127,6 +127,78 @@ func (s *Store) SeedRoomMembers(users map[string]config.User) (int, error) {
 	return count, nil
 }
 
+// AddRoomMember adds a user to a room. Idempotent (INSERT OR IGNORE).
+func (s *Store) AddRoomMember(roomID, userID string, firstEpoch int64) error {
+	_, err := s.roomsDB.Exec(
+		`INSERT OR IGNORE INTO room_members (room_id, user_id, first_epoch) VALUES (?, ?, ?)`,
+		roomID, userID, firstEpoch)
+	return err
+}
+
+// RemoveRoomMember removes a user from a room.
+func (s *Store) RemoveRoomMember(roomID, userID string) error {
+	_, err := s.roomsDB.Exec(
+		`DELETE FROM room_members WHERE room_id = ? AND user_id = ?`,
+		roomID, userID)
+	return err
+}
+
+// RemoveAllRoomMembers removes a user from all rooms (used on retirement).
+func (s *Store) RemoveAllRoomMembers(userID string) {
+	s.roomsDB.Exec(`DELETE FROM room_members WHERE user_id = ?`, userID)
+}
+
+// GetUserRoomIDs returns the nanoid IDs of all rooms a user is in.
+func (s *Store) GetUserRoomIDs(userID string) []string {
+	rows, err := s.roomsDB.Query(`
+		SELECT rm.room_id FROM room_members rm
+		JOIN rooms r ON rm.room_id = r.id
+		WHERE rm.user_id = ? AND r.retired = 0
+		ORDER BY r.created_at`,
+		userID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// GetRoomMemberIDsByRoomID returns all user IDs in a room, looked up by room nanoid.
+func (s *Store) GetRoomMemberIDsByRoomID(roomID string) []string {
+	rows, err := s.roomsDB.Query(
+		`SELECT user_id FROM room_members WHERE room_id = ?`, roomID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var members []string
+	for rows.Next() {
+		var uid string
+		if rows.Scan(&uid) == nil {
+			members = append(members, uid)
+		}
+	}
+	return members
+}
+
+// IsRoomMemberByID returns true if a user is a member of the room (by room nanoid).
+func (s *Store) IsRoomMemberByID(roomID, userID string) bool {
+	var count int
+	s.roomsDB.QueryRow(
+		`SELECT COUNT(*) FROM room_members WHERE room_id = ? AND user_id = ?`,
+		roomID, userID).Scan(&count)
+	return count > 0
+}
+
 // GetRoomByID returns a room by its nanoid. Returns nil if not found.
 func (s *Store) GetRoomByID(id string) (*RoomRecord, error) {
 	var r RoomRecord
@@ -166,15 +238,7 @@ func (s *Store) RoomDisplayNameToID(name string) string {
 	return id
 }
 
-// IsRoomRetired returns true if the room exists and is retired.
-func (s *Store) IsRoomRetired(id string) bool {
-	var retired int
-	err := s.roomsDB.QueryRow(`SELECT retired FROM rooms WHERE id = ?`, id).Scan(&retired)
-	if err != nil {
-		return false
-	}
-	return retired != 0
-}
+
 
 // GetAllRooms returns all rooms from rooms.db.
 func (s *Store) GetAllRooms() ([]RoomRecord, error) {

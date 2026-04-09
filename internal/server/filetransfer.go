@@ -37,7 +37,8 @@ type pendingUpload struct {
 	contentHash string // "blake2b-256:<hex>" from upload_start (empty if client didn't send)
 	user        string
 	room        string
-	convID      string
+	groupID     string
+	dmID        string
 }
 
 func newFileManager(dataDir string) *fileManager {
@@ -139,7 +140,8 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 		contentHash: msg.ContentHash,
 		user:        c.UserID,
 		room:        msg.Room,
-		convID:      msg.Conversation,
+		groupID:     msg.Group,
+		dmID:        msg.DM,
 	}
 	s.files.mu.Unlock()
 
@@ -222,7 +224,7 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 }
 
 // handleBinaryChannel processes incoming upload frames on SSH Channel 3.
-func (s *Server) handleBinaryChannel(username string, ch ssh.Channel) {
+func (s *Server) handleBinaryChannel(userID string, ch ssh.Channel) {
 	defer ch.Close()
 
 	for {
@@ -295,7 +297,7 @@ func (s *Server) handleBinaryChannel(username string, ch ssh.Channel) {
 			os.Remove(filePath)
 			s.mu.RLock()
 			for _, client := range s.clients {
-				if client.UserID == username {
+				if client.UserID == userID {
 					client.Encoder.Encode(protocol.UploadError{
 						Type:     "upload_error",
 						UploadID: uploadID,
@@ -323,7 +325,7 @@ func (s *Server) handleBinaryChannel(username string, ch ssh.Channel) {
 		s.files.mu.Unlock()
 
 		s.logger.Info("file uploaded",
-			"user", username,
+			"user", userID,
 			"upload_id", uploadID,
 			"file_id", pending.fileID,
 			"size", size,
@@ -332,7 +334,7 @@ func (s *Server) handleBinaryChannel(username string, ch ssh.Channel) {
 		// Send upload_complete on Channel 1 — find the client
 		s.mu.RLock()
 		for _, client := range s.clients {
-			if client.UserID == username {
+			if client.UserID == userID {
 				client.Encoder.Encode(protocol.UploadComplete{
 					Type:     "upload_complete",
 					UploadID: uploadID,

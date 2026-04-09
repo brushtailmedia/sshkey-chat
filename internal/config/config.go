@@ -57,9 +57,23 @@ type ServerConfig struct {
 }
 
 type ServerSection struct {
-	Port   int      `toml:"port"`
-	Bind   string   `toml:"bind"`
-	Admins []string `toml:"admins"`
+	Port int    `toml:"port"`
+	Bind string `toml:"bind"`
+
+	// AllowSelfLeaveRooms controls whether users can voluntarily leave
+	// active rooms via /leave. Default false preserves the admin-managed
+	// membership model — when disabled, room membership is changed only
+	// via sshkey-ctl add-to-room / remove-from-room. When enabled, users
+	// can self-leave and the server broadcasts a room_event leave to
+	// remaining members. Hot-reloadable.
+	AllowSelfLeaveRooms bool `toml:"allow_self_leave_rooms"`
+
+	// AllowSelfLeaveRetiredRooms controls whether users can clean up
+	// retired rooms from their sidebar via /leave or /delete. Default true
+	// because retired rooms are dead — there's no membership decision to
+	// preserve, just sidebar housekeeping. Inert until Phase 12 introduces
+	// room retirement. Hot-reloadable.
+	AllowSelfLeaveRetiredRooms bool `toml:"allow_self_leave_retired_rooms"`
 }
 
 type MessagesSection struct {
@@ -160,8 +174,10 @@ type Room struct {
 func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
 		Server: ServerSection{
-			Port: 2222,
-			Bind: "0.0.0.0",
+			Port:                       2222,
+			Bind:                       "0.0.0.0",
+			AllowSelfLeaveRooms:        false, // explicit: admin-managed by default
+			AllowSelfLeaveRetiredRooms: true,  // explicit: retired-room cleanup allowed
 		},
 		Messages: MessagesSection{
 			MaxBodySize: "16KB",
@@ -227,37 +243,6 @@ func LoadUsers(path string) (map[string]User, error) {
 	return raw, nil
 }
 
-// WriteUsers writes the users map back to users.toml atomically (write to
-// temp file, then rename). Used by the retirement flow when the server needs
-// to persist a retirement flag set via the protocol.
-//
-// Because the config directory is watched via fsnotify, this write will
-// trigger a reload. The reload is idempotent: the in-memory state is updated
-// first, so the reload loads the same state it finds in memory and computes
-// an empty diff.
-func WriteUsers(path string, users map[string]User) error {
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	enc := toml.NewEncoder(f)
-	if err := enc.Encode(users); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return fmt.Errorf("encode users.toml: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("close temp file: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("rename temp file: %w", err)
-	}
-	return nil
-}
-
 // LoadRooms reads and parses rooms.toml. Returns a map of room name -> Room.
 func LoadRooms(path string) (map[string]Room, error) {
 	var raw map[string]Room
@@ -311,16 +296,7 @@ func Load(dir string) (*Config, error) {
 		}
 	}
 
-	// Validate: all admin users exist and are not retired
-	for _, admin := range server.Server.Admins {
-		u, ok := users[admin]
-		if !ok {
-			return nil, fmt.Errorf("admin %q not found in users.toml", admin)
-		}
-		if u.Retired {
-			return nil, fmt.Errorf("admin %q is retired — remove from server.toml admins or un-retire", admin)
-		}
-	}
+
 
 	// Validate: all user keys are Ed25519 and parseable
 	// (retired users are still required to have a valid key — it's preserved

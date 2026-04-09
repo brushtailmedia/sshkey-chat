@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -37,7 +36,7 @@ var allCapabilities = []string{
 // handleSession runs the protocol session on an accepted SSH channel.
 // dlChanCh delivers the download channel (Channel 2) once the client opens
 // it; may remain empty if the client never opens it.
-func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Channel, dlChanCh <-chan ssh.Channel) {
+func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Channel, dlChanCh <-chan ssh.Channel) {
 	defer ch.Close()
 
 	enc := protocol.NewEncoder(ch)
@@ -52,7 +51,7 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 		Capabilities: allCapabilities,
 	})
 	if err != nil {
-		s.logger.Error("failed to send server_hello", "user", username, "error", err)
+		s.logger.Error("failed to send server_hello", "user", userID, "error", err)
 		return
 	}
 
@@ -100,7 +99,7 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 	// Validate client_hello
 	if clientHello.Protocol != "sshkey-chat" || clientHello.Version != 1 {
 		s.logger.Warn("invalid client_hello",
-			"user", username,
+			"user", userID,
 			"protocol", clientHello.Protocol,
 			"version", clientHello.Version,
 		)
@@ -111,27 +110,22 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 	// Negotiate capabilities
 	active := negotiateCapabilities(clientHello.Capabilities)
 
-	// Build room and conversation lists for this user
-	s.cfg.RLock()
-	user := s.cfg.Users[username]
-	rooms := user.Rooms
-	isAdmin := false
-	for _, a := range s.cfg.Server.Server.Admins {
-		if a == username {
-			isAdmin = true
-			break
-		}
-	}
-	s.cfg.RUnlock()
-
-	// Conversation IDs for the welcome envelope. Rich info (members, names)
-	// arrives separately via the conversation_list message sent just after
-	// welcome in the connect sequence.
-	var conversations []string
+	// Build room and group DM lists for this user (nanoid IDs)
+	var rooms []string
 	if s.store != nil {
-		if convs, err := s.store.GetUserConversations(username); err == nil {
-			for _, c := range convs {
-				conversations = append(conversations, c.ID)
+		rooms = s.store.GetUserRoomIDs(userID)
+	}
+	displayName := s.store.GetUserDisplayName(userID)
+	isAdmin := s.store.IsAdmin(userID)
+
+	// Group DM IDs for the welcome envelope. Rich info (members, names)
+	// arrives separately via the group_list message sent just after
+	// welcome in the connect sequence.
+	var groups []string
+	if s.store != nil {
+		if gs, err := s.store.GetUserGroups(userID); err == nil {
+			for _, g := range gs {
+				groups = append(groups, g.ID)
 			}
 		}
 	}
@@ -140,28 +134,28 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 	pendingSync := clientHello.LastSyncedAt != "" // sync follows if client has a last_synced_at
 	err = enc.Encode(protocol.Welcome{
 		Type:               "welcome",
-		User:               username,
-		DisplayName:        user.DisplayName,
+		User:               userID,
+		DisplayName:        displayName,
 		Admin:              isAdmin,
 		Rooms:              rooms,
-		Conversations:      conversations,
+		Groups:             groups,
 		PendingSync:        pendingSync,
 		ActiveCapabilities: active,
 	})
 	if err != nil {
-		s.logger.Error("failed to send welcome", "user", username, "error", err)
+		s.logger.Error("failed to send welcome", "user", userID, "error", err)
 		return
 	}
 
 	s.logger.Info("handshake complete",
-		"user", username,
+		"user", userID,
 		"device", clientHello.DeviceID,
 		"capabilities", active,
 	)
 
 	// Check device revocation and register
 	if s.store != nil {
-		revoked, err := s.store.IsDeviceRevoked(username, clientHello.DeviceID)
+		revoked, err := s.store.IsDeviceRevoked(userID, clientHello.DeviceID)
 		if err == nil && revoked {
 			enc.Encode(protocol.DeviceRevoked{
 				Type:     "device_revoked",
@@ -171,9 +165,9 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 			return
 		}
 
-		deviceCount, err := s.store.UpsertDevice(username, clientHello.DeviceID)
+		deviceCount, err := s.store.UpsertDevice(userID, clientHello.DeviceID)
 		if err != nil {
-			s.logger.Error("device registration failed", "user", username, "error", err)
+			s.logger.Error("device registration failed", "user", userID, "error", err)
 		} else if deviceCount > s.cfg.Server.Devices.MaxPerUser {
 			enc.Encode(protocol.Error{
 				Type:    "error",
@@ -186,7 +180,7 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 
 	// Register client
 	client := &Client{
-		UserID:       username,
+		UserID:       userID,
 		DeviceID:     clientHello.DeviceID,
 		Encoder:      enc,
 		Decoder:      dec,
@@ -210,7 +204,7 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 		client.DownloadChannel = dlCh
 		s.mu.Unlock()
 	case <-time.After(500 * time.Millisecond):
-		s.logger.Debug("no download channel", "user", username, "device", clientHello.DeviceID)
+		s.logger.Debug("no download channel", "user", userID, "device", clientHello.DeviceID)
 	}
 
 	defer func() {
@@ -234,8 +228,17 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 	// Send room list
 	s.sendRoomList(client)
 
-	// Send conversation list (DMs)
-	s.sendConversationList(client)
+	// Send the list of groups this user has previously /delete'd. Sent
+	// BEFORE group_list so the client can apply the catchup purges
+	// before its sidebar is populated. Catches up offline devices that
+	// missed the live group_deleted echo.
+	s.sendDeletedGroups(client)
+
+	// Send group DM list
+	s.sendGroupList(client)
+
+	// Send 1:1 DM list
+	s.sendDMList(client)
 
 	// Send profiles for visible users
 	s.sendProfiles(client)
@@ -256,18 +259,19 @@ func (s *Server) handleSession(username string, conn *ssh.ServerConn, ch ssh.Cha
 	s.sendSync(client, clientHello.LastSyncedAt)
 
 	// Broadcast online presence
-	s.broadcastPresence(username, "online")
-	defer s.broadcastPresence(username, "offline")
+	s.broadcastPresence(userID, "online")
+	defer s.broadcastPresence(userID, "offline")
 
 	// Trigger initial epoch rotation for fresh rooms (after message loop can handle responses)
 	go func() {
-		s.cfg.RLock()
-		rooms := s.cfg.Users[username].Rooms
-		s.cfg.RUnlock()
+		var rooms []string
+		if s.store != nil {
+			rooms = s.store.GetUserRoomIDs(userID)
+		}
 
-		for _, room := range rooms {
-			if s.epochs.currentEpochNum(room) == 0 {
-				s.triggerEpochRotation(client, room, "initial")
+		for _, roomID := range rooms {
+			if s.epochs.currentEpochNum(roomID) == 0 {
+				s.triggerEpochRotation(client, roomID, "initial")
 			}
 		}
 	}()
@@ -299,37 +303,25 @@ func negotiateCapabilities(requested []string) []string {
 
 // sendRoomList sends the room_list message to the client.
 func (s *Server) sendRoomList(c *Client) {
-	s.cfg.RLock()
-	defer s.cfg.RUnlock()
+	if s.store == nil {
+		return
+	}
 
 	var rooms []protocol.RoomInfo
-	for _, roomName := range s.cfg.Users[c.UserID].Rooms {
-		// Get topic — try rooms.db first, fall back to config during migration
+	for _, roomID := range s.store.GetUserRoomIDs(c.UserID) {
+		room, _ := s.store.GetRoomByID(roomID)
+		displayName := ""
 		topic := ""
-		if s.store != nil {
-			if room, _ := s.store.GetRoomByDisplayName(roomName); room != nil {
-				topic = room.Topic
-			}
+		if room != nil {
+			displayName = room.DisplayName
+			topic = room.Topic
 		}
-		if topic == "" {
-			if cfgRoom, ok := s.cfg.Rooms[roomName]; ok {
-				topic = cfgRoom.Topic
-			}
-		}
-		// Count members in this room (moves to rooms.db in Phase 4b)
-		memberCount := 0
-		for _, u := range s.cfg.Users {
-			for _, r := range u.Rooms {
-				if r == roomName {
-					memberCount++
-					break
-				}
-			}
-		}
+		members := s.store.GetRoomMemberIDsByRoomID(roomID)
 		rooms = append(rooms, protocol.RoomInfo{
-			Name:    roomName,
+			ID:      roomID,
+			Name:    displayName,
 			Topic:   topic,
-			Members: memberCount,
+			Members: len(members),
 		})
 	}
 
@@ -339,82 +331,135 @@ func (s *Server) sendRoomList(c *Client) {
 	})
 }
 
-// sendConversationList sends the conversation_list message to the client.
-func (s *Server) sendConversationList(c *Client) {
+// sendGroupList sends the group_list message to the client.
+func (s *Server) sendGroupList(c *Client) {
 	if s.store == nil {
 		return
 	}
 
-	convs, err := s.store.GetUserConversations(c.UserID)
+	groups, err := s.store.GetUserGroups(c.UserID)
 	if err != nil {
-		s.logger.Error("failed to get conversations", "user", c.UserID, "error", err)
+		s.logger.Error("failed to get groups", "user", c.UserID, "error", err)
 		return
 	}
 
-	if len(convs) == 0 {
+	if len(groups) == 0 {
 		return
 	}
 
-	var convInfos []protocol.ConversationInfo
-	for _, conv := range convs {
-		convInfos = append(convInfos, protocol.ConversationInfo{
-			ID:      conv.ID,
-			Members: conv.Members,
-			Name:    conv.Name,
+	var infos []protocol.GroupInfo
+	for _, g := range groups {
+		infos = append(infos, protocol.GroupInfo{
+			ID:      g.ID,
+			Members: g.Members,
+			Name:    g.Name,
 		})
 	}
 
-	c.Encoder.Encode(protocol.ConversationList{
-		Type:          "conversation_list",
-		Conversations: convInfos,
+	c.Encoder.Encode(protocol.GroupList{
+		Type:   "group_list",
+		Groups: infos,
+	})
+}
+
+// sendDMList sends the dm_list message to the client on connect.
+func (s *Server) sendDMList(c *Client) {
+	if s.store == nil {
+		return
+	}
+
+	dms, err := s.store.GetDirectMessagesForUser(c.UserID)
+	if err != nil {
+		s.logger.Error("failed to get DMs", "user", c.UserID, "error", err)
+		return
+	}
+
+	if len(dms) == 0 {
+		return
+	}
+
+	var infos []protocol.DMInfo
+	for _, dm := range dms {
+		infos = append(infos, protocol.DMInfo{
+			ID:              dm.ID,
+			Members:         []string{dm.UserA, dm.UserB},
+			LeftAtForCaller: dm.CutoffFor(c.UserID),
+		})
+	}
+
+	c.Encoder.Encode(protocol.DMList{
+		Type: "dm_list",
+		DMs:  infos,
+	})
+}
+
+// sendDeletedGroups emits a deleted_groups message during the connect
+// handshake listing every group ID this user has previously /delete'd.
+// Sent BEFORE sendGroupList so the client purges before populating its
+// sidebar — devices that were offline when the group_deleted live echo
+// went out catch up via this message.
+//
+// No-op if the user has no deletion records.
+func (s *Server) sendDeletedGroups(c *Client) {
+	if s.store == nil {
+		return
+	}
+	groups, err := s.store.GetDeletedGroupsForUser(c.UserID)
+	if err != nil {
+		s.logger.Error("failed to get deleted groups",
+			"user", c.UserID, "error", err)
+		return
+	}
+	if len(groups) == 0 {
+		return
+	}
+	c.Encoder.Encode(protocol.DeletedGroupsList{
+		Type:   "deleted_groups",
+		Groups: groups,
 	})
 }
 
 // sendProfiles sends profile messages for all users visible to this client
-// (shared rooms + shared DM conversations).
+// (shared rooms, group DMs, and 1:1 DMs).
 func (s *Server) sendProfiles(c *Client) {
-	// Collect all visible usernames
+	// Collect all visible usernames (users who share a room with this client)
 	visible := make(map[string]bool)
 
-	s.cfg.RLock()
-	clientRooms := make(map[string]bool)
-	for _, r := range s.cfg.Users[c.UserID].Rooms {
-		clientRooms[r] = true
-	}
-	for username, user := range s.cfg.Users {
-		for _, r := range user.Rooms {
-			if clientRooms[r] {
-				visible[username] = true
-				break
+	if s.store != nil {
+		for _, roomID := range s.store.GetUserRoomIDs(c.UserID) {
+			for _, uid := range s.store.GetRoomMemberIDsByRoomID(roomID) {
+				visible[uid] = true
 			}
 		}
 	}
-	s.cfg.RUnlock()
 
-	// Also include DM conversation members
+	// Also include group DM members
 	if s.store != nil {
-		convs, err := s.store.GetUserConversations(c.UserID)
+		groups, err := s.store.GetUserGroups(c.UserID)
 		if err == nil {
-			for _, conv := range convs {
-				for _, m := range conv.Members {
+			for _, g := range groups {
+				for _, m := range g.Members {
 					visible[m] = true
 				}
 			}
 		}
 	}
 
-	// Send profiles
-	s.cfg.RLock()
-	defer s.cfg.RUnlock()
-
-	adminSet := make(map[string]bool, len(s.cfg.Server.Server.Admins))
-	for _, a := range s.cfg.Server.Server.Admins {
-		adminSet[a] = true
+	// Also include 1:1 DM partners
+	if s.store != nil {
+		dms, err := s.store.GetDirectMessagesForUser(c.UserID)
+		if err == nil {
+			for _, dm := range dms {
+				visible[dm.UserA] = true
+				visible[dm.UserB] = true
+			}
+		}
 	}
 
-	for username := range visible {
-		user, ok := s.cfg.Users[username]
-		if !ok {
+	// Send profiles
+	for userID := range visible {
+		user := s.store.GetUserByID(userID)
+		if user == nil {
 			continue
 		}
 		parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(user.Key))
@@ -425,13 +470,13 @@ func (s *Server) sendProfiles(c *Client) {
 		displayName := user.DisplayName
 		avatarID := ""
 		// Merge stored profile data (avatar, display_name overrides from
-		// set_profile) with config-based defaults. DB values take precedence
+		// set_profile) with users.db defaults. DB avatar takes precedence
 		// for fields users can customize at runtime.
 		if s.store != nil {
 			var dbDisplayName, dbAvatarID sql.NullString
 			s.store.DataDB().QueryRow(
 				`SELECT display_name, avatar_id FROM profiles WHERE user = ?`,
-				username).Scan(&dbDisplayName, &dbAvatarID)
+				userID).Scan(&dbDisplayName, &dbAvatarID)
 			if dbDisplayName.Valid && dbDisplayName.String != "" {
 				displayName = dbDisplayName.String
 			}
@@ -442,12 +487,12 @@ func (s *Server) sendProfiles(c *Client) {
 
 		c.Encoder.Encode(protocol.Profile{
 			Type:           "profile",
-			User:           username,
+			User:           userID,
 			DisplayName:    displayName,
 			AvatarID:       avatarID,
 			PubKey:         user.Key,
 			KeyFingerprint: ssh.FingerprintSHA256(parsed),
-			Admin:          adminSet[username],
+			Admin:          s.store.IsAdmin(userID),
 			Retired:        user.Retired,
 			RetiredAt:      user.RetiredAt,
 		})
@@ -480,18 +525,28 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 	switch msgType {
 	case "send":
 		s.handleSend(c, raw)
-	case "send_dm":
-		s.handleSendDM(c, raw)
-	case "create_dm":
-		s.handleCreateDM(c, raw)
+	case "send_group":
+		s.handleSendGroup(c, raw)
+	case "create_group":
+		s.handleCreateGroup(c, raw)
 	case "epoch_rotate":
 		s.handleEpochRotate(c, raw)
 	case "delete":
 		s.handleDelete(c, raw)
-	case "leave_conversation":
-		s.handleLeaveConversation(c, raw)
-	case "rename_conversation":
-		s.handleRenameConversation(c, raw)
+	case "leave_group":
+		s.handleLeaveGroup(c, raw)
+	case "delete_group":
+		s.handleDeleteGroup(c, raw)
+	case "leave_room":
+		s.handleLeaveRoom(c, raw)
+	case "create_dm":
+		s.handleCreateDM(c, raw)
+	case "send_dm":
+		s.handleSendDM(c, raw)
+	case "leave_dm":
+		s.handleLeaveDM(c, raw)
+	case "rename_group":
+		s.handleRenameGroup(c, raw)
 	case "history":
 		s.handleHistory(c, raw)
 	case "react":
@@ -551,23 +606,19 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Verify user is in this room
-	s.cfg.RLock()
-	user := s.cfg.Users[c.UserID]
-	s.cfg.RUnlock()
-
-	inRoom := false
-	for _, r := range user.Rooms {
-		if r == msg.Room {
-			inRoom = true
-			break
-		}
-	}
+	// Verify user is in this room. Privacy: the response for "room
+	// does not exist", "DB lookup failed", and "you are not a member
+	// of an existing room" MUST be byte-identical so a probing client
+	// cannot use send to discover whether a given room ID exists.
+	// Matches the convention in handleSendGroup, handleSendDM, and
+	// handleLeaveRoom — uses ErrUnknownRoom with a generic message,
+	// no room ID embedded in the wire response.
+	inRoom := s.store != nil && s.store.IsRoomMemberByID(msg.Room, c.UserID)
 	if !inRoom {
 		c.Encoder.Encode(protocol.Error{
 			Type:    "error",
-			Code:    protocol.ErrNotAuthorized,
-			Message: "You don't have access to room: " + msg.Room,
+			Code:    protocol.ErrUnknownRoom,
+			Message: "You are not a member of this room",
 		})
 		return
 	}
@@ -637,47 +688,34 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 	go s.notifyOfflineUsers(s.getRoomMembers(msg.Room))
 }
 
-// handleSendDM processes a direct message.
-func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
+// handleSendGroup processes a group DM message.
+func (s *Server) handleSendGroup(c *Client, raw json.RawMessage) {
 	if len(raw) > maxPayloadBytes {
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrMessageTooLarge, Message: "Message exceeds 16KB limit"})
 		return
 	}
 
-	var msg protocol.SendDM
+	var msg protocol.SendGroup
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed send_dm"})
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed send_group"})
 		return
 	}
 
-	// Validate conversation exists and user is a member
+	// Validate group exists and user is a member
 	if s.store != nil {
-		isMember, err := s.store.IsConversationMember(msg.Conversation, c.UserID)
+		isMember, err := s.store.IsGroupMember(msg.Group, c.UserID)
 		if err != nil || !isMember {
 			c.Encoder.Encode(protocol.Error{
 				Type:    "error",
-				Code:    protocol.ErrUnknownConversation,
-				Message: "You are not a member of this conversation",
+				Code:    protocol.ErrUnknownGroup,
+				Message: "You are not a member of this group",
 			})
 			return
 		}
 
-		// Validate wrapped_keys match conversation member list
-		members, err := s.store.GetConversationMembers(msg.Conversation)
+		// Validate wrapped_keys match group member list
+		members, err := s.store.GetGroupMembers(msg.Group)
 		if err == nil {
-			// Reject if any member is retired (applies to 1:1 DMs where the
-			// retired user is preserved in conversation_members). Group DMs
-			// have retired members removed at retirement time, so this check
-			// is effectively a 1:1-only safeguard.
-			if retired := s.findRetiredMember(members); retired != "" {
-				c.Encoder.Encode(protocol.Error{
-					Type:    "error",
-					Code:    protocol.ErrUserRetired,
-					Message: fmt.Sprintf("Cannot send — %s's account has been retired", retired),
-				})
-				return
-			}
-
 			memberSet := make(map[string]bool, len(members))
 			for _, m := range members {
 				memberSet[m] = true
@@ -690,7 +728,7 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 				c.Encoder.Encode(protocol.Error{
 					Type:    "error",
 					Code:    protocol.ErrInvalidWrappedKeys,
-					Message: "wrapped_keys must match conversation member list",
+					Message: "wrapped_keys must match group member list",
 				})
 				return
 			}
@@ -699,7 +737,7 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 					c.Encoder.Encode(protocol.Error{
 						Type:    "error",
 						Code:    protocol.ErrInvalidWrappedKeys,
-						Message: "wrapped_keys must match conversation member list",
+						Message: "wrapped_keys must match group member list",
 					})
 					return
 				}
@@ -707,21 +745,21 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 		}
 	}
 
-	outMsg := protocol.DM{
-		Type:         "dm",
-		ID:           generateID("msg_"),
-		From:         c.UserID,
-		Conversation: msg.Conversation,
-		TS:           time.Now().Unix(),
-		WrappedKeys:  msg.WrappedKeys,
-		Payload:      msg.Payload,
-		FileIDs:      msg.FileIDs,
-		Signature:    msg.Signature,
+	outMsg := protocol.GroupMessage{
+		Type:        "group_message",
+		ID:          generateID("msg_"),
+		From:        c.UserID,
+		Group:       msg.Group,
+		TS:          time.Now().Unix(),
+		WrappedKeys: msg.WrappedKeys,
+		Payload:     msg.Payload,
+		FileIDs:     msg.FileIDs,
+		Signature:   msg.Signature,
 	}
 
-	// Store in conversation DB
+	// Store in group DM DB
 	if s.store != nil {
-		err := s.store.InsertConvMessage(msg.Conversation, store.StoredMessage{
+		err := s.store.InsertGroupMessage(msg.Group, store.StoredMessage{
 			ID:          outMsg.ID,
 			Sender:      outMsg.From,
 			TS:          outMsg.TS,
@@ -731,16 +769,16 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 			WrappedKeys: outMsg.WrappedKeys,
 		})
 		if err != nil {
-			s.logger.Error("failed to store DM", "conversation", msg.Conversation, "error", err)
+			s.logger.Error("failed to store group message", "group", msg.Group, "error", err)
 		}
 	}
 
-	// Broadcast to all connected clients in this conversation
-	s.broadcastToConversation(msg.Conversation, outMsg)
+	// Broadcast to all connected clients in this group
+	s.broadcastToGroup(msg.Group, outMsg)
 
-	// Notify offline conversation members via push
+	// Notify offline group members via push
 	if s.store != nil {
-		members, err := s.store.GetConversationMembers(msg.Conversation)
+		members, err := s.store.GetGroupMembers(msg.Group)
 		if err == nil {
 			go s.notifyOfflineUsers(members)
 		}
@@ -758,20 +796,38 @@ func (s *Server) handleTyping(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Track typing for server-side expiry
-	s.typing.Touch(c.UserID, msg.Room, msg.Conversation)
+	// Track typing for server-side expiry (DMs use the DM ID as context)
+	typingCtx := msg.Room + msg.Group + msg.DM
+	s.typing.Touch(c.UserID, msg.Room, typingCtx)
 
 	out := protocol.Typing{
-		Type:         "typing",
-		Room:         msg.Room,
-		Conversation: msg.Conversation,
-		User:         c.UserID,
+		Type:  "typing",
+		Room:  msg.Room,
+		Group: msg.Group,
+		DM:    msg.DM,
+		User:  c.UserID,
 	}
 
 	if msg.Room != "" {
 		s.broadcastToRoomExcept(msg.Room, c.DeviceID, out)
-	} else if msg.Conversation != "" {
-		s.broadcastToConversationExcept(msg.Conversation, c.DeviceID, out)
+	} else if msg.Group != "" {
+		s.broadcastToGroupExcept(msg.Group, c.DeviceID, out)
+	} else if msg.DM != "" {
+		// For 1:1 DMs, send to the other party's sessions
+		if s.store != nil {
+			if dm, err := s.store.GetDirectMessage(msg.DM); err == nil && dm != nil {
+				s.mu.RLock()
+				for _, client := range s.clients {
+					if client.DeviceID == c.DeviceID {
+						continue
+					}
+					if client.UserID == dm.UserA || client.UserID == dm.UserB {
+						client.Encoder.Encode(out)
+					}
+				}
+				s.mu.RUnlock()
+			}
+		}
 	}
 }
 
@@ -784,21 +840,36 @@ func (s *Server) handleRead(c *Client, raw json.RawMessage) {
 
 	// Store read position
 	if s.store != nil {
-		s.store.SetReadPosition(c.UserID, c.DeviceID, msg.Room, msg.Conversation, msg.LastRead)
+		s.store.SetReadPosition(c.UserID, c.DeviceID, msg.Room, msg.Group, msg.DM, msg.LastRead)
 	}
 
 	out := protocol.Read{
-		Type:         "read",
-		Room:         msg.Room,
-		Conversation: msg.Conversation,
-		User:         c.UserID,
-		LastRead:     msg.LastRead,
+		Type:     "read",
+		Room:     msg.Room,
+		Group:    msg.Group,
+		DM:       msg.DM,
+		User:     c.UserID,
+		LastRead: msg.LastRead,
 	}
 
 	if msg.Room != "" {
 		s.broadcastToRoomExcept(msg.Room, c.DeviceID, out)
-	} else if msg.Conversation != "" {
-		s.broadcastToConversationExcept(msg.Conversation, c.DeviceID, out)
+	} else if msg.Group != "" {
+		s.broadcastToGroupExcept(msg.Group, c.DeviceID, out)
+	} else if msg.DM != "" {
+		// For 1:1 DMs, broadcast to both members' other devices
+		if dm, err := s.store.GetDirectMessage(msg.DM); err == nil && dm != nil {
+			s.mu.RLock()
+			for _, client := range s.clients {
+				if client.DeviceID == c.DeviceID {
+					continue
+				}
+				if client.UserID == dm.UserA || client.UserID == dm.UserB {
+					client.Encoder.Encode(out)
+				}
+			}
+			s.mu.RUnlock()
+		}
 	}
 }
 
@@ -815,34 +886,20 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Reject DM reactions targeting retired members (1:1 DM case)
-	if msg.Conversation != "" && s.store != nil {
-		if members, err := s.store.GetConversationMembers(msg.Conversation); err == nil {
-			if retired := s.findRetiredMember(members); retired != "" {
-				c.Encoder.Encode(protocol.Error{
-					Type:    "error",
-					Code:    protocol.ErrUserRetired,
-					Message: fmt.Sprintf("Cannot react — %s's account has been retired", retired),
-				})
-				return
-			}
-		}
-	}
-
 	reactionID := generateID("react_")
 
 	reaction := protocol.Reaction{
-		Type:         "reaction",
-		ReactionID:   reactionID,
-		ID:           msg.ID,
-		Room:         msg.Room,
-		Conversation: msg.Conversation,
-		User:         c.UserID,
-		TS:           time.Now().Unix(),
-		Epoch:        msg.Epoch,
-		WrappedKeys:  msg.WrappedKeys,
-		Payload:      msg.Payload,
-		Signature:    msg.Signature,
+		Type:        "reaction",
+		ReactionID:  reactionID,
+		ID:          msg.ID,
+		Room:        msg.Room,
+		Group:       msg.Group,
+		User:        c.UserID,
+		TS:          time.Now().Unix(),
+		Epoch:       msg.Epoch,
+		WrappedKeys: msg.WrappedKeys,
+		Payload:     msg.Payload,
+		Signature:   msg.Signature,
 	}
 
 	// Store in the appropriate DB
@@ -854,8 +911,20 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 					VALUES (?, ?, ?, ?, ?, ?, ?)`,
 					reactionID, msg.ID, c.UserID, reaction.TS, msg.Epoch, msg.Payload, msg.Signature)
 			}
-		} else if msg.Conversation != "" {
-			db, err := s.store.ConvDB(msg.Conversation)
+		} else if msg.Group != "" {
+			db, err := s.store.GroupDB(msg.Group)
+			if err == nil {
+				wrappedKeys := ""
+				if len(msg.WrappedKeys) > 0 {
+					data, _ := json.Marshal(msg.WrappedKeys)
+					wrappedKeys = string(data)
+				}
+				db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, epoch, payload, signature, wrapped_keys)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+					reactionID, msg.ID, c.UserID, reaction.TS, msg.Epoch, msg.Payload, msg.Signature, wrappedKeys)
+			}
+		} else if msg.DM != "" {
+			db, err := s.store.DMDB(msg.DM)
 			if err == nil {
 				wrappedKeys := ""
 				if len(msg.WrappedKeys) > 0 {
@@ -872,8 +941,19 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 	// Broadcast
 	if msg.Room != "" {
 		s.broadcastToRoom(msg.Room, reaction)
-	} else if msg.Conversation != "" {
-		s.broadcastToConversation(msg.Conversation, reaction)
+	} else if msg.Group != "" {
+		s.broadcastToGroup(msg.Group, reaction)
+	} else if msg.DM != "" {
+		// For 1:1 DMs, broadcast to both members
+		if dm, err := s.store.GetDirectMessage(msg.DM); err == nil && dm != nil {
+			s.mu.RLock()
+			for _, client := range s.clients {
+				if client.UserID == dm.UserA || client.UserID == dm.UserB {
+					client.Encoder.Encode(reaction)
+				}
+			}
+			s.mu.RUnlock()
+		}
 	}
 }
 
@@ -889,17 +969,11 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Search room DBs and conv DBs for this reaction
-	// For now, we need the room/conversation context to broadcast the removal.
-	// The client should include this context. Let's search for it.
-	var targetID, room, conversation, user string
+	// Search room DBs, group DBs, and DM DBs for this reaction
+	var targetID, room, group, dmID, user string
 	var found bool
 
-	s.mu.RLock()
-	s.cfg.RLock()
-	rooms := s.cfg.Users[c.UserID].Rooms
-	s.cfg.RUnlock()
-	s.mu.RUnlock()
+	rooms := s.store.GetUserRoomIDs(c.UserID)
 
 	for _, r := range rooms {
 		db, err := s.store.RoomDB(r)
@@ -917,17 +991,37 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 	}
 
 	if !found {
-		convs, err := s.store.GetUserConversations(c.UserID)
+		groups, err := s.store.GetUserGroups(c.UserID)
 		if err == nil {
-			for _, conv := range convs {
-				db, err := s.store.ConvDB(conv.ID)
+			for _, g := range groups {
+				db, err := s.store.GroupDB(g.ID)
 				if err != nil {
 					continue
 				}
 				err = db.QueryRow(`SELECT message_id, user FROM reactions WHERE reaction_id = ?`, msg.ReactionID).
 					Scan(&targetID, &user)
 				if err == nil && user == c.UserID {
-					conversation = conv.ID
+					group = g.ID
+					found = true
+					db.Exec(`DELETE FROM reactions WHERE reaction_id = ?`, msg.ReactionID)
+					break
+				}
+			}
+		}
+	}
+
+	if !found {
+		dms, err := s.store.GetDirectMessagesForUser(c.UserID)
+		if err == nil {
+			for _, dm := range dms {
+				db, err := s.store.DMDB(dm.ID)
+				if err != nil {
+					continue
+				}
+				err = db.QueryRow(`SELECT message_id, user FROM reactions WHERE reaction_id = ?`, msg.ReactionID).
+					Scan(&targetID, &user)
+				if err == nil && user == c.UserID {
+					dmID = dm.ID
 					found = true
 					db.Exec(`DELETE FROM reactions WHERE reaction_id = ?`, msg.ReactionID)
 					break
@@ -941,18 +1035,29 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 	}
 
 	removed := protocol.ReactionRemoved{
-		Type:         "reaction_removed",
-		ReactionID:   msg.ReactionID,
-		ID:           targetID,
-		Room:         room,
-		Conversation: conversation,
-		User:         c.UserID,
+		Type:       "reaction_removed",
+		ReactionID: msg.ReactionID,
+		ID:         targetID,
+		Room:       room,
+		Group:      group,
+		DM:         dmID,
+		User:       c.UserID,
 	}
 
 	if room != "" {
 		s.broadcastToRoom(room, removed)
-	} else if conversation != "" {
-		s.broadcastToConversation(conversation, removed)
+	} else if group != "" {
+		s.broadcastToGroup(group, removed)
+	} else if dmID != "" {
+		if dm, err := s.store.GetDirectMessage(dmID); err == nil && dm != nil {
+			s.mu.RLock()
+			for _, client := range s.clients {
+				if client.UserID == dm.UserA || client.UserID == dm.UserB {
+					client.Encoder.Encode(removed)
+				}
+			}
+			s.mu.RUnlock()
+		}
 	}
 }
 
@@ -1011,16 +1116,30 @@ func (s *Server) handleUnpin(c *Client, raw json.RawMessage) {
 	})
 }
 
-// handleCreateDM creates a new DM conversation.
-func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
-	if !s.limiter.allowPerMinute("dm_create:"+c.UserID, s.cfg.Server.RateLimits.DMCreatesPerMinute) {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many conversations — wait a moment"})
+// handleCreateGroup creates a new group DM.
+//
+// 1:1 DMs are NOT supported here — they live in the `direct_messages` table
+// with their own create_dm handler. This handler always creates a multi-
+// party group, even when the requested member list has only one other user.
+//
+// Design intent: groups are private peer DMs, not admin-managed channels.
+// There is no add_to_group / remove_from_group / kick path. Membership is
+// fixed at create time; the only mutations are self-leave (handleLeaveGroup),
+// self-delete (handleDeleteGroup), and retirement-driven removal of a
+// retiring user (handleRetirement). If a member needs to be added later,
+// the workflow is to create a new group with the desired member set. This
+// is a deliberate security and privacy choice that mirrors the way 1:1
+// DMs work — the parties to a private conversation control who can be
+// in it, not an admin role. Admins manage rooms, not groups.
+func (s *Server) handleCreateGroup(c *Client, raw json.RawMessage) {
+	if !s.limiter.allowPerMinute("group_create:"+c.UserID, s.cfg.Server.RateLimits.DMCreatesPerMinute) {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many groups — wait a moment"})
 		return
 	}
 
-	var msg protocol.CreateDM
+	var msg protocol.CreateGroup
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed create_dm"})
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed create_group"})
 		return
 	}
 
@@ -1032,12 +1151,12 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 		c.Encoder.Encode(protocol.Error{
 			Type:    "error",
 			Code:    protocol.ErrUserRetired,
-			Message: fmt.Sprintf("Cannot create conversation — %s's account has been retired", retired),
+			Message: fmt.Sprintf("Cannot create group — %s's account has been retired", retired),
 		})
 		return
 	}
 
-	// Max group DM size: 50 members
+	// Max group size: 50 members
 	if len(allMembers) > 50 {
 		c.Encoder.Encode(protocol.Error{
 			Type:    "error",
@@ -1047,42 +1166,27 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Deduplicate 1:1 conversations
-	if len(msg.Members) == 1 && s.store != nil {
-		existing, err := s.store.FindOneOnOneConversation(c.UserID, msg.Members[0])
-		if err == nil && existing != "" {
-			// Return existing conversation
-			members, _ := s.store.GetConversationMembers(existing)
-			c.Encoder.Encode(protocol.DMCreated{
-				Type:         "dm_created",
-				Conversation: existing,
-				Members:      members,
-			})
-			return
-		}
-	}
-
-	convID := generateID("conv_")
+	groupID := generateID("group_")
 
 	if s.store != nil {
-		if err := s.store.CreateConversation(convID, allMembers, msg.Name); err != nil {
-			s.logger.Error("failed to create conversation", "error", err)
-			c.Encoder.Encode(protocol.Error{Type: "error", Code: "internal", Message: "failed to create conversation"})
+		if err := s.store.CreateGroup(groupID, allMembers, msg.Name); err != nil {
+			s.logger.Error("failed to create group", "error", err)
+			c.Encoder.Encode(protocol.Error{Type: "error", Code: "internal", Message: "failed to create group"})
 			return
 		}
 	}
 
-	created := protocol.DMCreated{
-		Type:         "dm_created",
-		Conversation: convID,
-		Members:      allMembers,
-		Name:         msg.Name,
+	created := protocol.GroupCreated{
+		Type:    "group_created",
+		Group:   groupID,
+		Members: allMembers,
+		Name:    msg.Name,
 	}
 
-	// Send dm_created to the creator
+	// Send group_created to the creator
 	c.Encoder.Encode(created)
 
-	// Also notify all other online members so they know the conversation exists
+	// Also notify all other online members so they know the group exists
 	s.mu.RLock()
 	memberSet := make(map[string]bool, len(allMembers))
 	for _, m := range allMembers {
@@ -1098,8 +1202,8 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 	}
 	s.mu.RUnlock()
 
-	s.logger.Info("conversation created",
-		"conversation", convID,
+	s.logger.Info("group created",
+		"group", groupID,
 		"created_by", c.UserID,
 		"members", allMembers,
 	)
@@ -1117,16 +1221,8 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 	}
 
 	// Check if user is admin (admins can delete any room message)
-	s.cfg.RLock()
-	isAdmin := false
-	for _, a := range s.cfg.Server.Server.Admins {
-		if a == c.UserID {
-			isAdmin = true
-			break
-		}
-	}
-	rooms := s.cfg.Users[c.UserID].Rooms
-	s.cfg.RUnlock()
+	isAdmin := s.store.IsAdmin(c.UserID)
+	rooms := s.store.GetUserRoomIDs(c.UserID)
 
 	// Rate limit — admins get a higher limit
 	limit := s.cfg.Server.RateLimits.DeletesPerMinute
@@ -1139,8 +1235,8 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 	}
 
 	// Search room DBs for the message
-	for _, room := range rooms {
-		db, err := s.store.RoomDB(room)
+	for _, roomID := range rooms {
+		db, err := s.store.RoomDB(roomID)
 		if err != nil {
 			continue
 		}
@@ -1161,31 +1257,31 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 			return
 		}
 
-		fileIDs, err := s.store.DeleteRoomMessage(room, msg.ID, c.UserID)
+		fileIDs, err := s.store.DeleteRoomMessage(roomID, msg.ID, c.UserID)
 		if err != nil {
-			s.logger.Error("delete failed", "room", room, "id", msg.ID, "error", err)
+			s.logger.Error("delete failed", "room", roomID, "id", msg.ID, "error", err)
 			return
 		}
 		s.cleanupFiles(fileIDs)
 
-		s.broadcastToRoom(room, protocol.Deleted{
+		s.broadcastToRoom(roomID, protocol.Deleted{
 			Type:      "deleted",
 			ID:        msg.ID,
 			DeletedBy: c.UserID,
 			TS:        time.Now().Unix(),
-			Room:      room,
+			Room:      roomID,
 		})
 		return
 	}
 
-	// Search conversation DBs
-	convs, err := s.store.GetUserConversations(c.UserID)
+	// Search group DM DBs
+	groups, err := s.store.GetUserGroups(c.UserID)
 	if err != nil {
 		return
 	}
 
-	for _, conv := range convs {
-		db, err := s.store.ConvDB(conv.ID)
+	for _, g := range groups {
+		db, err := s.store.GroupDB(g.ID)
 		if err != nil {
 			continue
 		}
@@ -1206,20 +1302,73 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 			return
 		}
 
-		fileIDs, err := s.store.DeleteConvMessage(conv.ID, msg.ID, c.UserID)
+		fileIDs, err := s.store.DeleteGroupMessage(g.ID, msg.ID, c.UserID)
 		if err != nil {
-			s.logger.Error("delete failed", "conversation", conv.ID, "id", msg.ID, "error", err)
+			s.logger.Error("delete failed", "group", g.ID, "id", msg.ID, "error", err)
 			return
 		}
 		s.cleanupFiles(fileIDs)
 
-		s.broadcastToConversation(conv.ID, protocol.Deleted{
-			Type:         "deleted",
-			ID:           msg.ID,
-			DeletedBy:    c.UserID,
-			TS:           time.Now().Unix(),
-			Conversation: conv.ID,
+		s.broadcastToGroup(g.ID, protocol.Deleted{
+			Type:      "deleted",
+			ID:        msg.ID,
+			DeletedBy: c.UserID,
+			TS:        time.Now().Unix(),
+			Group:     g.ID,
 		})
+		return
+	}
+
+	// Search 1:1 DM DBs
+	dms, err := s.store.GetDirectMessagesForUser(c.UserID)
+	if err != nil {
+		return
+	}
+
+	for _, dm := range dms {
+		db, err := s.store.DMDB(dm.ID)
+		if err != nil {
+			continue
+		}
+		var sender string
+		err = db.QueryRow(`SELECT sender FROM messages WHERE id = ? AND deleted = 0`, msg.ID).Scan(&sender)
+		if err != nil {
+			continue
+		}
+
+		// DMs: own messages only, no admin override
+		if sender != c.UserID {
+			c.Encoder.Encode(protocol.Error{
+				Type:    "error",
+				Code:    protocol.ErrNotAuthorized,
+				Message: "You can only delete your own messages in DMs",
+				Ref:     msg.ID,
+			})
+			return
+		}
+
+		fileIDs, err := s.store.DeleteDMMessage(dm.ID, msg.ID, c.UserID)
+		if err != nil {
+			s.logger.Error("delete failed", "dm", dm.ID, "id", msg.ID, "error", err)
+			return
+		}
+		s.cleanupFiles(fileIDs)
+
+		// Broadcast to both DM members
+		deleted := protocol.Deleted{
+			Type:      "deleted",
+			ID:        msg.ID,
+			DeletedBy: c.UserID,
+			TS:        time.Now().Unix(),
+			DM:        dm.ID,
+		}
+		s.mu.RLock()
+		for _, client := range s.clients {
+			if client.UserID == dm.UserA || client.UserID == dm.UserB {
+				client.Encoder.Encode(deleted)
+			}
+		}
+		s.mu.RUnlock()
 		return
 	}
 }
@@ -1238,68 +1387,676 @@ func (s *Server) cleanupFiles(fileIDs []string) {
 	}
 }
 
-// handleLeaveConversation removes a user from a DM conversation.
-func (s *Server) handleLeaveConversation(c *Client, raw json.RawMessage) {
-	var msg protocol.LeaveConversation
+// handleLeaveGroup removes a user from a group DM via the leave_group
+// protocol message. Self-leave path: validates membership, then delegates
+// to performGroupLeave for the actual mutation + broadcast + echo.
+func (s *Server) handleLeaveGroup(c *Client, raw json.RawMessage) {
+	var msg protocol.LeaveGroup
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
 	}
 
 	if s.store != nil {
-		if err := s.store.RemoveConversationMember(msg.Conversation, c.UserID); err != nil {
-			s.logger.Error("failed to leave conversation", "user", c.UserID, "error", err)
+		// Membership check before mutation. Privacy: the response for
+		// "group does not exist", "DB lookup failed", and "you are not
+		// a member of an existing group" MUST be byte-identical so a
+		// probing client cannot use leave_group to discover whether a
+		// group ID exists or who its members are. Matches the convention
+		// in handleSendGroup and handleLeaveDM. Uses ErrUnknownGroup
+		// rather than ErrNotAuthorized to align with handleSendGroup.
+		isMember, err := s.store.IsGroupMember(msg.Group, c.UserID)
+		if err != nil || !isMember {
+			c.Encoder.Encode(protocol.Error{
+				Type:    "error",
+				Code:    protocol.ErrUnknownGroup,
+				Message: "You are not a member of this group",
+			})
 			return
+		}
+	}
+
+	// Self-leave: empty reason. The shared performGroupLeave handles
+	// removal, last-member cleanup, broadcasting group_event{leave} to
+	// remaining members, and echoing group_left to the leaver's own
+	// sessions.
+	s.performGroupLeave(msg.Group, c.UserID, "")
+}
+
+// performGroupLeave is the shared post-validation leave path used by
+// both handleLeaveGroup (self-leave, empty reason) and the admin kick
+// processor (admin-triggered, reason "admin"). It is idempotent at the
+// data layer:
+//   - RemoveGroupMember is a no-op if the user is already gone (e.g.
+//     the CLI removed them before queueing the kick)
+//   - Last-member cleanup is idempotent via DeleteGroupConversation
+//
+// Side effects:
+//   - Removes userID from group_members (idempotent)
+//   - Triggers DeleteGroupConversation if the group is now empty
+//   - Broadcasts group_event{leave, user, reason} to remaining members
+//   - Echoes group_left{group, reason} to all of userID's connected
+//     sessions
+//
+// reason is propagated through both the broadcast and the echo so
+// clients can render different status messages for self-leave vs
+// admin-kick. Empty string means self-leave.
+func (s *Server) performGroupLeave(groupID, userID, reason string) {
+	if s.store != nil {
+		if err := s.store.RemoveGroupMember(groupID, userID); err != nil {
+			s.logger.Error("failed to remove group member",
+				"user", userID, "group", groupID, "error", err)
+			// Continue anyway — broadcast/echo are best-effort and the
+			// caller may have already done the removal directly.
+		}
+
+		// Last-member cleanup: if removing this user emptied the group,
+		// drop the row + group-<id>.db file + cached *sql.DB handle.
+		// Idempotent — safe under concurrent calls.
+		if remaining, err := s.store.GetGroupMembers(groupID); err == nil && len(remaining) == 0 {
+			if err := s.store.DeleteGroupConversation(groupID); err != nil {
+				s.logger.Error("group cleanup failed",
+					"group", groupID, "error", err)
+			} else {
+				s.logger.Info("group cleaned up (last member left)",
+					"group", groupID, "user", userID, "reason", reason)
+			}
 		}
 	}
 
 	// Notify remaining members
-	s.broadcastToConversation(msg.Conversation, protocol.ConversationEvent{
-		Type:         "conversation_event",
-		Conversation: msg.Conversation,
-		Event:        "leave",
-		User:         c.UserID,
+	s.broadcastToGroup(groupID, protocol.GroupEvent{
+		Type:   "group_event",
+		Group:  groupID,
+		Event:  "leave",
+		User:   userID,
+		Reason: reason,
 	})
 
-	s.logger.Info("conversation leave",
-		"user", c.UserID,
-		"conversation", msg.Conversation,
+	// Echo group_left to all of the leaver's own sessions. They are NOT
+	// in the broadcast set above (already removed from members), so this
+	// echo is the only way they learn the leave succeeded.
+	left := protocol.GroupLeft{
+		Type:   "group_left",
+		Group:  groupID,
+		Reason: reason,
+	}
+	s.mu.RLock()
+	for _, client := range s.clients {
+		if client.UserID == userID {
+			client.Encoder.Encode(left)
+		}
+	}
+	s.mu.RUnlock()
+
+	s.logger.Info("group leave",
+		"user", userID,
+		"group", groupID,
+		"reason", reason,
 	)
 }
 
-// handleRenameConversation updates a conversation's name and broadcasts.
-func (s *Server) handleRenameConversation(c *Client, raw json.RawMessage) {
-	var msg protocol.RenameConversation
+// handleDeleteGroup processes a client request to remove a group from
+// every device on the user's account. Distinct from leave_group:
+//
+//   - leave_group is a membership change. The user stops being a member
+//     of the group; remaining members are notified; the leaver's local
+//     state stays (sidebar greys, history scrollable until /delete).
+//
+//   - delete_group is leave + multi-device purge intent. The user leaves
+//     server-side (if still a member) AND records a deletion intent so
+//     every other device of the same user — currently connected via the
+//     group_deleted echo, or offline-then-syncing via deleted_groups —
+//     wipes the group's local state.
+//
+// The handler is idempotent: re-running on a group the user has already
+// left just records the deletion intent (which is itself idempotent via
+// INSERT OR IGNORE) and re-broadcasts the echo. Both Are safe.
+//
+// Ordering matters: the deletion intent is RECORDED FIRST, before the
+// inline leave logic. If the user is the last member and the leave
+// triggers DeleteGroupConversation, that cleanup deliberately does NOT
+// touch deleted_groups (see store/group_deletion.go), so the row we
+// just wrote survives the cleanup. Offline devices catching up later
+// see the deletion record and purge correctly.
+func (s *Server) handleDeleteGroup(c *Client, raw json.RawMessage) {
+	var msg protocol.DeleteGroup
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+
+	if s.store == nil {
+		return
+	}
+
+	// 1. Record the deletion intent FIRST. This is the catchup signal
+	//    for the user's offline devices and must survive any subsequent
+	//    leave/cleanup. INSERT OR IGNORE makes it safe to record before
+	//    we know whether the user is currently a member, and safe to
+	//    re-run on a previously-deleted group (no-op).
+	if err := s.store.RecordGroupDeletion(c.UserID, msg.Group); err != nil {
+		s.logger.Error("failed to record group deletion",
+			"user", c.UserID, "group", msg.Group, "error", err)
+		// Continue anyway — the deletion intent is best-effort. The
+		// live group_deleted echo will still tell connected devices to
+		// purge; only the offline-catchup path is degraded.
+	}
+
+	// 2. Run the leave logic if the user is still a member. If the
+	//    user has already left (e.g. previously /leave'd, or this is a
+	//    second device retroactively /delete'ing), skip the leave but
+	//    still proceed to the echo step. This is the "if the user has
+	//    already left, all good" case from the design discussion.
+	isMember, err := s.store.IsGroupMember(msg.Group, c.UserID)
+	if err == nil && isMember {
+		if err := s.store.RemoveGroupMember(msg.Group, c.UserID); err != nil {
+			s.logger.Error("failed to remove group member during delete",
+				"user", c.UserID, "group", msg.Group, "error", err)
+		} else {
+			// Notify remaining members the same way leave_group does.
+			s.broadcastToGroup(msg.Group, protocol.GroupEvent{
+				Type:  "group_event",
+				Group: msg.Group,
+				Event: "leave",
+				User:  c.UserID,
+			})
+
+			// Last-member cleanup. If we just removed the only remaining
+			// member, drop the group row + db file. The cleanup does NOT
+			// touch the deleted_groups row we wrote in step 1, so offline
+			// catchup still works.
+			if remaining, err := s.store.GetGroupMembers(msg.Group); err == nil && len(remaining) == 0 {
+				if err := s.store.DeleteGroupConversation(msg.Group); err != nil {
+					s.logger.Error("group cleanup failed",
+						"group", msg.Group, "error", err)
+				} else {
+					s.logger.Info("group cleaned up (last member /delete'd)",
+						"group", msg.Group, "user", c.UserID)
+				}
+			}
+		}
+	}
+
+	// 3. Echo group_deleted to ALL of the user's currently-connected
+	//    sessions. This is the canonical multi-device propagation path —
+	//    every device of this user that is online RIGHT NOW will receive
+	//    this and purge. Devices that are offline pick up the deletion
+	//    via deleted_groups on their next handshake.
+	deleted := protocol.GroupDeleted{
+		Type:  "group_deleted",
+		Group: msg.Group,
+	}
+	s.mu.RLock()
+	for _, client := range s.clients {
+		if client.UserID == c.UserID {
+			client.Encoder.Encode(deleted)
+		}
+	}
+	s.mu.RUnlock()
+
+	s.logger.Info("group delete",
+		"user", c.UserID,
+		"group", msg.Group,
+		"was_member", isMember,
+	)
+}
+
+// handleLeaveRoom removes a user from a room via the leave_room
+// protocol message. Self-leave path: validates membership, checks the
+// allow_self_leave_rooms policy gate, then delegates to performRoomLeave
+// for the actual mutation + broadcast + echo + epoch rotation.
+//
+// Rooms are admin-managed, so the policy gate exists for deployments
+// that want admins to control all room membership. The flag defaults
+// to false (admins manage), but can be enabled per-deployment in
+// server.toml. Hot-reloadable.
+func (s *Server) handleLeaveRoom(c *Client, raw json.RawMessage) {
+	var msg protocol.LeaveRoom
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+
+	if s.store == nil {
+		return
+	}
+
+	// Membership check first. Privacy: the response for "room does
+	// not exist" and "you are not a member of an existing room" MUST
+	// be byte-identical so a probing client cannot use leave_room to
+	// discover whether a given room ID exists. Matches the convention
+	// in handleSend, handleSendGroup, handleSendDM, handleLeaveGroup,
+	// and handleLeaveDM — uses ErrUnknownRoom with a generic message.
+	//
+	// The policy gate below uses a DIFFERENT error (ErrForbidden) and
+	// only fires for users who passed this check, so the membership
+	// status is implicit in which error code the client sees. That's
+	// fine — a user who is a member of a room already knows they are,
+	// so the disclosure is a no-op.
+	if !s.store.IsRoomMemberByID(msg.Room, c.UserID) {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrUnknownRoom,
+			Message: "You are not a member of this room",
+		})
+		return
+	}
+
+	// Policy gate. Hot-reloadable: read under cfg RLock so a config reload
+	// flipping the flag mid-session takes effect on the next /leave attempt
+	// without any client refresh. Phase 12 will add a separate gate for
+	// retired rooms (allow_self_leave_retired_rooms) that's checked when
+	// the room is in the retired state.
+	s.cfg.RLock()
+	allowed := s.cfg.Server.Server.AllowSelfLeaveRooms
+	s.cfg.RUnlock()
+	if !allowed {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrForbidden,
+			Message: "Forbidden — please contact an admin to leave this room",
+		})
+		return
+	}
+
+	// Self-leave: empty reason. The shared performRoomLeave handles
+	// removal, broadcasting room_event{leave} to remaining members,
+	// echoing room_left to the leaver's own sessions, and marking the
+	// room for epoch rotation.
+	s.performRoomLeave(msg.Room, c.UserID, "")
+}
+
+// performRoomLeave is the shared post-validation leave path for rooms.
+// Used today by handleLeaveRoom (self-leave, empty reason); will be
+// reused by Phase 12's room retirement path (reason "retirement"), the
+// future admin remove-from-room kick mechanism (reason "admin"), and
+// the user-retirement-affects-rooms path (reason "user_retired").
+//
+// Mirrors performGroupLeave structurally but with three room-specific
+// differences:
+//
+//  1. No last-member cleanup. Rooms are admin-managed and persist even
+//     when empty — an admin can re-add members or retire the room
+//     explicitly. This is the opposite of groups, where the last-member
+//     leave triggers full cleanup.
+//
+//  2. Epoch rotation is required. Rooms use epoch-based encryption,
+//     so removing a member must rotate the key for forward secrecy
+//     (the leaver cannot decrypt messages sent after they leave).
+//     Groups and DMs use per-message wrapped keys and don't need this.
+//
+//  3. The broadcastToRoom function reads the current member set from
+//     the store, so it AUTOMATICALLY excludes the leaver after the
+//     RemoveRoomMember call above. No manual filtering needed.
+//
+// Caller must have already validated membership and policy.
+func (s *Server) performRoomLeave(roomID, userID, reason string) {
+	if s.store == nil {
+		return
+	}
+
+	if err := s.store.RemoveRoomMember(roomID, userID); err != nil {
+		s.logger.Error("failed to remove room member",
+			"user", userID, "room", roomID, "error", err)
+		// Continue anyway — broadcast/echo are best-effort.
+	}
+
+	// Notify remaining members. broadcastToRoom rebuilds the member set
+	// AFTER the delete above, so the leaver is automatically excluded.
+	s.broadcastToRoom(roomID, protocol.RoomEvent{
+		Type:   "room_event",
+		Room:   roomID,
+		Event:  "leave",
+		User:   userID,
+		Reason: reason,
+	})
+
+	// Echo room_left to all of the leaver's own sessions. They are not
+	// in the broadcast above (already removed from members), so without
+	// this echo they would never know the leave succeeded.
+	left := protocol.RoomLeft{
+		Type:   "room_left",
+		Room:   roomID,
+		Reason: reason,
+	}
+	s.mu.RLock()
+	for _, client := range s.clients {
+		if client.UserID == userID {
+			client.Encoder.Encode(left)
+		}
+	}
+	s.mu.RUnlock()
+
+	// Mark room for epoch rotation. Same path handleRetirement uses for
+	// users: the next sender will trigger epoch_trigger and the new key
+	// will be distributed to the now-smaller member set, excluding the
+	// leaver. Forward secrecy: leaver cannot decrypt messages sent after
+	// this point.
+	s.epochs.getOrCreate(roomID, s.epochs.currentEpochNum(roomID))
+
+	s.logger.Info("room leave",
+		"user", userID,
+		"room", roomID,
+		"reason", reason,
+	)
+}
+
+// handleRenameGroup updates a group DM's name and broadcasts.
+func (s *Server) handleRenameGroup(c *Client, raw json.RawMessage) {
+	var msg protocol.RenameGroup
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
 	}
 
 	if s.store != nil {
-		isMember, err := s.store.IsConversationMember(msg.Conversation, c.UserID)
+		isMember, err := s.store.IsGroupMember(msg.Group, c.UserID)
 		if err != nil || !isMember {
 			c.Encoder.Encode(protocol.Error{
-				Type: "error", Code: protocol.ErrUnknownConversation,
-				Message: "You are not a member of this conversation",
+				Type: "error", Code: protocol.ErrUnknownGroup,
+				Message: "You are not a member of this group",
 			})
 			return
 		}
 
-		if err := s.store.RenameConversation(msg.Conversation, msg.Name); err != nil {
-			s.logger.Error("failed to rename conversation", "conversation", msg.Conversation, "error", err)
+		if err := s.store.RenameGroup(msg.Group, msg.Name); err != nil {
+			s.logger.Error("failed to rename group", "group", msg.Group, "error", err)
 			return
 		}
 	}
 
-	s.broadcastToConversation(msg.Conversation, protocol.ConversationRenamed{
-		Type:         "conversation_renamed",
-		Conversation: msg.Conversation,
-		Name:         msg.Name,
-		RenamedBy:    c.UserID,
+	s.broadcastToGroup(msg.Group, protocol.GroupRenamed{
+		Type:      "group_renamed",
+		Group:     msg.Group,
+		Name:      msg.Name,
+		RenamedBy: c.UserID,
 	})
 
-	s.logger.Info("conversation renamed",
-		"conversation", msg.Conversation,
+	s.logger.Info("group renamed",
+		"group", msg.Group,
 		"name", msg.Name,
 		"renamed_by", c.UserID,
+	)
+}
+
+// handleCreateDM creates or returns an existing 1:1 DM between the caller
+// and a single other user. The pair is canonicalized alphabetically and
+// deduplicates: calling twice for the same pair returns the same row.
+func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
+	if !s.limiter.allowPerMinute("dm_create:"+c.UserID, s.cfg.Server.RateLimits.DMCreatesPerMinute) {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many DMs — wait a moment"})
+		return
+	}
+
+	var msg protocol.CreateDM
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed create_dm"})
+		return
+	}
+
+	if msg.Other == c.UserID {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "Cannot create a DM with yourself"})
+		return
+	}
+
+	// Reject if the other user is retired
+	if retired := s.findRetiredMember([]string{msg.Other}); retired != "" {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrUserRetired,
+			Message: fmt.Sprintf("Cannot create DM — %s's account has been retired", retired),
+		})
+		return
+	}
+
+	if s.store == nil {
+		return
+	}
+
+	// Serialize against any concurrent 1:1 DM cleanup. If a cleanup is in
+	// progress (handleLeaveDM holding dmCleanupMu), TryLock fails and we
+	// return ErrServerBusy so the client can retry. By the next attempt
+	// the cleanup will have finished and CreateOrGetDirectMessage will
+	// either find no row (and create a fresh one) or find a still-alive
+	// DM the user is reconnecting to. Holding the lock across the create
+	// guarantees we never dedup to a row that is about to be deleted.
+	if !s.dmCleanupMu.TryLock() {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrServerBusy,
+			Message: "Server is processing another DM operation, please try again",
+		})
+		return
+	}
+	defer s.dmCleanupMu.Unlock()
+
+	dmID := generateID("dm_")
+	dm, err := s.store.CreateOrGetDirectMessage(dmID, c.UserID, msg.Other)
+	if err != nil {
+		s.logger.Error("failed to create DM", "error", err)
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: "internal", Message: "failed to create DM"})
+		return
+	}
+
+	created := protocol.DMCreated{
+		Type:    "dm_created",
+		DM:      dm.ID,
+		Members: []string{dm.UserA, dm.UserB},
+	}
+
+	// Send dm_created to all sessions of both members
+	s.mu.RLock()
+	for _, client := range s.clients {
+		if client.UserID == dm.UserA || client.UserID == dm.UserB {
+			client.Encoder.Encode(created)
+		}
+	}
+	s.mu.RUnlock()
+
+	s.logger.Info("DM created",
+		"dm", dm.ID,
+		"created_by", c.UserID,
+		"other", msg.Other,
+	)
+}
+
+// handleSendDM processes a 1:1 DM message.
+func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
+	if len(raw) > maxPayloadBytes {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrMessageTooLarge, Message: "Message exceeds 16KB limit"})
+		return
+	}
+
+	var msg protocol.SendDM
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed send_dm"})
+		return
+	}
+
+	if s.store == nil {
+		return
+	}
+
+	// Validate DM exists and caller is a party
+	dm, err := s.store.GetDirectMessage(msg.DM)
+	if err != nil || dm == nil || (dm.UserA != c.UserID && dm.UserB != c.UserID) {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrUnknownDM,
+			Message: "You are not a party to this DM",
+		})
+		return
+	}
+
+	// Reject sends to a retired recipient
+	other := dm.OtherUser(c.UserID)
+	if s.store.IsUserRetired(other) {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrUserRetired,
+			Message: fmt.Sprintf("Cannot send — %s's account has been retired", other),
+		})
+		return
+	}
+
+	// Validate wrapped_keys has exactly 2 entries matching the pair
+	if len(msg.WrappedKeys) != 2 {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrInvalidWrappedKeys,
+			Message: "wrapped_keys must have exactly 2 entries for a 1:1 DM",
+		})
+		return
+	}
+	if _, ok := msg.WrappedKeys[dm.UserA]; !ok {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrInvalidWrappedKeys, Message: "wrapped_keys must include both DM members"})
+		return
+	}
+	if _, ok := msg.WrappedKeys[dm.UserB]; !ok {
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrInvalidWrappedKeys, Message: "wrapped_keys must include both DM members"})
+		return
+	}
+
+	outMsg := protocol.DM{
+		Type:        "dm",
+		ID:          generateID("msg_"),
+		From:        c.UserID,
+		DM:          dm.ID,
+		TS:          time.Now().Unix(),
+		WrappedKeys: msg.WrappedKeys,
+		Payload:     msg.Payload,
+		FileIDs:     msg.FileIDs,
+		Signature:   msg.Signature,
+	}
+
+	// Store in DM DB — messages are always written regardless of cutoffs.
+	// The cutoff filters on read, not on write.
+	if err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
+		ID:          outMsg.ID,
+		Sender:      outMsg.From,
+		TS:          outMsg.TS,
+		Payload:     outMsg.Payload,
+		FileIDs:     outMsg.FileIDs,
+		Signature:   outMsg.Signature,
+		WrappedKeys: outMsg.WrappedKeys,
+	}); err != nil {
+		s.logger.Error("failed to store DM", "dm", dm.ID, "error", err)
+	}
+
+	// Broadcast to both members' active sessions
+	s.mu.RLock()
+	for _, client := range s.clients {
+		if client.UserID == dm.UserA || client.UserID == dm.UserB {
+			client.Encoder.Encode(outMsg)
+		}
+	}
+	s.mu.RUnlock()
+
+	// Notify offline members via push
+	go s.notifyOfflineUsers([]string{dm.UserA, dm.UserB})
+}
+
+// handleLeaveDM processes a silent leave for a 1:1 DM. Sets the per-user
+// history cutoff so the leaver no longer sees messages past this point.
+// No broadcast to the other party — the only signal is the dm_left echo
+// sent to every active session of the leaver.
+func (s *Server) handleLeaveDM(c *Client, raw json.RawMessage) {
+	var msg protocol.LeaveDM
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+
+	if s.store == nil {
+		return
+	}
+
+	// Load and validate the DM up front. Privacy: the wire response for
+	// "DM does not exist", "DB lookup failed", and "you are not a party"
+	// MUST be byte-identical so a probing client cannot use /leave to
+	// discover whether a given DM ID exists or who is talking to whom.
+	// Matches the convention in handleSendDM and the DM history branch.
+	dm, err := s.store.GetDirectMessage(msg.DM)
+	if err != nil || dm == nil || (dm.UserA != c.UserID && dm.UserB != c.UserID) {
+		if err != nil {
+			s.logger.Error("failed to load DM", "user", c.UserID, "dm", msg.DM, "error", err)
+		}
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrUnknownDM,
+			Message: "You are not a party to this DM",
+		})
+		return
+	}
+
+	if err := s.store.SetDMLeftAt(msg.DM, c.UserID, time.Now().Unix()); err != nil {
+		// Reaching this branch requires having already passed the membership
+		// gate above, so a more specific error here does not leak existence.
+		s.logger.Error("failed to leave DM", "user", c.UserID, "dm", msg.DM, "error", err)
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrUnknownDM,
+			Message: "Failed to leave DM",
+		})
+		return
+	}
+
+	// Cleanup check: if both parties have now left, the DM is dormant —
+	// no one will ever read another message from it. Delete the row and
+	// the dm-<id>.db file immediately. dmCleanupMu serializes against
+	// handleCreateDM so a concurrent /newdm with the same pair cannot
+	// dedup to a row that is mid-deletion. The lock is server-wide but
+	// the critical section is microseconds, so contention is negligible.
+	s.cleanupDormantDM(msg.DM)
+
+	// Echo to all of the leaver's active sessions. No broadcast to the
+	// other party — 1:1 leave is silent by design.
+	left := protocol.DMLeft{
+		Type: "dm_left",
+		DM:   msg.DM,
+	}
+	s.mu.RLock()
+	for _, client := range s.clients {
+		if client.UserID == c.UserID {
+			client.Encoder.Encode(left)
+		}
+	}
+	s.mu.RUnlock()
+
+	s.logger.Info("DM leave (silent)",
+		"user", c.UserID,
+		"dm", msg.DM,
+	)
+}
+
+// cleanupDormantDM checks whether both parties of a 1:1 DM have left and,
+// if so, deletes the DM row + per-DM database file. Holds dmCleanupMu so
+// that concurrent handleCreateDM calls cannot race the delete.
+//
+// Re-checks the cutoff state inside the lock so two leavers racing each
+// other (alice and bob both calling /leave at the same instant, both
+// observing "both > 0" after their respective SetDMLeftAt) result in
+// exactly one delete, not a double-free.
+func (s *Server) cleanupDormantDM(dmID string) {
+	if s.store == nil {
+		return
+	}
+
+	s.dmCleanupMu.Lock()
+	defer s.dmCleanupMu.Unlock()
+
+	dm, err := s.store.GetDirectMessage(dmID)
+	if err != nil || dm == nil {
+		return
+	}
+	if dm.UserALeftAt == 0 || dm.UserBLeftAt == 0 {
+		return
+	}
+
+	if err := s.store.DeleteDirectMessage(dmID); err != nil {
+		s.logger.Error("dm cleanup failed", "dm", dmID, "error", err)
+		return
+	}
+	s.logger.Info("DM cleaned up (both parties left)",
+		"dm", dmID,
+		"user_a", dm.UserA,
+		"user_b", dm.UserB,
 	)
 }
 
@@ -1328,82 +2085,41 @@ func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
 	msg.DisplayName = cleaned
 
 	// Check for duplicate display name across all users (case-insensitive)
-	s.cfg.RLock()
-	for username, user := range s.cfg.Users {
-		if username == c.UserID {
-			continue // skip self
-		}
-		// Check against config display_name
-		if strings.EqualFold(user.DisplayName, msg.DisplayName) {
-			s.cfg.RUnlock()
-			c.Encoder.Encode(protocol.Error{
-				Type:    "error",
-				Code:    "username_taken",
-				Message: fmt.Sprintf("Display name %q is already in use", msg.DisplayName),
-			})
-			return
-		}
-		// Check against config username (can't take someone's username as your display name)
-		if strings.EqualFold(username, msg.DisplayName) {
-			s.cfg.RUnlock()
-			c.Encoder.Encode(protocol.Error{
-				Type:    "error",
-				Code:    "username_taken",
-				Message: fmt.Sprintf("Display name %q is already in use", msg.DisplayName),
-			})
-			return
-		}
-	}
-	s.cfg.RUnlock()
-
-	// Also check stored display names (from set_profile, which may differ from config)
-	if s.store != nil {
-		var existingUser string
-		s.store.DataDB().QueryRow(
-			`SELECT user FROM profiles WHERE LOWER(display_name) = LOWER(?) AND user != ?`,
-			msg.DisplayName, c.UserID).Scan(&existingUser)
-		if existingUser != "" {
-			c.Encoder.Encode(protocol.Error{
-				Type:    "error",
-				Code:    "username_taken",
-				Message: fmt.Sprintf("Display name %q is already in use", msg.DisplayName),
-			})
-			return
-		}
+	if s.store.IsDisplayNameTaken(msg.DisplayName, c.UserID) {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    "username_taken",
+			Message: fmt.Sprintf("Display name %q is already in use", msg.DisplayName),
+		})
+		return
 	}
 
-	// Update in store
+	// Update display name in users.db
+	s.store.SetUserDisplayName(c.UserID, msg.DisplayName)
+
+	// Update avatar in data.db profiles table
 	if s.store != nil {
 		s.store.DataDB().Exec(`
-			INSERT INTO profiles (user, display_name, avatar_id) VALUES (?, ?, ?)
-			ON CONFLICT (user) DO UPDATE SET display_name = excluded.display_name, avatar_id = excluded.avatar_id`,
-			c.UserID, msg.DisplayName, msg.AvatarID)
+			INSERT INTO profiles (user, avatar_id) VALUES (?, ?)
+			ON CONFLICT (user) DO UPDATE SET avatar_id = excluded.avatar_id`,
+			c.UserID, msg.AvatarID)
 	}
 
 	// Build profile message with pubkey
-	s.cfg.RLock()
-	user := s.cfg.Users[c.UserID]
-	s.cfg.RUnlock()
-
-	parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(user.Key))
+	pubKey := s.store.GetUserKey(c.UserID)
+	parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubKey))
 	if err != nil {
 		return
 	}
 
-	isAdmin := false
-	for _, a := range s.cfg.Server.Server.Admins {
-		if a == c.UserID {
-			isAdmin = true
-			break
-		}
-	}
+	isAdmin := s.store.IsAdmin(c.UserID)
 
 	profile := protocol.Profile{
 		Type:           "profile",
 		User:           c.UserID,
 		DisplayName:    msg.DisplayName,
 		AvatarID:       msg.AvatarID,
-		PubKey:         user.Key,
+		PubKey:         pubKey,
 		KeyFingerprint: ssh.FingerprintSHA256(parsed),
 		Admin:          isAdmin,
 	}
@@ -1433,33 +2149,34 @@ func (s *Server) handleSetStatus(c *Client, raw json.RawMessage) {
 }
 
 // broadcastToRoom sends a message to all connected clients in a room.
-func (s *Server) broadcastToRoom(room string, msg any) {
+func (s *Server) broadcastToRoom(roomID string, msg any) {
+	if s.store == nil {
+		return
+	}
+	memberSet := make(map[string]bool)
+	for _, uid := range s.store.GetRoomMemberIDsByRoomID(roomID) {
+		memberSet[uid] = true
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	s.cfg.RLock()
-	defer s.cfg.RUnlock()
-
 	for _, client := range s.clients {
-		user := s.cfg.Users[client.UserID]
-		for _, r := range user.Rooms {
-			if r == room {
-				client.Encoder.Encode(msg)
-				break
-			}
+		if memberSet[client.UserID] {
+			client.Encoder.Encode(msg)
 		}
 	}
 }
 
-// broadcastToConversation sends a message to all connected clients in a conversation.
-func (s *Server) broadcastToConversation(convID string, msg any) {
+// broadcastToGroup sends a message to all connected clients in a group DM.
+func (s *Server) broadcastToGroup(groupID string, msg any) {
 	if s.store == nil {
 		return
 	}
 
-	members, err := s.store.GetConversationMembers(convID)
+	members, err := s.store.GetGroupMembers(groupID)
 	if err != nil {
-		s.logger.Error("failed to get conversation members", "conversation", convID, "error", err)
+		s.logger.Error("failed to get group members", "group", groupID, "error", err)
 		return
 	}
 
@@ -1479,34 +2196,35 @@ func (s *Server) broadcastToConversation(convID string, msg any) {
 }
 
 // broadcastToRoomExcept sends to all room members except the given device.
-func (s *Server) broadcastToRoomExcept(room, excludeDevice string, msg any) {
+func (s *Server) broadcastToRoomExcept(roomID, excludeDevice string, msg any) {
+	if s.store == nil {
+		return
+	}
+	memberSet := make(map[string]bool)
+	for _, uid := range s.store.GetRoomMemberIDsByRoomID(roomID) {
+		memberSet[uid] = true
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	s.cfg.RLock()
-	defer s.cfg.RUnlock()
 
 	for _, client := range s.clients {
 		if client.DeviceID == excludeDevice {
 			continue
 		}
-		user := s.cfg.Users[client.UserID]
-		for _, r := range user.Rooms {
-			if r == room {
-				client.Encoder.Encode(msg)
-				break
-			}
+		if memberSet[client.UserID] {
+			client.Encoder.Encode(msg)
 		}
 	}
 }
 
-// broadcastToConversationExcept sends to all conversation members except the given device.
-func (s *Server) broadcastToConversationExcept(convID, excludeDevice string, msg any) {
+// broadcastToGroupExcept sends to all group DM members except the given device.
+func (s *Server) broadcastToGroupExcept(groupID, excludeDevice string, msg any) {
 	if s.store == nil {
 		return
 	}
 
-	members, err := s.store.GetConversationMembers(convID)
+	members, err := s.store.GetGroupMembers(groupID)
 	if err != nil {
 		return
 	}
@@ -1532,17 +2250,7 @@ func (s *Server) broadcastToConversationExcept(convID, excludeDevice string, msg
 // handleListPendingKeys returns the list of pending (unapproved) SSH keys.
 // Admin-only — non-admin clients receive an error.
 func (s *Server) handleListPendingKeys(c *Client) {
-	isAdmin := false
-	s.cfg.RLock()
-	for _, a := range s.cfg.Server.Server.Admins {
-		if a == c.UserID {
-			isAdmin = true
-			break
-		}
-	}
-	s.cfg.RUnlock()
-
-	if !isAdmin {
+	if !s.store.IsAdmin(c.UserID) {
 		c.Encoder.Encode(protocol.Error{
 			Type:    "error",
 			Code:    protocol.ErrNotAuthorized,
@@ -1584,19 +2292,8 @@ func (s *Server) handleRoomMembers(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Single lock across auth check + member collection to prevent
-	// TOCTOU race with config reload.
-	s.cfg.RLock()
-	user := s.cfg.Users[c.UserID]
-	inRoom := false
-	for _, r := range user.Rooms {
-		if r == req.Room {
-			inRoom = true
-			break
-		}
-	}
-	if !inRoom {
-		s.cfg.RUnlock()
+	// Check membership via rooms.db (req.Room is a nanoid)
+	if s.store == nil || !s.store.IsRoomMemberByID(req.Room, c.UserID) {
 		c.Encoder.Encode(protocol.Error{
 			Type:    "error",
 			Code:    protocol.ErrNotAuthorized,
@@ -1605,19 +2302,7 @@ func (s *Server) handleRoomMembers(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	var members []string
-	for username, u := range s.cfg.Users {
-		if u.Retired {
-			continue
-		}
-		for _, r := range u.Rooms {
-			if r == req.Room {
-				members = append(members, username)
-				break
-			}
-		}
-	}
-	s.cfg.RUnlock()
+	members := s.store.GetRoomMemberIDsByRoomID(req.Room)
 
 	c.Encoder.Encode(protocol.RoomMembersList{
 		Type:    "room_members_list",

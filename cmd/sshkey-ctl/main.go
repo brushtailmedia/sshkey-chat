@@ -54,25 +54,37 @@ func run() error {
 	case "pending":
 		return cmdPending(dataDir)
 	case "approve":
-		return cmdApprove(configDir, cmdArgs)
+		return cmdApprove(configDir, dataDir, cmdArgs)
 	case "reject":
 		return cmdReject(dataDir, cmdArgs)
 	case "list-users":
-		return cmdListUsers(configDir)
+		return cmdListUsers(dataDir)
 	case "remove-user":
-		return cmdRemoveUser(configDir, cmdArgs)
+		return cmdRemoveUser(dataDir, cmdArgs)
 	case "retire-user":
-		return cmdRetireUser(configDir, cmdArgs)
+		return cmdRetireUser(dataDir, cmdArgs)
 	case "list-retired":
-		return cmdListRetired(configDir)
+		return cmdListRetired(dataDir)
+	case "promote":
+		return cmdPromote(dataDir, cmdArgs)
+	case "demote":
+		return cmdDemote(dataDir, cmdArgs)
 	case "revoke-device":
 		return cmdRevokeDevice(dataDir, cmdArgs)
 	case "restore-device":
 		return cmdRestoreDevice(dataDir, cmdArgs)
 	case "add-to-room":
-		return cmdAddToRoom(configDir, cmdArgs)
+		return cmdAddToRoom(configDir, dataDir, cmdArgs)
 	case "remove-from-room":
-		return cmdRemoveFromRoom(configDir, cmdArgs)
+		return cmdRemoveFromRoom(configDir, dataDir, cmdArgs)
+	case "add-room":
+		return cmdAddRoom(dataDir, cmdArgs)
+	case "list-rooms":
+		return cmdListRooms(dataDir)
+	case "remove-from-group":
+		return cmdRemoveFromGroup(dataDir, cmdArgs)
+	case "list-groups":
+		return cmdListGroups(dataDir)
 	case "status":
 		return cmdStatus(configDir, dataDir)
 	case "host-key":
@@ -98,8 +110,17 @@ Commands:
   remove-user NAME                        Remove a user
   retire-user NAME [--reason REASON]      Retire an account (permanent, for lost keys or compromise)
   list-retired                            List retired accounts
+  add-room --name NAME --topic TOPIC       Create a room
+  list-rooms                              List all rooms
   add-to-room --user USER --room ROOM     Add user to a room
   remove-from-room --user USER --room ROOM  Remove user from a room
+  list-groups                             List all group DMs (and their members)
+  remove-from-group --user USER --group GROUP_ID
+                                          Eject a user from a group DM. Emergency
+                                          escape hatch only — groups are normally
+                                          private peer DMs with no admin management.
+                                          Use when a member is causing problems and
+                                          another member has asked an admin to step in.
   revoke-device --user USER --device DEV  Revoke a device
   restore-device --user USER --device DEV Restore a revoked device
   status                                  Show server overview (users, rooms, data)
@@ -126,7 +147,7 @@ func cmdPending(dataDir string) error {
 	return nil
 }
 
-func cmdApprove(configDir string, args []string) error {
+func cmdApprove(configDir, dataDir string, args []string) error {
 	var displayName, key, rooms string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -176,85 +197,66 @@ func cmdApprove(configDir string, args []string) error {
 		return err
 	}
 
-	// Check against existing users
-	usersPath := filepath.Join(configDir, "users.toml")
-	existingUsers, _ := config.LoadUsers(usersPath)
+	// Open store
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
 
-	for username, user := range existingUsers {
-		// Display name must not match another user's display name
-		if strings.EqualFold(user.DisplayName, displayName) {
-			return fmt.Errorf("display name %q is already in use by %s", displayName, username)
+	// Check for duplicate SSH key (same key already assigned to another user)
+	if existingID := st.GetUserByKey(keyLine); existingID != "" {
+		existing := st.GetUserByID(existingID)
+		return fmt.Errorf("this SSH key is already assigned to user %s (%s). Each key can only belong to one account.", existing.DisplayName, existingID)
+	}
+
+	// Check display name not already in use
+	allUsers := st.GetAllUsersIncludingRetired()
+	for _, u := range allUsers {
+		if strings.EqualFold(u.DisplayName, displayName) {
+			return fmt.Errorf("display name %q is already in use by %s", displayName, u.ID)
 		}
-		// Display name must not match any existing username (server enforces this too)
-		if strings.EqualFold(username, displayName) {
+		if strings.EqualFold(u.ID, displayName) {
 			return fmt.Errorf("display name %q conflicts with an existing username", displayName)
-		}
-	}
-
-	// Check for duplicate SSH key (same key bytes already assigned to another user)
-	parsedBytes := parsed.Marshal()
-	for username, user := range existingUsers {
-		existingParsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(user.Key))
-		if err != nil {
-			continue
-		}
-		if string(existingParsed.Marshal()) == string(parsedBytes) {
-			return fmt.Errorf("this SSH key is already assigned to user %s (%s). Each key can only belong to one account.", user.DisplayName, username)
-		}
-	}
-
-	// Validate rooms exist (warning only — advisory output)
-	if rooms != "" {
-		knownRooms, err := config.LoadRooms(filepath.Join(configDir, "rooms.toml"))
-		if err == nil {
-			for _, r := range strings.Split(rooms, ",") {
-				r = strings.TrimSpace(r)
-				if _, ok := knownRooms[r]; !ok {
-					fmt.Fprintf(os.Stderr, "Warning: room %q does not exist in rooms.toml\n", r)
-				}
-			}
 		}
 	}
 
 	// Generate nanoid username (internal ID, never shown to users)
 	// Guard against astronomically unlikely collision.
 	username := store.GenerateID("usr_")
-	if _, exists := existingUsers[username]; exists {
+	if st.GetUserByID(username) != nil {
 		username = store.GenerateID("usr_")
-		if _, exists := existingUsers[username]; exists {
+		if st.GetUserByID(username) != nil {
 			return fmt.Errorf("nanoid collision (extremely unlikely) — please retry")
 		}
 	}
 
-	// Build the new user entry
-	newUser := config.User{
-		Key:         keyLine,
-		DisplayName: displayName,
+	// Insert user into users.db
+	if err := st.InsertUser(username, keyLine, displayName); err != nil {
+		return fmt.Errorf("insert user: %w", err)
 	}
+
+	// Add room memberships to rooms.db
 	if rooms != "" {
 		for _, r := range strings.Split(rooms, ",") {
 			r = strings.TrimSpace(r)
-			if r != "" {
-				newUser.Rooms = append(newUser.Rooms, r)
+			if r == "" {
+				continue
 			}
+			roomRecord, _ := st.GetRoomByDisplayName(r)
+			if roomRecord == nil {
+				fmt.Fprintf(os.Stderr, "Warning: room %q does not exist in rooms.db\n", r)
+				continue
+			}
+			st.AddRoomMember(roomRecord.ID, username, 0)
 		}
-	}
-
-	// Write directly to users.toml (atomic: temp file + rename)
-	if existingUsers == nil {
-		existingUsers = make(map[string]config.User)
-	}
-	existingUsers[username] = newUser
-
-	if err := config.WriteUsers(usersPath, existingUsers); err != nil {
-		return fmt.Errorf("write users.toml: %w", err)
 	}
 
 	fmt.Printf("Approved %s\n", displayName)
 	fmt.Printf("  Username:    %s\n", username)
 	fmt.Printf("  Fingerprint: %s\n", ssh.FingerprintSHA256(parsed))
-	if len(newUser.Rooms) > 0 {
-		fmt.Printf("  Rooms:       %s\n", strings.Join(newUser.Rooms, ", "))
+	if rooms != "" {
+		fmt.Printf("  Rooms:       %s\n", rooms)
 	}
 	fmt.Println("\nThe server will detect the change and apply it automatically.")
 	return nil
@@ -314,32 +316,38 @@ func cmdReject(dataDir string, args []string) error {
 	return nil
 }
 
-func cmdListUsers(configDir string) error {
-	users, err := config.LoadUsers(filepath.Join(configDir, "users.toml"))
+func cmdListUsers(dataDir string) error {
+	st, err := store.Open(dataDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("open store: %w", err)
 	}
-	for name, user := range users {
-		fmt.Printf("%-20s rooms=[%s]  display_name=%q\n",
-			name, strings.Join(user.Rooms, ", "), user.DisplayName)
+	defer st.Close()
+
+	users := st.GetAllUsersIncludingRetired()
+	for _, u := range users {
+		status := ""
+		if u.Retired {
+			status = "  (retired)"
+		}
+		fmt.Printf("%-20s display_name=%q%s\n", u.ID, u.DisplayName, status)
 	}
 	return nil
 }
 
-func cmdRemoveUser(configDir string, args []string) error {
+func cmdRemoveUser(dataDir string, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: remove-user NAME")
 	}
 	name := args[0]
 
-	usersPath := filepath.Join(configDir, "users.toml")
-	users, err := config.LoadUsers(usersPath)
+	st, err := store.Open(dataDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("open store: %w", err)
 	}
+	defer st.Close()
 
-	u, ok := users[name]
-	if !ok {
+	u := st.GetUserByID(name)
+	if u == nil {
 		return fmt.Errorf("user %q not found", name)
 	}
 
@@ -348,16 +356,16 @@ func cmdRemoveUser(configDir string, args []string) error {
 		fmt.Fprintf(os.Stderr, "Use retire-user instead if you want to preserve the record.\n")
 	}
 
-	delete(users, name)
-	if err := config.WriteUsers(usersPath, users); err != nil {
-		return fmt.Errorf("write users.toml: %w", err)
+	if err := st.DeleteUser(name); err != nil {
+		return fmt.Errorf("delete user: %w", err)
 	}
+	st.RemoveAllRoomMembers(name)
 
 	fmt.Printf("Removed %s (%s).\n", u.DisplayName, name)
 	return nil
 }
 
-func cmdRetireUser(configDir string, args []string) error {
+func cmdRetireUser(dataDir string, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: retire-user NAME [--reason REASON]")
 	}
@@ -370,28 +378,22 @@ func cmdRetireUser(configDir string, args []string) error {
 		}
 	}
 
-	usersPath := filepath.Join(configDir, "users.toml")
-	users, err := config.LoadUsers(usersPath)
+	st, err := store.Open(dataDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("open store: %w", err)
 	}
+	defer st.Close()
 
-	u, ok := users[name]
-	if !ok {
+	u := st.GetUserByID(name)
+	if u == nil {
 		return fmt.Errorf("user %q not found", name)
 	}
 	if u.Retired {
 		return fmt.Errorf("user %q is already retired (at %s, reason: %s)", name, u.RetiredAt, u.RetiredReason)
 	}
 
-	u.Retired = true
-	u.RetiredAt = time.Now().UTC().Format(time.RFC3339)
-	u.RetiredReason = reason
-	u.Rooms = nil // retired users belong to no rooms
-	users[name] = u
-
-	if err := config.WriteUsers(usersPath, users); err != nil {
-		return fmt.Errorf("write users.toml: %w", err)
+	if err := st.SetUserRetired(name, reason); err != nil {
+		return fmt.Errorf("retire user: %w", err)
 	}
 
 	fmt.Printf("User %q retired (reason: %s).\n", name, reason)
@@ -400,27 +402,74 @@ func cmdRetireUser(configDir string, args []string) error {
 	return nil
 }
 
-func cmdListRetired(configDir string) error {
-	users, err := config.LoadUsers(filepath.Join(configDir, "users.toml"))
+func cmdListRetired(dataDir string) error {
+	st, err := store.Open(dataDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("open store: %w", err)
 	}
-	found := false
-	for name, user := range users {
-		if !user.Retired {
-			continue
-		}
-		found = true
-		fmt.Printf("%-20s retired_at=%s  reason=%s  display_name=%q\n",
-			name, user.RetiredAt, user.RetiredReason, user.DisplayName)
-	}
-	if !found {
+	defer st.Close()
+
+	retired := st.GetAllRetiredUsers()
+	if len(retired) == 0 {
 		fmt.Println("No retired accounts.")
+		return nil
+	}
+	for _, u := range retired {
+		fmt.Printf("%-20s retired_at=%s  reason=%s  display_name=%q\n",
+			u.ID, u.RetiredAt, u.RetiredReason, u.DisplayName)
 	}
 	return nil
 }
 
-func cmdAddToRoom(configDir string, args []string) error {
+func cmdPromote(dataDir string, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: promote USER_ID")
+	}
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	u := st.GetUserByID(args[0])
+	if u == nil {
+		return fmt.Errorf("user %q not found", args[0])
+	}
+	if u.Admin {
+		return fmt.Errorf("user %q is already an admin", args[0])
+	}
+	if err := st.SetAdmin(args[0], true); err != nil {
+		return fmt.Errorf("promote: %w", err)
+	}
+	fmt.Printf("Promoted %s (%s) to admin.\n", u.DisplayName, args[0])
+	return nil
+}
+
+func cmdDemote(dataDir string, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: demote USER_ID")
+	}
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	u := st.GetUserByID(args[0])
+	if u == nil {
+		return fmt.Errorf("user %q not found", args[0])
+	}
+	if !u.Admin {
+		return fmt.Errorf("user %q is not an admin", args[0])
+	}
+	if err := st.SetAdmin(args[0], false); err != nil {
+		return fmt.Errorf("demote: %w", err)
+	}
+	fmt.Printf("Demoted %s (%s) from admin.\n", u.DisplayName, args[0])
+	return nil
+}
+
+func cmdAddToRoom(configDir, dataDir string, args []string) error {
 	var user, room string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -434,49 +483,41 @@ func cmdAddToRoom(configDir string, args []string) error {
 		return fmt.Errorf("usage: add-to-room --user USER --room ROOM")
 	}
 
-	usersPath := filepath.Join(configDir, "users.toml")
-	users, err := config.LoadUsers(usersPath)
+	// Validate user exists
+	st, err := store.Open(dataDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("open store: %w", err)
 	}
+	defer st.Close()
 
-	u, ok := users[user]
-	if !ok {
+	u := st.GetUserByID(user)
+	if u == nil {
 		return fmt.Errorf("user %q not found", user)
 	}
 	if u.Retired {
 		return fmt.Errorf("user %q is retired and cannot be added to rooms", user)
 	}
 
-	// Validate room exists
-	rooms, err := config.LoadRooms(filepath.Join(configDir, "rooms.toml"))
-	if err != nil {
-		return fmt.Errorf("load rooms.toml: %w", err)
-	}
-	if _, ok := rooms[room]; !ok {
-		return fmt.Errorf("room %q does not exist in rooms.toml", room)
+	// Validate room exists in rooms.db
+	roomRecord, _ := st.GetRoomByDisplayName(room)
+	if roomRecord == nil {
+		return fmt.Errorf("room %q does not exist", room)
 	}
 
 	// Check not already a member
-	for _, r := range u.Rooms {
-		if r == room {
-			return fmt.Errorf("user %q is already in room %q", user, room)
-		}
+	if st.IsRoomMemberByID(roomRecord.ID, user) {
+		return fmt.Errorf("user %q is already in room %q", user, room)
 	}
 
-	u.Rooms = append(u.Rooms, room)
-	users[user] = u
-
-	if err := config.WriteUsers(usersPath, users); err != nil {
-		return fmt.Errorf("write users.toml: %w", err)
+	if err := st.AddRoomMember(roomRecord.ID, user, 0); err != nil {
+		return fmt.Errorf("add member: %w", err)
 	}
 
 	fmt.Printf("Added %s (%s) to room %q.\n", u.DisplayName, user, room)
-	fmt.Println("The server will detect the change and broadcast a join event automatically.")
 	return nil
 }
 
-func cmdRemoveFromRoom(configDir string, args []string) error {
+func cmdRemoveFromRoom(configDir, dataDir string, args []string) error {
 	var user, room string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -490,40 +531,272 @@ func cmdRemoveFromRoom(configDir string, args []string) error {
 		return fmt.Errorf("usage: remove-from-room --user USER --room ROOM")
 	}
 
-	usersPath := filepath.Join(configDir, "users.toml")
-	users, err := config.LoadUsers(usersPath)
+	// Validate user exists
+	st, err := store.Open(dataDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("open store: %w", err)
 	}
+	defer st.Close()
 
-	u, ok := users[user]
-	if !ok {
+	u := st.GetUserByID(user)
+	if u == nil {
 		return fmt.Errorf("user %q not found", user)
 	}
 
-	// Find and remove the room
-	found := false
-	filtered := u.Rooms[:0]
-	for _, r := range u.Rooms {
-		if r == room {
-			found = true
-		} else {
-			filtered = append(filtered, r)
-		}
+	roomRecord, _ := st.GetRoomByDisplayName(room)
+	if roomRecord == nil {
+		return fmt.Errorf("room %q does not exist", room)
 	}
-	if !found {
+
+	if !st.IsRoomMemberByID(roomRecord.ID, user) {
 		return fmt.Errorf("user %q is not in room %q", user, room)
 	}
 
-	u.Rooms = filtered
-	users[user] = u
-
-	if err := config.WriteUsers(usersPath, users); err != nil {
-		return fmt.Errorf("write users.toml: %w", err)
+	if err := st.RemoveRoomMember(roomRecord.ID, user); err != nil {
+		return fmt.Errorf("remove member: %w", err)
 	}
 
 	fmt.Printf("Removed %s (%s) from room %q.\n", u.DisplayName, user, room)
-	fmt.Println("The server will detect the change, broadcast a leave event, and trigger epoch rotation.")
+	return nil
+}
+
+func cmdAddRoom(dataDir string, args []string) error {
+	var name, topic string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--name":
+			if i+1 < len(args) { name = args[i+1]; i++ }
+		case "--topic":
+			if i+1 < len(args) { topic = args[i+1]; i++ }
+		}
+	}
+	if name == "" {
+		return fmt.Errorf("usage: add-room --name NAME [--topic TOPIC]")
+	}
+
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	// Check name not taken
+	existing, _ := st.GetRoomByDisplayName(name)
+	if existing != nil {
+		return fmt.Errorf("room %q already exists", name)
+	}
+
+	id := store.GenerateRoomID()
+	_, err = st.RoomsDB().Exec(
+		`INSERT INTO rooms (id, display_name, topic) VALUES (?, ?, ?)`,
+		id, name, topic)
+	if err != nil {
+		return fmt.Errorf("create room: %w", err)
+	}
+
+	fmt.Printf("Created room %q (id: %s)\n", name, id)
+	return nil
+}
+
+func cmdListRooms(dataDir string) error {
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	rooms, err := st.GetAllRooms()
+	if err != nil {
+		return fmt.Errorf("get rooms: %w", err)
+	}
+
+	if len(rooms) == 0 {
+		fmt.Println("No rooms.")
+		return nil
+	}
+
+	for _, r := range rooms {
+		members := st.GetRoomMemberIDsByRoomID(r.ID)
+		status := ""
+		if r.Retired {
+			status = " (retired)"
+		}
+		fmt.Printf("%-30s members=%d  topic=%q%s\n", r.DisplayName, len(members), r.Topic, status)
+	}
+	return nil
+}
+
+// cmdListGroups dumps every group DM and its current members. Used by
+// admins to look up a group ID for the remove-from-group escape hatch.
+// Group IDs are nanoid-style and not human-friendly, so this is the
+// primary way to find the right group when responding to a moderation
+// request.
+func cmdListGroups(dataDir string) error {
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	rows, err := st.DataDB().Query(
+		`SELECT id, COALESCE(name, '') FROM group_conversations ORDER BY id`,
+	)
+	if err != nil {
+		return fmt.Errorf("query groups: %w", err)
+	}
+	defer rows.Close()
+
+	type groupRow struct {
+		id   string
+		name string
+	}
+	var groups []groupRow
+	for rows.Next() {
+		var g groupRow
+		if err := rows.Scan(&g.id, &g.name); err != nil {
+			return fmt.Errorf("scan: %w", err)
+		}
+		groups = append(groups, g)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("rows: %w", err)
+	}
+
+	if len(groups) == 0 {
+		fmt.Println("No groups.")
+		return nil
+	}
+
+	for _, g := range groups {
+		members, _ := st.GetGroupMembers(g.id)
+		name := g.name
+		if name == "" {
+			name = "(unnamed)"
+		}
+		fmt.Printf("%-25s name=%q members=%d %v\n", g.id, name, len(members), members)
+	}
+	return nil
+}
+
+// cmdRemoveFromGroup is the admin escape hatch for removing a member
+// from a group DM when normal peer-to-peer membership control isn't
+// enough — for example, when a member is causing problems and another
+// member has asked an admin to intervene.
+//
+// IMPORTANT design context: groups are private peer DMs and have NO
+// regular admin management. Membership is fixed at create time, and the
+// only mutations are self-leave / self-delete / retirement. This command
+// exists ONLY for the abuse / moderation edge case and is deliberately
+// NOT exposed via the protocol — it lives in the local CLI so that
+// triggering it requires filesystem access to the server's data dir.
+//
+// Mechanics: directly mutates group_members like other CLI commands
+// (matches the pattern of remove-from-room and retire-user). The kicked
+// user finds out via the multi-device offline catchup reconciliation on
+// their next reconnect (their group_list won't include the group, the
+// client marks it locally as left). Currently-connected sessions of the
+// kicked user keep the group in their sidebar until they reconnect; any
+// send attempt against the group returns ErrUnknownGroup.
+//
+// If removing this user empties the group, the cleanup cascade runs
+// (DeleteGroupConversation drops the row + group-<id>.db file + WAL
+// sidecars).
+func cmdRemoveFromGroup(dataDir string, args []string) error {
+	var user, group string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--user":
+			if i+1 < len(args) {
+				user = args[i+1]
+				i++
+			}
+		case "--group":
+			if i+1 < len(args) {
+				group = args[i+1]
+				i++
+			}
+		}
+	}
+	if user == "" || group == "" {
+		return fmt.Errorf("usage: remove-from-group --user USER --group GROUP_ID\n" +
+			"(use list-groups to find the group ID)")
+	}
+
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	// Validate user exists. We don't reject retired users — if a retired
+	// user is somehow still in a group, the admin can still kick them.
+	u := st.GetUserByID(user)
+	if u == nil {
+		return fmt.Errorf("user %q not found", user)
+	}
+
+	// Validate group exists and the user is currently a member. The
+	// member check gives a better error than silently no-op'ing.
+	isMember, err := st.IsGroupMember(group, user)
+	if err != nil {
+		return fmt.Errorf("check membership: %w", err)
+	}
+	if !isMember {
+		return fmt.Errorf("user %q is not a member of group %q", user, group)
+	}
+
+	if err := st.RemoveGroupMember(group, user); err != nil {
+		return fmt.Errorf("remove member: %w", err)
+	}
+
+	// Queue the kick for the running server's broadcast surface. The
+	// server's admin-kick processor (a polling goroutine) reads this
+	// queue every few seconds and dispatches each row through the same
+	// performGroupLeave path that handleLeaveGroup uses, with reason
+	// "admin". This is what gives the kicked user a live group_left
+	// echo (so their TUI shows "You were removed from group X") and
+	// the remaining members a group_event{leave, reason: admin}
+	// (so they see "alice was removed by an admin").
+	//
+	// Idempotent at the data layer — even if the server is down, the
+	// kick has already taken effect via the RemoveGroupMember call
+	// above. The queue row sits in the table until the server picks it
+	// up on next start.
+	if err := st.RecordPendingAdminKick(user, group, "admin"); err != nil {
+		// Non-fatal: the membership removal already succeeded, this is
+		// just the live notification path.
+		fmt.Printf("Warning: failed to queue admin kick broadcast: %v\n", err)
+		fmt.Println("The kick still took effect at the data layer; affected")
+		fmt.Println("clients will see it on next reconnect via reconciliation.")
+	}
+
+	// Last-member cleanup: if removing this user emptied the group, drop
+	// the group row + dm file. Same path the live handlers use.
+	remaining, err := st.GetGroupMembers(group)
+	if err != nil {
+		return fmt.Errorf("check remaining members: %w", err)
+	}
+	if len(remaining) == 0 {
+		if err := st.DeleteGroupConversation(group); err != nil {
+			return fmt.Errorf("cleanup empty group: %w", err)
+		}
+		fmt.Printf("Removed %s (%s) from group %s.\n", u.DisplayName, user, group)
+		fmt.Println("Group was emptied by this removal — cleaned up automatically.")
+		fmt.Println("The kicked user will see the leave notification on their")
+		fmt.Println("connected sessions within ~5 seconds (live broadcast path)")
+		fmt.Println("or on their next reconnect (offline catchup path).")
+		return nil
+	}
+
+	fmt.Printf("Removed %s (%s) from group %s.\n", u.DisplayName, user, group)
+	fmt.Printf("Group has %d remaining members.\n", len(remaining))
+	fmt.Println()
+	fmt.Println("The kicked user will see a 'You were removed from group X'")
+	fmt.Println("notification on their connected sessions within ~5 seconds")
+	fmt.Println("(via the running server's admin-kick processor). Other")
+	fmt.Println("members will see a group_event{leave} broadcast in the same")
+	fmt.Println("window. Sessions that are offline now will catch up via the")
+	fmt.Println("usual group_list reconciliation on their next reconnect.")
 	return nil
 }
 
@@ -588,25 +861,19 @@ func cmdRestoreDevice(dataDir string, args []string) error {
 }
 
 func cmdStatus(configDir, dataDir string) error {
-	// Users
-	users, err := config.LoadUsers(filepath.Join(configDir, "users.toml"))
+	// Users + Rooms from store
+	st, err := store.Open(dataDir)
 	if err != nil {
-		return fmt.Errorf("load users: %w", err)
+		return fmt.Errorf("open store: %w", err)
 	}
-	active := 0
-	retired := 0
-	for _, u := range users {
-		if u.Retired {
-			retired++
-		} else {
-			active++
-		}
-	}
+	defer st.Close()
 
-	// Rooms
-	rooms, err := config.LoadRooms(filepath.Join(configDir, "rooms.toml"))
+	active := len(st.GetAllUsers())
+	retired := len(st.GetAllRetiredUsers())
+
+	rooms, err := st.GetAllRooms()
 	if err != nil {
-		return fmt.Errorf("load rooms: %w", err)
+		return fmt.Errorf("get rooms: %w", err)
 	}
 
 	// Pending keys
@@ -723,9 +990,12 @@ func cmdPurge(dataDir string, args []string) error {
 		if strings.HasPrefix(name, "room-") {
 			roomName := strings.TrimPrefix(strings.TrimSuffix(name, ".db"), "room-")
 			db, err = st.RoomDB(roomName)
-		} else if strings.HasPrefix(name, "conv-") {
-			convID := strings.TrimPrefix(strings.TrimSuffix(name, ".db"), "conv-")
-			db, err = st.ConvDB(convID)
+		} else if strings.HasPrefix(name, "group-") {
+			groupID := strings.TrimPrefix(strings.TrimSuffix(name, ".db"), "group-")
+			db, err = st.GroupDB(groupID)
+		} else if strings.HasPrefix(name, "dm-") {
+			dmID := strings.TrimPrefix(strings.TrimSuffix(name, ".db"), "dm-")
+			db, err = st.DMDB(dmID)
 		} else {
 			continue
 		}

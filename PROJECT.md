@@ -25,8 +25,8 @@ Server machine
 ├── sshkey-ctl            -- local admin tool, reads/writes config + pending log
 ├── /etc/sshkey-chat/
 │   ├── server.toml         -- server config (port, retention settings)
-│   ├── users.toml          -- user definitions (key, name, rooms, admin flag)
-│   └── rooms.toml          -- room definitions (name, topic)
+│   ├── users.toml          -- seed file (first-run only, then users.db is source of truth)
+│   └── rooms.toml          -- seed file (first-run only, then rooms.db is source of truth)
 └── /var/sshkey-chat/
     ├── pending-keys.log    -- unrecognised keys that tried to connect
     └── data/               -- SQLite DBs (encrypted blobs -- rooms, DMs, data.db)
@@ -34,7 +34,7 @@ Server machine
 
 **Port separation:**
 - `:22` -- system sshd, untouched. Admin SSHs in for server management, config editing, running sshkey-ctl
-- `:2222` -- chat app. Own SSH listener, own key store (from `users.toml`), completely independent of system SSH
+- `:2222` -- chat app. Own SSH listener, own key store (from `users.db`), completely independent of system SSH
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -71,7 +71,7 @@ No raw SSH fallback. Server requires a protocol-speaking client.
 ```
 SSH connect (:2222)
     │
-    ├── Key recognised (in users.toml)
+    ├── Key recognised (in users.db)
     │   ├── Server sends: {"protocol":"sshkey-chat","version":1}
     │   ├── Client responds with valid handshake
     │   │   └── proceed with protocol
@@ -189,7 +189,7 @@ No single layer is perfect. Together they provide meaningful E2E security withou
 
 ### Identity model
 
-**Your Ed25519 SSH key IS your account.** There is no separate account identifier, no password, no recovery mechanism on the server. The server authenticates by matching the raw key bytes against `users.toml` entries — if the key matches, you are that user; if not, the connection is rejected.
+**Your Ed25519 SSH key IS your account.** There is no separate account identifier, no password, no recovery mechanism on the server. The server authenticates by matching the raw key bytes against `users.db` entries — if the key matches, you are that user; if not, the connection is rejected.
 
 **Keys are permanent.** There is no in-band key rotation protocol. A key's relationship to a username is lifelong. When that relationship needs to end, the account is **retired** — monotonic, irreversible — and a new account is created (potentially under the same username) via admin action.
 
@@ -213,9 +213,9 @@ The cost of not supporting rotation is that legitimate key changes (hardware upg
 
 ### Retirement flow
 
-On retirement (triggered by `retire_me` from the client, admin-editing `users.toml`, or `sshkey-ctl retire-user`):
+On retirement (triggered by `retire_me` from the client, or `sshkey-ctl retire-user`):
 
-1. `users.toml` entry is updated to `retired = true, retired_at = <ISO8601>, retired_reason = <...>` and the user's room list is cleared.
+1. `users.db` record is updated: `retired = 1, retired_at = <ISO8601>, retired_reason = <...>`, display name suffixed, and room memberships cleared in `rooms.db`.
 2. The server's config watcher detects the change (fsnotify) and fires the retirement transition handler.
 3. SSH authentication henceforth rejects the key with "account retired".
 4. All active sessions for that user are terminated with `user_retired` error code.
@@ -234,11 +234,11 @@ If both the legitimate user and an attacker with the stolen key attempt `retire_
 
 ### Username reuse
 
-Retired user entries remain in `users.toml` (with `retired = true`) for historical message attribution. To reuse the name for a new account, the admin moves the retired entry (e.g., renames it to `[alice.2026-04]`) and adds a fresh `[alice]` with the new key. The legitimate user's client sees the new fingerprint via key-pinning and gets the standard "key has changed — verify" warning, which is the correct behavior (they should verify the new account's safety number out-of-band).
+Retired user entries remain in `users.db` (with `retired = 1`) for historical message attribution. The display name is suffixed (e.g., "Alice" → "Alice_V1St") to free the name for reuse. To create a new account, the admin runs `sshkey-ctl approve` with the new key. The legitimate user's client sees the new fingerprint via key-pinning and gets the standard "key has changed — verify" warning, which is the correct behavior (they should verify the new account's safety number out-of-band).
 
 ### Key loss
 
-If the user loses their key entirely (no backup, no other device with the key), they cannot self-retire. They contact the admin out-of-band, who sets `retired = true, retired_reason = "key_lost"` directly in `users.toml` or runs `sshkey-ctl retire-user`. The admin then adds a fresh account entry with the new key.
+If the user loses their key entirely (no backup, no other device with the key), they cannot self-retire. They contact the admin out-of-band, who runs `sshkey-ctl retire-user --reason key_lost`. The admin then runs `sshkey-ctl approve` to create a fresh account with the new key.
 
 **The TUI enforces key backup** at account creation (wizard backup step with explicit "I understand there is no recovery" acknowledgement) to make this failure mode as rare as possible.
 
@@ -1090,7 +1090,7 @@ All admin tasks are done via regular SSH (port 22) on the server. No admin comma
 [server]
 port = 2222
 bind = "0.0.0.0"
-admins = ["alice", "bob"]
+# Admin status is managed via users.db (sshkey-ctl promote/demote)
 
 [messages]
 max_body_size = "16KB"
@@ -1125,7 +1125,8 @@ grace_period = "10s"             # time to finish in-flight transfers on shutdow
 ```
 
 ```toml
-# /etc/sshkey-chat/users.toml
+# /etc/sshkey-chat/users.toml (SEED FILE — processed on first server start only)
+# After first start, manage users via: sshkey-ctl approve/retire-user/promote/demote
 [alice]
 key = "ssh-ed25519 AAAA...abc"       # one key per user, always
 display_name = "Alice Chen"
@@ -1138,7 +1139,8 @@ rooms = ["general"]
 ```
 
 ```toml
-# /etc/sshkey-chat/rooms.toml
+# /etc/sshkey-chat/rooms.toml (SEED FILE — processed on first server start only)
+# After first start, manage rooms via: sshkey-ctl add-room/add-to-room/remove-from-room
 [general]
 topic = "General chat"
 
@@ -1224,18 +1226,18 @@ Clients receiving `server_shutdown` should:
 
 ### Config File Hot Reload
 
-Server watches config files via fsnotify and reloads on SIGHUP.
+User and room data lives in SQLite databases (`users.db`, `rooms.db`). Changes via `sshkey-ctl` CLI take effect immediately — the server reads from DB on demand, no reload needed. Server watches `server.toml` via fsnotify for hot-reload of runtime settings.
 
-**Hot-reloadable (no restart):**
-- `users.toml` -- add/remove users, change room assignments, update display names
-- `rooms.toml` -- add/remove rooms, change topics
-- `server.toml`: `admins`, `[retention]`, `[files]`, `[rate_limits]`, `[messages]`, `[sync]`
+**Immediate (via `sshkey-ctl`, no restart):**
+- User management — `approve`, `retire-user`, `remove-user`, `promote`, `demote`
+- Room management — `add-room`, `add-to-room`, `remove-from-room`
+
+**Hot-reloadable (server.toml, no restart):**
+- `[retention]`, `[files]`, `[rate_limits]`, `[messages]`, `[sync]`, `[devices]`, `[logging]`
 
 **Requires restart:**
 - `server.toml`: `port`, `bind` (can't rebind a listening socket)
 - SSH host key changes
-
-On reload, server logs what changed and notifies affected connected clients (e.g., new room access → send updated `room_list`; removed from room → send `room_event` leave).
 
 ### Admin Audit Log
 
@@ -1315,9 +1317,9 @@ format = "json"                   # structured JSON, one object per line
 
 ## Rooms / Channels
 
-- **Persistent rooms** -- survive server restarts (defined in `rooms.toml`)
-- **Room-specific permissions** -- per-user room access defined in `users.toml`
-- **Topic / description** -- settable per room in `rooms.toml`
+- **Persistent rooms** -- stored in `rooms.db`, survive server restarts. Room identity is nanoid-based (`room_` prefix), display names are mutable.
+- **Room-specific permissions** -- per-user room access managed via `rooms.db` (`room_members` table), controlled by `sshkey-ctl add-to-room/remove-from-room`
+- **Topic / description** -- stored per room in `rooms.db`
 - **Room list on connect** -- client receives list of rooms the user has access to
 
 ---
@@ -1847,7 +1849,7 @@ Two-layer identity system: **usernames** (immutable internal IDs) and **display 
 
 ### Usernames (internal)
 
-- The `[alice]` section key in `users.toml` is the **immutable username**
+- Nanoid IDs (`usr_` prefix) generated on `sshkey-ctl approve`, stored in `users.db`
 - Stored in every DB table as `sender`, `user`, primary keys
 - Never changes after account creation — no bulk DB updates needed
 - Retired usernames cannot be reused (prevents DM/history conflicts)

@@ -38,28 +38,28 @@ func newEpochManager() *epochManager {
 }
 
 // getOrCreate returns the epoch state for a room, creating if needed.
-func (em *epochManager) getOrCreate(room string, currentEpoch int64) *roomEpochState {
+func (em *epochManager) getOrCreate(roomID string, currentEpoch int64) *roomEpochState {
 	em.mu.Lock()
 	defer em.mu.Unlock()
 
-	state, ok := em.rooms[room]
+	state, ok := em.rooms[roomID]
 	if !ok {
 		state = &roomEpochState{
 			currentEpoch:   currentEpoch,
 			confirmedEpoch: currentEpoch,
 			lastRotation:   time.Now(),
 		}
-		em.rooms[room] = state
+		em.rooms[roomID] = state
 	}
 	return state
 }
 
 // recordMessage increments the message count and returns true if rotation should be triggered.
-func (em *epochManager) recordMessage(room string) bool {
+func (em *epochManager) recordMessage(roomID string) bool {
 	em.mu.Lock()
 	defer em.mu.Unlock()
 
-	state, ok := em.rooms[room]
+	state, ok := em.rooms[roomID]
 	if !ok {
 		return false
 	}
@@ -81,11 +81,11 @@ func (em *epochManager) recordMessage(room string) bool {
 
 // startRotation marks a rotation as pending. Returns the new epoch number.
 // onTimeout is called if the rotation isn't completed within 5 seconds.
-func (em *epochManager) startRotation(room string, onTimeout func()) int64 {
+func (em *epochManager) startRotation(roomID string, onTimeout func()) int64 {
 	em.mu.Lock()
 	defer em.mu.Unlock()
 
-	state := em.rooms[room]
+	state := em.rooms[roomID]
 	if state == nil {
 		return 0
 	}
@@ -116,11 +116,11 @@ func (em *epochManager) startRotation(room string, onTimeout func()) int64 {
 }
 
 // completeRotation marks the rotation as done and advances the epoch.
-func (em *epochManager) completeRotation(room string, epoch int64) bool {
+func (em *epochManager) completeRotation(roomID string, epoch int64) bool {
 	em.mu.Lock()
 	defer em.mu.Unlock()
 
-	state := em.rooms[room]
+	state := em.rooms[roomID]
 	if state == nil || !state.pendingRotation || state.pendingEpoch != epoch {
 		return false
 	}
@@ -140,11 +140,11 @@ func (em *epochManager) completeRotation(room string, epoch int64) bool {
 }
 
 // cancelRotation cancels a pending rotation (e.g., stale member list).
-func (em *epochManager) cancelRotation(room string) {
+func (em *epochManager) cancelRotation(roomID string) {
 	em.mu.Lock()
 	defer em.mu.Unlock()
 
-	state := em.rooms[room]
+	state := em.rooms[roomID]
 	if state != nil {
 		if state.pendingTimer != nil {
 			state.pendingTimer.Stop()
@@ -156,11 +156,11 @@ func (em *epochManager) cancelRotation(room string) {
 }
 
 // currentEpoch returns the current epoch for a room.
-func (em *epochManager) currentEpochNum(room string) int64 {
+func (em *epochManager) currentEpochNum(roomID string) int64 {
 	em.mu.Lock()
 	defer em.mu.Unlock()
 
-	state := em.rooms[room]
+	state := em.rooms[roomID]
 	if state == nil {
 		return 0
 	}
@@ -169,11 +169,11 @@ func (em *epochManager) currentEpochNum(room string) int64 {
 
 // confirmedEpochNum returns the confirmed (distributable) epoch for a room.
 // Messages with epoch > confirmedEpoch are rejected.
-func (em *epochManager) confirmedEpochNum(room string) int64 {
+func (em *epochManager) confirmedEpochNum(roomID string) int64 {
 	em.mu.Lock()
 	defer em.mu.Unlock()
 
-	state := em.rooms[room]
+	state := em.rooms[roomID]
 	if state == nil {
 		return 0
 	}
@@ -186,36 +186,34 @@ func (s *Server) sendEpochKeys(c *Client) {
 		return
 	}
 
-	s.cfg.RLock()
-	rooms := s.cfg.Users[c.UserID].Rooms
-	s.cfg.RUnlock()
+	rooms := s.store.GetUserRoomIDs(c.UserID)
 
-	for _, room := range rooms {
-		epoch := s.epochs.currentEpochNum(room)
+	for _, roomID := range rooms {
+		epoch := s.epochs.currentEpochNum(roomID)
 		if epoch == 0 {
 			// Try to load from DB
-			dbEpoch, err := s.store.GetCurrentEpoch(room)
+			dbEpoch, err := s.store.GetCurrentEpoch(roomID)
 			if err == nil && dbEpoch > 0 {
 				epoch = dbEpoch
-				s.epochs.getOrCreate(room, epoch)
+				s.epochs.getOrCreate(roomID, epoch)
 			}
 		}
 		if epoch == 0 {
 			// Fresh room with no epoch — mark for initial rotation after message loop starts.
 			// Don't trigger here — the message loop hasn't started yet, so the client
 			// can't respond to epoch_trigger. Store a flag and trigger on first message.
-			s.epochs.getOrCreate(room, 0)
+			s.epochs.getOrCreate(roomID, 0)
 			continue
 		}
 
-		wrappedKey, err := s.store.GetEpochKey(room, epoch, c.UserID)
+		wrappedKey, err := s.store.GetEpochKey(roomID, epoch, c.UserID)
 		if err != nil {
 			continue // no key for this user (new member, needs rotation)
 		}
 
 		c.Encoder.Encode(protocol.EpochKey{
 			Type:       "epoch_key",
-			Room:       room,
+			Room:       roomID,
 			Epoch:      epoch,
 			WrappedKey: wrappedKey,
 		})
@@ -223,12 +221,12 @@ func (s *Server) sendEpochKeys(c *Client) {
 }
 
 // triggerEpochRotation sends an epoch_trigger to a client and handles the response.
-func (s *Server) triggerEpochRotation(c *Client, room string, reason string) {
-	newEpoch := s.epochs.startRotation(room, func() {
+func (s *Server) triggerEpochRotation(c *Client, roomID string, reason string) {
+	newEpoch := s.epochs.startRotation(roomID, func() {
 		// Timeout callback — rotation wasn't completed in 5 seconds.
 		// Cancel and let the next sender pick it up via checkRotationNeeded.
 		s.logger.Warn("epoch rotation timed out",
-			"room", room,
+			"room", roomID,
 			"triggered_by", c.UserID,
 			"trigger", reason,
 		)
@@ -238,23 +236,19 @@ func (s *Server) triggerEpochRotation(c *Client, room string, reason string) {
 	}
 
 	// Build member list with public keys
-	s.cfg.RLock()
+	memberIDs := s.store.GetRoomMemberIDsByRoomID(roomID)
 	var members []protocol.MemberKey
-	for username, user := range s.cfg.Users {
-		for _, r := range user.Rooms {
-			if r == room {
-				members = append(members, protocol.MemberKey{
-					User:   username,
-					PubKey: user.Key,
-				})
-				break
-			}
+	for _, uid := range memberIDs {
+		if key := s.store.GetUserKey(uid); key != "" {
+			members = append(members, protocol.MemberKey{
+				User:   uid,
+				PubKey: key,
+			})
 		}
 	}
-	s.cfg.RUnlock()
 
 	s.logger.Info("epoch trigger",
-		"room", room,
+		"room", roomID,
 		"new_epoch", newEpoch,
 		"triggered_by", c.UserID,
 		"trigger", reason,
@@ -263,7 +257,7 @@ func (s *Server) triggerEpochRotation(c *Client, room string, reason string) {
 
 	c.Encoder.Encode(protocol.EpochTrigger{
 		Type:     "epoch_trigger",
-		Room:     room,
+		Room:     roomID,
 		NewEpoch: newEpoch,
 		Members:  members,
 	})
@@ -292,17 +286,7 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 	s.epochs.mu.Unlock()
 
 	// Validate member list hasn't changed (compare member_hash)
-	s.cfg.RLock()
-	var currentMembers []string
-	for username, user := range s.cfg.Users {
-		for _, r := range user.Rooms {
-			if r == msg.Room {
-				currentMembers = append(currentMembers, username)
-				break
-			}
-		}
-	}
-	s.cfg.RUnlock()
+	currentMembers := s.store.GetRoomMemberIDsByRoomID(msg.Room)
 
 	// Check that wrapped_keys covers exactly the current member set
 	wrappedSet := make(map[string]bool, len(msg.WrappedKeys))
@@ -324,10 +308,10 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 	}
 
 	// Store wrapped keys for all members
-	for username, wrappedKey := range msg.WrappedKeys {
-		if err := s.store.StoreEpochKey(msg.Room, msg.Epoch, username, wrappedKey); err != nil {
+	for userID, wrappedKey := range msg.WrappedKeys {
+		if err := s.store.StoreEpochKey(msg.Room, msg.Epoch, userID, wrappedKey); err != nil {
 			s.logger.Error("failed to store epoch key",
-				"room", msg.Room, "epoch", msg.Epoch, "user", username, "error", err)
+				"room", msg.Room, "epoch", msg.Epoch, "user", userID, "error", err)
 		}
 	}
 
@@ -377,8 +361,8 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 }
 
 // checkRotationNeeded checks if a room message should trigger epoch rotation.
-func (s *Server) checkRotationNeeded(c *Client, room string) {
-	if s.epochs.recordMessage(room) {
-		s.triggerEpochRotation(c, room, "message_count")
+func (s *Server) checkRotationNeeded(c *Client, roomID string) {
+	if s.epochs.recordMessage(roomID) {
+		s.triggerEpochRotation(c, roomID, "message_count")
 	}
 }

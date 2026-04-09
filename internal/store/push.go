@@ -57,8 +57,3 @@ func (s *Store) DeactivatePushToken(user, deviceID string) error {
 	return err
 }
 
-// RemovePushToken removes a push token entirely.
-func (s *Store) RemovePushToken(user, deviceID string) error {
-	_, err := s.dataDB.Exec(`DELETE FROM push_tokens WHERE user = ? AND device_id = ?`, user, deviceID)
-	return err
-}

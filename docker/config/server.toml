@@ -3,6 +3,18 @@ port = 2222
 bind = "0.0.0.0"
 admins = ["admin"]
 
+# Room /leave policy. Default false: rooms are admin-managed and users
+# cannot self-leave (membership changes go through sshkey-ctl). Set true
+# to let users run /leave in rooms; the server then broadcasts a
+# room_event leave to remaining members and marks the room for epoch
+# rotation. Hot-reloadable.
+# allow_self_leave_rooms = false
+
+# Whether users can clean up retired rooms from their sidebar. Default
+# true because retired rooms are dead — there's no membership decision
+# to preserve. Inert until Phase 12 introduces room retirement.
+# allow_self_leave_retired_rooms = true
+
 [messages]
 max_body_size = "16KB"
 

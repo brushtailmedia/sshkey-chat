@@ -29,9 +29,9 @@ func (s *Store) InsertRoomMessage(room string, msg StoredMessage) error {
 	return insertMessage(db, msg)
 }
 
-// InsertConvMessage stores a DM/group DM message.
-func (s *Store) InsertConvMessage(convID string, msg StoredMessage) error {
-	db, err := s.ConvDB(convID)
+// InsertGroupMessage stores a group DM message.
+func (s *Store) InsertGroupMessage(groupID string, msg StoredMessage) error {
+	db, err := s.GroupDB(groupID)
 	if err != nil {
 		return err
 	}
@@ -61,9 +61,9 @@ func (s *Store) GetRoomMessages(room string, beforeTS int64, limit int) ([]Store
 	return getMessages(db, beforeTS, limit)
 }
 
-// GetConvMessages retrieves messages from a conversation.
-func (s *Store) GetConvMessages(convID string, beforeTS int64, limit int) ([]StoredMessage, error) {
-	db, err := s.ConvDB(convID)
+// GetGroupMessages retrieves messages from a group DM.
+func (s *Store) GetGroupMessages(groupID string, beforeTS int64, limit int) ([]StoredMessage, error) {
+	db, err := s.GroupDB(groupID)
 	if err != nil {
 		return nil, err
 	}
@@ -79,9 +79,9 @@ func (s *Store) GetRoomMessagesSince(room string, sinceTS int64, limit int) ([]S
 	return getMessagesSince(db, sinceTS, limit)
 }
 
-// GetConvMessagesSince retrieves messages from a conversation with ts >= sinceTS.
-func (s *Store) GetConvMessagesSince(convID string, sinceTS int64, limit int) ([]StoredMessage, error) {
-	db, err := s.ConvDB(convID)
+// GetGroupMessagesSince retrieves messages from a group DM with ts >= sinceTS.
+func (s *Store) GetGroupMessagesSince(groupID string, sinceTS int64, limit int) ([]StoredMessage, error) {
+	db, err := s.GroupDB(groupID)
 	if err != nil {
 		return nil, err
 	}
@@ -159,9 +159,9 @@ func (s *Store) DeleteRoomMessage(room, msgID, deletedBy string) ([]string, erro
 	return deleteMessage(db, msgID, deletedBy)
 }
 
-// DeleteConvMessage marks a DM message as deleted. Returns file IDs for cleanup.
-func (s *Store) DeleteConvMessage(convID, msgID, deletedBy string) ([]string, error) {
-	db, err := s.ConvDB(convID)
+// DeleteGroupMessage marks a group DM message as deleted. Returns file IDs for cleanup.
+func (s *Store) DeleteGroupMessage(groupID, msgID, deletedBy string) ([]string, error) {
+	db, err := s.GroupDB(groupID)
 	if err != nil {
 		return nil, err
 	}
@@ -206,9 +206,9 @@ func (s *Store) GetRoomMessagesBefore(room, beforeID string, limit int) ([]Store
 	return getMessagesBefore(db, beforeID, limit)
 }
 
-// GetConvMessagesBefore retrieves messages from a conversation before a specific message ID.
-func (s *Store) GetConvMessagesBefore(convID, beforeID string, limit int) ([]StoredMessage, error) {
-	db, err := s.ConvDB(convID)
+// GetGroupMessagesBefore retrieves messages from a group DM before a specific message ID.
+func (s *Store) GetGroupMessagesBefore(groupID, beforeID string, limit int) ([]StoredMessage, error) {
+	db, err := s.GroupDB(groupID)
 	if err != nil {
 		return nil, err
 	}
@@ -252,9 +252,9 @@ func (s *Store) GetRoomReactionsForMessages(room string, messageIDs []string) ([
 	return getReactionsForMessages(db, messageIDs)
 }
 
-// GetConvReactionsForMessages returns all reactions on the given message IDs from a conversation DB.
-func (s *Store) GetConvReactionsForMessages(convID string, messageIDs []string) ([]StoredReaction, error) {
-	db, err := s.ConvDB(convID)
+// GetGroupReactionsForMessages returns all reactions on the given message IDs from a group DM DB.
+func (s *Store) GetGroupReactionsForMessages(groupID string, messageIDs []string) ([]StoredReaction, error) {
+	db, err := s.GroupDB(groupID)
 	if err != nil {
 		return nil, err
 	}

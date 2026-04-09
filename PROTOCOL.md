@@ -26,14 +26,14 @@ Client opens 3 session channels (Channel 1: protocol, Channel 2: downloads, Chan
 
   Client -> {"type":"client_hello","protocol":"sshkey-chat","version":1,"client":"my-client","client_version":"0.1.0","device_id":"dev_V1StGXR8_Z5jdHi6B-myT","last_synced_at":"2026-04-01T00:00:00Z","capabilities":["typing","reactions","signatures"]}
 
-  Server -> {"type":"welcome","user":"alice","display_name":"Alice Chen","admin":true,"rooms":["general","engineering"],"conversations":["conv_xK9mQ2pR"],"pending_sync":true,"active_capabilities":["typing","reactions","signatures"]}
+  Server -> {"type":"welcome","user":"alice","display_name":"Alice Chen","admin":true,"rooms":["room_V1StGXR8_Z5jdHi6B","room_abc123def456"],"conversations":["conv_xK9mQ2pR"],"pending_sync":true,"active_capabilities":["typing","reactions","signatures"]}
 ```
 
 The client must respond within 2 seconds or the server disconnects with an install banner.
 
 After `welcome`, the server sends (in this order):
 
-1. `room_list` -- rooms the user has access to
+1. `room_list` -- rooms the user has access to (includes nanoid IDs + display names; the `room` field in all subsequent messages carries the nanoid ID, not the display name)
 2. `conversation_list` -- DM conversations (if any)
 3. `profile` -- one per visible user (includes pubkey and fingerprint)
 4. `epoch_key` -- current epoch key per room (if any)
@@ -73,6 +73,7 @@ All IDs are Nano IDs with prefixes:
 | `msg_` | Server | `msg_abc123def456` |
 | `file_` | Server | `file_xyz789` |
 | `conv_` | Server | `conv_xK9mQ2pR` |
+| `room_` | Server | `room_V1StGXR8_Z5jdHi6B` |
 | `react_` | Server | `react_7kQ2mR` |
 | `up_` | Client | `up_001` |
 | `dev_` | Client | `dev_V1StGXR8_Z5jdHi6B-myT` |
@@ -137,7 +138,7 @@ Rust: `x25519-dalek`, `aes-gcm`, `hkdf` crates.
 Client signs every message and reaction with their Ed25519 private key. The signature is in the envelope (server can see it, can't modify it without detection).
 
 **Canonical serialization:**
-- Rooms: `Sign(payload_bytes || room_name_utf8 || epoch_as_big_endian_uint64)`
+- Rooms: `Sign(payload_bytes || room_id_utf8 || epoch_as_big_endian_uint64)`
 - DMs: `Sign(payload_bytes || conversation_id_utf8 || wrapped_keys_canonical)`
 
 Where `wrapped_keys_canonical` is the wrapped key values concatenated in sorted username order. All fields are raw bytes (payload is the base64-decoded ciphertext, not the base64 string).
@@ -183,10 +184,10 @@ Every room message and DM is split into:
 
 ```json
 // Client -> Server
-{"type":"send","room":"general","epoch":3,"payload":"base64...","file_ids":["file_xyz"],"signature":"base64..."}
+{"type":"send","room":"room_V1StGXR8_Z5jdHi6B","epoch":3,"payload":"base64...","file_ids":["file_xyz"],"signature":"base64..."}
 
 // Server -> Client
-{"type":"message","id":"msg_abc123","from":"alice","room":"general","ts":1712345678,"epoch":3,"payload":"base64...","file_ids":["file_xyz"],"signature":"base64..."}
+{"type":"message","id":"msg_abc123","from":"alice","room":"room_V1StGXR8_Z5jdHi6B","ts":1712345678,"epoch":3,"payload":"base64...","file_ids":["file_xyz"],"signature":"base64..."}
 ```
 
 **Decrypted payload:**
@@ -250,20 +251,20 @@ The optional `reason` field distinguishes voluntary leaves from retirement-trigg
 On connect, the server sends the current epoch key for each room:
 
 ```json
-{"type":"epoch_key","room":"general","epoch":3,"wrapped_key":"base64..."}
+{"type":"epoch_key","room":"room_V1StGXR8_Z5jdHi6B","epoch":3,"wrapped_key":"base64..."}
 ```
 
 **Rotation flow (server-triggered, client-executed):**
 
 ```json
 // Server -> Client (you triggered rotation -- generate the new key)
-{"type":"epoch_trigger","room":"general","new_epoch":4,"members":[{"user":"alice","pubkey":"ssh-ed25519 AAAA..."},{"user":"bob","pubkey":"ssh-ed25519 AAAA..."}]}
+{"type":"epoch_trigger","room":"room_V1StGXR8_Z5jdHi6B","new_epoch":4,"members":[{"user":"alice","pubkey":"ssh-ed25519 AAAA..."},{"user":"bob","pubkey":"ssh-ed25519 AAAA..."}]}
 
 // Client -> Server (wrap new key for all members)
-{"type":"epoch_rotate","room":"general","epoch":4,"wrapped_keys":{"alice":"base64...","bob":"base64..."},"member_hash":"SHA256:abc123..."}
+{"type":"epoch_rotate","room":"room_V1StGXR8_Z5jdHi6B","epoch":4,"wrapped_keys":{"alice":"base64...","bob":"base64..."},"member_hash":"SHA256:abc123..."}
 
 // Server -> Client (confirmed -- you may now use this epoch)
-{"type":"epoch_confirmed","room":"general","epoch":4}
+{"type":"epoch_confirmed","room":"room_V1StGXR8_Z5jdHi6B","epoch":4}
 ```
 
 **Critical rule:** Do NOT use the new epoch key for anything until `epoch_confirmed` is received. If the server rejects the rotation, discard the key entirely.
@@ -276,7 +277,7 @@ On connect, the server sends the current epoch key for each room:
 
 ```json
 // Server -> Client (paginated, oldest-first)
-{"type":"sync_batch","messages":[...],"epoch_keys":[{"room":"general","epoch":12,"wrapped_key":"base64..."}],"reactions":[...],"page":1,"has_more":true}
+{"type":"sync_batch","messages":[...],"epoch_keys":[{"room":"room_V1StGXR8_Z5jdHi6B","epoch":12,"wrapped_key":"base64..."}],"reactions":[...],"page":1,"has_more":true}
 {"type":"sync_batch","messages":[...],"epoch_keys":[],"reactions":[],"page":2,"has_more":false}
 
 // Server -> Client
@@ -289,10 +290,10 @@ Room sync batches include epoch keys needed to decrypt that batch and reactions 
 
 ```json
 // Client -> Server
-{"type":"history","room":"general","before":"msg_abc123","limit":100}
+{"type":"history","room":"room_V1StGXR8_Z5jdHi6B","before":"msg_abc123","limit":100}
 
 // Server -> Client (room -- includes epoch keys and reactions)
-{"type":"history_result","room":"general","messages":[...],"epoch_keys":[{"epoch":8,"wrapped_key":"base64..."}],"reactions":[...],"has_more":true}
+{"type":"history_result","room":"room_V1StGXR8_Z5jdHi6B","messages":[...],"epoch_keys":[{"epoch":8,"wrapped_key":"base64..."}],"reactions":[...],"has_more":true}
 
 // Client -> Server (DM)
 {"type":"history","conversation":"conv_xK9mQ2pR","before":"msg_def456","limit":100}
@@ -310,7 +311,7 @@ Store fetched messages and epoch keys locally -- subsequent scroll-back for the 
 {"type":"delete","id":"msg_abc123"}
 
 // Server -> Client (broadcast)
-{"type":"deleted","id":"msg_abc123","deleted_by":"alice","ts":1712345679,"room":"general"}
+{"type":"deleted","id":"msg_abc123","deleted_by":"alice","ts":1712345679,"room":"room_V1StGXR8_Z5jdHi6B"}
 ```
 
 Rooms: own messages or admin. DMs: own messages only. Rate limited: 10 deletes/min for users, 50/min for admins.
@@ -323,11 +324,11 @@ Capability: `typing`
 
 ```json
 // Client -> Server
-{"type":"typing","room":"general"}
+{"type":"typing","room":"room_V1StGXR8_Z5jdHi6B"}
 {"type":"typing","conversation":"conv_xK9mQ2pR"}
 
 // Server -> Client (broadcast to others)
-{"type":"typing","room":"general","user":"alice"}
+{"type":"typing","room":"room_V1StGXR8_Z5jdHi6B","user":"alice"}
 ```
 
 Show for 5 seconds, then expire. Re-send while the user is actively typing.
@@ -338,17 +339,17 @@ Capability: `read_receipts`
 
 ```json
 // Client -> Server
-{"type":"read","room":"general","last_read":"msg_abc123"}
+{"type":"read","room":"room_V1StGXR8_Z5jdHi6B","last_read":"msg_abc123"}
 
 // Server -> Client (broadcast to others)
-{"type":"read","room":"general","user":"alice","last_read":"msg_abc123"}
+{"type":"read","room":"room_V1StGXR8_Z5jdHi6B","user":"alice","last_read":"msg_abc123"}
 ```
 
 ### Unread Counts
 
 ```json
 // Server -> Client (on connect)
-{"type":"unread","room":"general","count":12,"last_read":"msg_abc100"}
+{"type":"unread","room":"room_V1StGXR8_Z5jdHi6B","count":12,"last_read":"msg_abc100"}
 {"type":"unread","conversation":"conv_xK9mQ2pR","count":3,"last_read":"msg_def400"}
 ```
 
@@ -358,19 +359,19 @@ Capability: `reactions`
 
 ```json
 // Client -> Server (room -- encrypted with epoch key)
-{"type":"react","id":"msg_abc123","room":"general","epoch":3,"payload":"base64...","signature":"base64..."}
+{"type":"react","id":"msg_abc123","room":"room_V1StGXR8_Z5jdHi6B","epoch":3,"payload":"base64...","signature":"base64..."}
 
 // Client -> Server (DM -- per-message key)
 {"type":"react","id":"msg_def456","conversation":"conv_xK9mQ2pR","wrapped_keys":{"alice":"base64...","bob":"base64..."},"payload":"base64...","signature":"base64..."}
 
 // Server -> Client
-{"type":"reaction","reaction_id":"react_7kQ2mR","id":"msg_abc123","room":"general","user":"alice","ts":1712345680,"epoch":3,"payload":"base64...","signature":"base64..."}
+{"type":"reaction","reaction_id":"react_7kQ2mR","id":"msg_abc123","room":"room_V1StGXR8_Z5jdHi6B","user":"alice","ts":1712345680,"epoch":3,"payload":"base64...","signature":"base64..."}
 
 // Client -> Server (remove)
 {"type":"unreact","reaction_id":"react_7kQ2mR"}
 
 // Server -> Client
-{"type":"reaction_removed","reaction_id":"react_7kQ2mR","id":"msg_abc123","room":"general","user":"alice"}
+{"type":"reaction_removed","reaction_id":"react_7kQ2mR","id":"msg_abc123","room":"room_V1StGXR8_Z5jdHi6B","user":"alice"}
 ```
 
 **Encrypted reaction payload:** `{"emoji":"...","target":"msg_abc123","seq":43,"device_id":"dev_..."}`. Verify `target` matches the envelope `id` on decryption.
@@ -391,17 +392,17 @@ Rooms only. DMs do not support pins.
 
 ```json
 // Client -> Server
-{"type":"pin","room":"general","id":"msg_abc123"}
+{"type":"pin","room":"room_V1StGXR8_Z5jdHi6B","id":"msg_abc123"}
 
 // Server -> Client
-{"type":"pinned","room":"general","id":"msg_abc123","pinned_by":"alice","ts":1712345681}
+{"type":"pinned","room":"room_V1StGXR8_Z5jdHi6B","id":"msg_abc123","pinned_by":"alice","ts":1712345681}
 
 // Server -> Client (on connect -- includes full message envelopes for decryption)
-{"type":"pins","room":"general","messages":["msg_abc123","msg_def456"],"message_data":[{"type":"message","id":"msg_abc123","from":"alice","room":"general","ts":1712345678,"epoch":3,"payload":"base64...","signature":"base64..."}]}
+{"type":"pins","room":"room_V1StGXR8_Z5jdHi6B","messages":["msg_abc123","msg_def456"],"message_data":[{"type":"message","id":"msg_abc123","from":"alice","room":"room_V1StGXR8_Z5jdHi6B","ts":1712345678,"epoch":3,"payload":"base64...","signature":"base64..."}]}
 
 // Unpin
-{"type":"unpin","room":"general","id":"msg_abc123"}
-{"type":"unpinned","room":"general","id":"msg_abc123"}
+{"type":"unpin","room":"room_V1StGXR8_Z5jdHi6B","id":"msg_abc123"}
+{"type":"unpinned","room":"room_V1StGXR8_Z5jdHi6B","id":"msg_abc123"}
 ```
 
 The server filters pins by the user's `first_epoch` -- new members only see pins from messages they can decrypt. `message_data` includes the full encrypted message envelopes so clients can decrypt and show pin previews without scrolling back.
@@ -441,19 +442,19 @@ Capability: `presence`
 
 ```json
 // Server -> Client (on connect)
-{"type":"room_list","rooms":[{"name":"general","topic":"General chat","members":12}]}
+{"type":"room_list","rooms":[{"id":"room_V1StGXR8_Z5jdHi6B","name":"general","topic":"General chat","members":12}]}
 
 {"type":"conversation_list","conversations":[{"id":"conv_xK9mQ2pR","members":["alice","bob"]},{"id":"conv_yL0nR3qS","members":["alice","bob","carol"],"name":"Project Alpha"}]}
 
 // Server -> Client (membership changes)
-{"type":"room_event","room":"general","event":"join","user":"carol"}
-{"type":"room_event","room":"general","event":"leave","user":"carol"}
+{"type":"room_event","room":"room_V1StGXR8_Z5jdHi6B","event":"join","user":"carol"}
+{"type":"room_event","room":"room_V1StGXR8_Z5jdHi6B","event":"leave","user":"carol"}
 
 // Client -> Server (request room member list — must be a member of the room)
-{"type":"room_members","room":"general"}
+{"type":"room_members","room":"room_V1StGXR8_Z5jdHi6B"}
 
 // Server -> Client
-{"type":"room_members_list","room":"general","members":["usr_abc","usr_def","usr_ghi"]}
+{"type":"room_members_list","room":"room_V1StGXR8_Z5jdHi6B","members":["usr_abc","usr_def","usr_ghi"]}
 ```
 
 `room_members` is a lazy query — clients send it when the info panel or member panel opens for a room, not on every room switch. The server rejects with `not_authorized` if the requesting user is not a member of the room. Retired users are excluded from the response. DM/group DM members are known client-side from `conversation_list` and don't need this request.
@@ -466,7 +467,7 @@ Metadata on Channel 1, raw bytes on Channel 2 (downloads) or Channel 3 (uploads)
 
 ```json
 // Channel 1: Client -> Server (content_hash is required)
-{"type":"upload_start","upload_id":"up_001","size":45000,"content_hash":"blake2b-256:a1b2c3...","room":"general"}
+{"type":"upload_start","upload_id":"up_001","size":45000,"content_hash":"blake2b-256:a1b2c3...","room":"room_V1StGXR8_Z5jdHi6B"}
 
 // Channel 1: Server -> Client
 {"type":"upload_ready","upload_id":"up_001"}
@@ -609,7 +610,7 @@ Ed25519 keys are permanent identities on this server. There is no key rotation. 
 
 Valid reasons: `self_compromise` (suspected key theft), `switching_key` (voluntary identity change), `other`. The server authenticates the target from the SSH connection — the message has no `user` field. An attacker with the stolen key can also trigger retirement, but the outcome is the same (the legitimate user needs a new account either way).
 
-**Admin-initiated (out-of-band):** the server operator edits `users.toml` to set `retired = true` on the user's entry, or runs `sshkey-ctl retire-user <name> --reason <reason>`. The server's config watcher detects the change and fires the same downstream events.
+**Admin-initiated (out-of-band):** the server operator runs `sshkey-ctl retire-user <name> --reason <reason>`. The server reads retirement status from users.db on demand, so the change takes effect immediately.
 
 **Server broadcasts to peers:**
 
