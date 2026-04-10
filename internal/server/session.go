@@ -225,6 +225,19 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 		s.files.mu.Unlock()
 	}()
 
+	// Send the list of rooms this user has previously /delete'd. Sent
+	// BEFORE room_list so the client purges before populating its
+	// sidebar — devices that were offline when the room_deleted live
+	// echo went out catch up via this message. Phase 12 parallel to
+	// sendDeletedGroups.
+	s.sendDeletedRooms(client)
+
+	// Send the list of retired rooms this user is still a member of.
+	// Sent BEFORE room_list so the client has the retired state in
+	// hand before the sidebar is populated. Catches up offline devices
+	// that missed the live room_retired broadcast. Phase 12.
+	s.sendRetiredRooms(client)
+
 	// Send room list
 	s.sendRoomList(client)
 
@@ -419,6 +432,77 @@ func (s *Server) sendDeletedGroups(c *Client) {
 	})
 }
 
+// sendDeletedRooms emits a deleted_rooms message during the connect
+// handshake listing every room ID this user has previously /delete'd.
+// Sent BEFORE sendRoomList so the client purges before populating its
+// sidebar — devices that were offline when the room_deleted live echo
+// went out catch up via this message. Phase 12 parallel to
+// sendDeletedGroups.
+//
+// No-op if the user has no deletion records.
+func (s *Server) sendDeletedRooms(c *Client) {
+	if s.store == nil {
+		return
+	}
+	rooms, err := s.store.GetDeletedRoomsForUser(c.UserID)
+	if err != nil {
+		s.logger.Error("failed to get deleted rooms",
+			"user", c.UserID, "error", err)
+		return
+	}
+	if len(rooms) == 0 {
+		return
+	}
+	c.Encoder.Encode(protocol.DeletedRoomsList{
+		Type:  "deleted_rooms",
+		Rooms: rooms,
+	})
+}
+
+// sendRetiredRooms emits a retired_rooms message during the connect
+// handshake listing every retired room this user is still a member
+// of. Sent BEFORE sendRoomList so the client can apply retirement
+// state to its rooms table before the sidebar is populated. Catches
+// up offline devices that missed the live room_retired broadcast.
+// Phase 12.
+//
+// Filter per Q8 of the Phase 12 design: GetRetiredRoomsForUser joins
+// room_members, so users who voluntarily left a room BEFORE it was
+// retired do NOT see the room in this list. Only users who are still
+// formal members see the retirement in their catchup.
+//
+// No-op if the user has no retired rooms in their membership.
+func (s *Server) sendRetiredRooms(c *Client) {
+	if s.store == nil {
+		return
+	}
+	rooms, err := s.store.GetRetiredRoomsForUser(c.UserID)
+	if err != nil {
+		s.logger.Error("failed to get retired rooms",
+			"user", c.UserID, "error", err)
+		return
+	}
+	if len(rooms) == 0 {
+		return
+	}
+
+	out := make([]protocol.RoomRetired, 0, len(rooms))
+	for _, r := range rooms {
+		out = append(out, protocol.RoomRetired{
+			Type:        "room_retired",
+			Room:        r.ID,
+			DisplayName: r.DisplayName,
+			RetiredAt:   r.RetiredAt,
+			RetiredBy:   r.RetiredBy,
+		})
+	}
+
+	c.Encoder.Encode(protocol.RetiredRoomsList{
+		Type:  "retired_rooms",
+		Rooms: out,
+	})
+}
+
 // sendProfiles sends profile messages for all users visible to this client
 // (shared rooms, group DMs, and 1:1 DMs).
 func (s *Server) sendProfiles(c *Client) {
@@ -539,6 +623,8 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 		s.handleDeleteGroup(c, raw)
 	case "leave_room":
 		s.handleLeaveRoom(c, raw)
+	case "delete_room":
+		s.handleDeleteRoom(c, raw)
 	case "create_dm":
 		s.handleCreateDM(c, raw)
 	case "send_dm":
@@ -619,6 +705,21 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 			Type:    "error",
 			Code:    protocol.ErrUnknownRoom,
 			Message: "You are not a member of this room",
+		})
+		return
+	}
+
+	// Reject writes to retired rooms. Ordered AFTER the membership gate
+	// so non-members still get the byte-identical ErrUnknownRoom — only
+	// members see the informative "archived" message. Per Q11 of the
+	// Phase 12 design: retired state is admin-public to members (the
+	// retirement broadcast already told them), so revealing it via this
+	// rejection is not a probing vector.
+	if s.store.IsRoomRetired(msg.Room) {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrRoomRetired,
+			Message: "This room has been archived and is read-only",
 		})
 		return
 	}
@@ -886,6 +987,30 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	// Room branch: verify membership (byte-identical privacy) and
+	// reject writes to retired rooms (Q11: informative message, only
+	// visible after the membership gate so non-members can't probe for
+	// retired-room existence). Group and DM branches have their own
+	// verification paths inside the store layer.
+	if msg.Room != "" && s.store != nil {
+		if !s.store.IsRoomMemberByID(msg.Room, c.UserID) {
+			c.Encoder.Encode(protocol.Error{
+				Type:    "error",
+				Code:    protocol.ErrUnknownRoom,
+				Message: "You are not a member of this room",
+			})
+			return
+		}
+		if s.store.IsRoomRetired(msg.Room) {
+			c.Encoder.Encode(protocol.Error{
+				Type:    "error",
+				Code:    protocol.ErrRoomRetired,
+				Message: "This room has been archived and is read-only",
+			})
+			return
+		}
+	}
+
 	reactionID := generateID("react_")
 
 	reaction := protocol.Reaction{
@@ -969,7 +1094,18 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Search room DBs, group DBs, and DM DBs for this reaction
+	// Search room DBs, group DBs, and DM DBs for this reaction.
+	//
+	// Phase 12 note: GetUserRoomIDs filters WHERE r.retired = 0, so
+	// retired rooms are naturally excluded from this search. A user
+	// trying to unreact in a retired room will fall through all three
+	// loops and return silently. That's suboptimal UX (the user won't
+	// see an informative "this room has been archived" error) but is
+	// not a data integrity or privacy issue — the reaction remains in
+	// the retired room's DB and the user's intent is simply not
+	// honored. Acceptable for Phase 12; improving requires a parallel
+	// GetAllUserRoomIDs that includes retired rooms, which is a Phase
+	// 15 concern (admin CLI audit may generalize this).
 	var targetID, room, group, dmID, user string
 	var found bool
 
@@ -1073,12 +1209,34 @@ func (s *Server) handlePin(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	if s.store != nil {
-		db, err := s.store.RoomDB(msg.Room)
-		if err == nil {
-			db.Exec(`INSERT OR IGNORE INTO pins (message_id, pinned_by, ts) VALUES (?, ?, ?)`,
-				msg.ID, c.UserID, time.Now().Unix())
-		}
+	// Verify membership (byte-identical privacy) and reject writes to
+	// retired rooms. Ordered so non-members get ErrUnknownRoom and
+	// members of retired rooms get the informative ErrRoomRetired
+	// (Phase 12 Q11). Matches handleSend's pattern.
+	if s.store == nil {
+		return
+	}
+	if !s.store.IsRoomMemberByID(msg.Room, c.UserID) {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrUnknownRoom,
+			Message: "You are not a member of this room",
+		})
+		return
+	}
+	if s.store.IsRoomRetired(msg.Room) {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrRoomRetired,
+			Message: "This room has been archived and is read-only",
+		})
+		return
+	}
+
+	db, err := s.store.RoomDB(msg.Room)
+	if err == nil {
+		db.Exec(`INSERT OR IGNORE INTO pins (message_id, pinned_by, ts) VALUES (?, ?, ?)`,
+			msg.ID, c.UserID, time.Now().Unix())
 	}
 
 	s.broadcastToRoom(msg.Room, protocol.Pinned{
@@ -1102,11 +1260,31 @@ func (s *Server) handleUnpin(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	if s.store != nil {
-		db, err := s.store.RoomDB(msg.Room)
-		if err == nil {
-			db.Exec(`DELETE FROM pins WHERE message_id = ?`, msg.ID)
-		}
+	// Verify membership (byte-identical privacy) and reject writes to
+	// retired rooms. Same pattern as handlePin.
+	if s.store == nil {
+		return
+	}
+	if !s.store.IsRoomMemberByID(msg.Room, c.UserID) {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrUnknownRoom,
+			Message: "You are not a member of this room",
+		})
+		return
+	}
+	if s.store.IsRoomRetired(msg.Room) {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrRoomRetired,
+			Message: "This room has been archived and is read-only",
+		})
+		return
+	}
+
+	db, err := s.store.RoomDB(msg.Room)
+	if err == nil {
+		db.Exec(`DELETE FROM pins WHERE message_id = ?`, msg.ID)
 	}
 
 	s.broadcastToRoom(msg.Room, protocol.Unpinned{
@@ -1222,6 +1400,12 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 
 	// Check if user is admin (admins can delete any room message)
 	isAdmin := s.store.IsAdmin(c.UserID)
+
+	// Phase 12 note: GetUserRoomIDs filters WHERE r.retired = 0, so
+	// retired rooms are naturally excluded from the room search below.
+	// A user trying to delete a message in a retired room will fall
+	// through to group/DM search and return without action. Matches
+	// the behavior in handleUnreact; same limitation, same rationale.
 	rooms := s.store.GetUserRoomIDs(c.UserID)
 
 	// Rate limit — admins get a higher limit
@@ -1642,11 +1826,21 @@ func (s *Server) handleLeaveRoom(c *Client, raw json.RawMessage) {
 
 	// Policy gate. Hot-reloadable: read under cfg RLock so a config reload
 	// flipping the flag mid-session takes effect on the next /leave attempt
-	// without any client refresh. Phase 12 will add a separate gate for
-	// retired rooms (allow_self_leave_retired_rooms) that's checked when
-	// the room is in the retired state.
+	// without any client refresh.
+	//
+	// Phase 12: the gate branches on retired state. Active rooms use
+	// allow_self_leave_rooms (default false — admin-managed membership).
+	// Retired rooms use allow_self_leave_retired_rooms (default true —
+	// users can clean up dead rooms even when active-room leave is
+	// locked down). See Q10 of the Phase 12 design.
+	isRetired := s.store.IsRoomRetired(msg.Room)
 	s.cfg.RLock()
-	allowed := s.cfg.Server.Server.AllowSelfLeaveRooms
+	var allowed bool
+	if isRetired {
+		allowed = s.cfg.Server.Server.AllowSelfLeaveRetiredRooms
+	} else {
+		allowed = s.cfg.Server.Server.AllowSelfLeaveRooms
+	}
 	s.cfg.RUnlock()
 	if !allowed {
 		c.Encoder.Encode(protocol.Error{
@@ -1736,6 +1930,169 @@ func (s *Server) performRoomLeave(roomID, userID, reason string) {
 		"user", userID,
 		"room", roomID,
 		"reason", reason,
+	)
+}
+
+// handleDeleteRoom processes a client request to remove a room from
+// every device on the user's account. Structurally parallel to
+// handleDeleteGroup (Phase 11), with three room-specific differences:
+//
+//  1. Policy gate branches on retired state — active rooms use
+//     allow_self_leave_rooms, retired rooms use
+//     allow_self_leave_retired_rooms. Q10 of the Phase 12 design: no
+//     split action, if the policy denies the whole /delete is
+//     rejected.
+//
+//  2. Epoch rotation happens for active rooms only. Retired rooms
+//     don't rotate (Q4: existing keys stay intact for history
+//     decryption; writes are already blocked by IsRoomRetired so a
+//     defensive rotation is pointless work).
+//
+//  3. Last-member cleanup calls DeleteRoomRecord — the cascade that
+//     drops the rooms row, room_members rows, epoch_keys rows, and
+//     unlinks the per-room DB file.
+//
+// Ordering matters: the deletion intent is RECORDED FIRST in the
+// deleted_rooms sidecar, before the inline leave logic. If the user is
+// the last member and the leave triggers DeleteRoomRecord, that
+// cleanup deliberately does NOT touch deleted_rooms (see
+// store/room_deletion.go), so the row we just wrote survives the
+// cleanup. Offline devices catching up later see the deletion record
+// and purge correctly.
+//
+// The handler is idempotent: re-running on a room the user has already
+// left just records the deletion intent (INSERT OR IGNORE) and
+// re-broadcasts the echo. Both are safe.
+func (s *Server) handleDeleteRoom(c *Client, raw json.RawMessage) {
+	var msg protocol.DeleteRoom
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+
+	if s.store == nil {
+		return
+	}
+
+	// Membership check first. Privacy: the response for "room does not
+	// exist" and "you are not a member of an existing room" MUST be
+	// byte-identical so a probing client cannot use delete_room to
+	// discover whether a given room ID exists. Matches the convention
+	// in handleSend, handleLeaveRoom, and the other membership-gated
+	// handlers.
+	//
+	// The policy gate below uses ErrForbidden which DOES reveal
+	// membership (distinct from unknown-room), but the user already
+	// knows they're a member, so the disclosure is a no-op.
+	if !s.store.IsRoomMemberByID(msg.Room, c.UserID) {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrUnknownRoom,
+			Message: "You are not a member of this room",
+		})
+		return
+	}
+
+	// Policy gate — branches on retired state. Active rooms use
+	// allow_self_leave_rooms, retired rooms use
+	// allow_self_leave_retired_rooms. Hot-reloadable via cfg RLock.
+	isRetired := s.store.IsRoomRetired(msg.Room)
+	s.cfg.RLock()
+	var allowed bool
+	if isRetired {
+		allowed = s.cfg.Server.Server.AllowSelfLeaveRetiredRooms
+	} else {
+		allowed = s.cfg.Server.Server.AllowSelfLeaveRooms
+	}
+	s.cfg.RUnlock()
+	if !allowed {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    protocol.ErrForbidden,
+			Message: "Forbidden — please contact an admin to delete this room",
+		})
+		return
+	}
+
+	// 1. Record the deletion intent FIRST. This is the catchup signal
+	//    for the user's offline devices and must survive any subsequent
+	//    leave/cleanup. INSERT OR IGNORE makes it safe to re-run on a
+	//    previously-deleted room.
+	if err := s.store.RecordRoomDeletion(c.UserID, msg.Room); err != nil {
+		s.logger.Error("failed to record room deletion",
+			"user", c.UserID, "room", msg.Room, "error", err)
+		// Continue anyway — the deletion intent is best-effort. The
+		// live room_deleted echo will still tell connected devices to
+		// purge; only the offline-catchup path is degraded.
+	}
+
+	// 2. Run the leave logic. RemoveRoomMember is idempotent at the
+	//    store layer (no error for a user who's already gone).
+	if err := s.store.RemoveRoomMember(msg.Room, c.UserID); err != nil {
+		s.logger.Error("failed to remove room member during delete",
+			"user", c.UserID, "room", msg.Room, "error", err)
+	}
+
+	// Broadcast the leave to remaining members. Same shape as
+	// performRoomLeave's broadcast, but with an empty reason (self-
+	// initiated delete, not admin/retirement). broadcastToRoom reads
+	// the current member set AFTER the removal above, so the caller
+	// is automatically excluded.
+	s.broadcastToRoom(msg.Room, protocol.RoomEvent{
+		Type:   "room_event",
+		Room:   msg.Room,
+		Event:  "leave",
+		User:   c.UserID,
+		Reason: "",
+	})
+
+	// 3. Last-member cleanup. If we just removed the only remaining
+	//    member, run the full cleanup cascade: drop the rooms row,
+	//    room_members rows, epoch_keys rows, and unlink the per-room
+	//    DB file. The cascade deliberately does NOT touch deleted_rooms
+	//    (see DeleteRoomRecord in store/room_deletion.go), so the row
+	//    we wrote in step 1 survives.
+	if remaining := s.store.GetRoomMemberIDsByRoomID(msg.Room); len(remaining) == 0 {
+		if err := s.store.DeleteRoomRecord(msg.Room); err != nil {
+			s.logger.Error("room cleanup failed",
+				"room", msg.Room, "error", err)
+		} else {
+			s.logger.Info("room cleaned up (last member /delete'd)",
+				"room", msg.Room, "user", c.UserID)
+		}
+	} else if !isRetired {
+		// 4. Mark the room for epoch rotation. Only for active rooms —
+		//    retired rooms don't rotate (Q4). If this was the last
+		//    member, we skipped the cleanup branch anyway because the
+		//    room is now gone.
+		s.epochs.getOrCreate(msg.Room, s.epochs.currentEpochNum(msg.Room))
+	}
+
+	// 5. Echo room_deleted to ALL of the user's currently-connected
+	//    sessions. This is the canonical multi-device propagation path:
+	//    every device of this user that is online RIGHT NOW will
+	//    receive this and purge local state. Devices that are offline
+	//    pick up the deletion via deleted_rooms on their next
+	//    handshake.
+	//
+	//    Distinct from room_left: room_left is the leave echo (keeps
+	//    local history), room_deleted is the delete echo (purges
+	//    local history).
+	deleted := protocol.RoomDeleted{
+		Type: "room_deleted",
+		Room: msg.Room,
+	}
+	s.mu.RLock()
+	for _, client := range s.clients {
+		if client.UserID == c.UserID {
+			client.Encoder.Encode(deleted)
+		}
+	}
+	s.mu.RUnlock()
+
+	s.logger.Info("room delete",
+		"user", c.UserID,
+		"room", msg.Room,
+		"retired", isRetired,
 	)
 }
 

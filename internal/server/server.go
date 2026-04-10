@@ -55,6 +55,15 @@ type Server struct {
 	// each row through performGroupLeave so the kicked user and the
 	// remaining group members get live group_left / group_event echoes.
 	adminKickStop chan struct{}
+
+	// roomRetirementStop signals the room retirement processor goroutine
+	// to stop. Closed by Close() during shutdown. The processor polls
+	// pending_room_retirements every roomRetirementPollInterval and
+	// broadcasts room_retired to connected members for each queued row.
+	// Parallel to adminKickStop — same pattern for the same reason (no
+	// IPC between sshkey-ctl and sshkey-server, table is the bridge).
+	// Phase 12.
+	roomRetirementStop chan struct{}
 }
 
 // adminKickPollInterval is how often the admin-kick processor checks
@@ -64,6 +73,15 @@ type Server struct {
 // determines how soon the affected sessions see the live notification.
 const adminKickPollInterval = 5 * time.Second
 
+// roomRetirementPollInterval is how often the room retirement
+// processor checks the pending_room_retirements queue. Same rationale
+// as adminKickPollInterval — the retirement takes effect at the data
+// layer immediately (CLI mutates rooms.db directly via SetRoomRetired),
+// and this polling interval just determines the live-notification
+// latency for connected members. Five seconds matches the admin kick
+// processor for consistency.
+const roomRetirementPollInterval = 5 * time.Second
+
 // New creates a new server with the given config and data directory.
 func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, error) {
 	dir := ""
@@ -72,13 +90,14 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 	}
 
 	s := &Server{
-		cfg:           cfg,
-		logger:        logger,
-		epochs:        newEpochManager(),
-		limiter:       newRateLimiter(),
-		clients:       make(map[string]*Client),
-		dataDir:       dir,
-		adminKickStop: make(chan struct{}),
+		cfg:                cfg,
+		logger:             logger,
+		epochs:             newEpochManager(),
+		limiter:            newRateLimiter(),
+		clients:            make(map[string]*Client),
+		dataDir:            dir,
+		adminKickStop:      make(chan struct{}),
+		roomRetirementStop: make(chan struct{}),
 	}
 
 	// Open storage if data directory provided
@@ -170,6 +189,15 @@ func (s *Server) ListenAndServe() error {
 	// queued kick through performGroupLeave.
 	go s.runAdminKickProcessor()
 
+	// Start the room retirement processor — Phase 12 parallel to the
+	// admin kick processor. Polls pending_room_retirements every
+	// roomRetirementPollInterval and broadcasts room_retired to
+	// connected members of each newly-retired room. On startup, runs
+	// one immediate consume pass before entering the ticker loop to
+	// handle any rows that were queued while the server was down.
+	s.processPendingRoomRetirements()
+	go s.runRoomRetirementProcessor()
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -233,6 +261,16 @@ func (s *Server) Close() error {
 			// already closed
 		default:
 			close(s.adminKickStop)
+		}
+	}
+
+	// Stop the room retirement processor goroutine
+	if s.roomRetirementStop != nil {
+		select {
+		case <-s.roomRetirementStop:
+			// already closed
+		default:
+			close(s.roomRetirementStop)
 		}
 	}
 

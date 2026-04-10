@@ -81,6 +81,10 @@ func run() error {
 		return cmdAddRoom(dataDir, cmdArgs)
 	case "list-rooms":
 		return cmdListRooms(dataDir)
+	case "retire-room":
+		return cmdRetireRoom(dataDir, cmdArgs)
+	case "list-retired-rooms":
+		return cmdListRetiredRooms(dataDir)
 	case "remove-from-group":
 		return cmdRemoveFromGroup(dataDir, cmdArgs)
 	case "list-groups":
@@ -114,6 +118,14 @@ Commands:
   list-rooms                              List all rooms
   add-to-room --user USER --room ROOM     Add user to a room
   remove-from-room --user USER --room ROOM  Remove user from a room
+  retire-room --room NAME_OR_ID [--reason REASON]
+                                          Retire a room (permanent, mirrors
+                                          retire-user). The display name is
+                                          suffixed so the original can be
+                                          reused. Connected members receive
+                                          a room_retired event within a few
+                                          seconds via the polling bridge.
+  list-retired-rooms                      List all retired rooms
   list-groups                             List all group DMs (and their members)
   remove-from-group --user USER --group GROUP_ID
                                           Eject a user from a group DM. Emergency
@@ -622,6 +634,153 @@ func cmdListRooms(dataDir string) error {
 			status = " (retired)"
 		}
 		fmt.Printf("%-30s members=%d  topic=%q%s\n", r.DisplayName, len(members), r.Topic, status)
+	}
+	return nil
+}
+
+// cmdRetireRoom retires a room by marking it as retired in rooms.db
+// and queueing a broadcast notification for the running server. Mirrors
+// cmdRetireUser's shape (Phase 9) but adds the queue insert that
+// Phase 15 will retrofit onto cmdRetireUser.
+//
+// Security model: sshkey-ctl is designed to run locally on the server
+// box only — the chat protocol does not accept admin commands over the
+// wire. See decision_no_remote_admin_commands.md memory note. This
+// function opens the local rooms.db + data.db directly and never
+// connects to the running server. The "live notification" half is
+// handled by a polling goroutine in the running server that watches
+// pending_room_retirements.
+//
+// Two DB writes, best-effort (non-transactional, they're in different
+// DB files):
+//
+//  1. SetRoomRetired on rooms.db — the authoritative state change.
+//     Suffixes the display name, sets retired_at/retired_by, flips
+//     retired = 1. Errors if the room doesn't exist or is already
+//     retired.
+//  2. RecordPendingRoomRetirement on data.db — queues the broadcast.
+//     Best-effort: if this fails, we warn and exit 0 anyway. The
+//     retirement is already recorded (step 1 succeeded), so connected
+//     clients will discover it lazily via IsRoomRetired checks on
+//     writes and via the retired_rooms catchup on next reconnect.
+//     Admin can re-run the command to retry the queue insert.
+func cmdRetireRoom(dataDir string, args []string) error {
+	var roomArg, reason string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--room":
+			if i+1 < len(args) {
+				roomArg = args[i+1]
+				i++
+			}
+		case "--reason":
+			if i+1 < len(args) {
+				reason = args[i+1]
+				i++
+			}
+		}
+	}
+	if roomArg == "" {
+		return fmt.Errorf("usage: retire-room --room NAME_OR_ID [--reason REASON]")
+	}
+
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	// Resolve the room argument. Accept either a nanoid ("room_xxx")
+	// or a display name (Q7). Prefix check first — if it looks like a
+	// nanoid, try that path; otherwise fall back to display-name lookup.
+	var roomID string
+	var room *store.RoomRecord
+	if strings.HasPrefix(roomArg, "room_") {
+		room, _ = st.GetRoomByID(roomArg)
+		if room != nil {
+			roomID = room.ID
+		}
+	}
+	if room == nil {
+		room, _ = st.GetRoomByDisplayName(roomArg)
+		if room != nil {
+			roomID = room.ID
+		}
+	}
+	if room == nil {
+		return fmt.Errorf("room %q not found", roomArg)
+	}
+
+	if room.Retired {
+		return fmt.Errorf("room %q is already retired (at %s, by %s, now %q)",
+			roomArg, room.RetiredAt, room.RetiredBy, room.DisplayName)
+	}
+
+	// We need the caller's user ID for the retired_by column. The CLI
+	// runs with shell-level auth (whoever has filesystem access), not
+	// with a specific user identity, so we use a sentinel value. This
+	// parallels cmdRetireUser's `reason = "admin"` default — it
+	// documents intent rather than identifying a specific person.
+	const retiredBy = "cli-admin"
+	if reason == "" {
+		reason = "admin"
+	}
+
+	// Step 1: mark the room retired in rooms.db (authoritative).
+	if err := st.SetRoomRetired(roomID, retiredBy, reason); err != nil {
+		return fmt.Errorf("retire room: %w", err)
+	}
+
+	// Re-fetch to get the post-retirement suffixed display name so we
+	// can print it in the confirmation.
+	updated, _ := st.GetRoomByID(roomID)
+	newName := roomID
+	if updated != nil {
+		newName = updated.DisplayName
+	}
+
+	// Step 2: queue a broadcast notification for the running server.
+	// Best-effort — log a warning on failure but exit successfully,
+	// since the retirement itself took effect in step 1.
+	if err := st.RecordPendingRoomRetirement(roomID, retiredBy, reason); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: room retired but broadcast queue insert failed: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Connected clients will detect the retirement lazily via write rejections or reconnect catchup.")
+		fmt.Fprintln(os.Stderr, "You can re-run retire-room to retry the queue insert.")
+		// Still print the success line — the retirement is recorded.
+	}
+
+	fmt.Printf("Room retired: %s (now: %s). Connected clients will be notified within a few seconds.\n",
+		roomID, newName)
+	return nil
+}
+
+// cmdListRetiredRooms prints every retired room from rooms.db. Mirrors
+// cmdListRetired (which lists retired users). Useful after retire-room
+// to confirm the suffixed display name, or to audit previous retirements.
+func cmdListRetiredRooms(dataDir string) error {
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	rooms, err := st.GetAllRooms()
+	if err != nil {
+		return fmt.Errorf("get rooms: %w", err)
+	}
+
+	found := 0
+	for _, r := range rooms {
+		if !r.Retired {
+			continue
+		}
+		members := st.GetRoomMemberIDsByRoomID(r.ID)
+		fmt.Printf("%-30s id=%s  retired_at=%s  retired_by=%s  members=%d\n",
+			r.DisplayName, r.ID, r.RetiredAt, r.RetiredBy, len(members))
+		found++
+	}
+	if found == 0 {
+		fmt.Println("No retired rooms.")
 	}
 	return nil
 }

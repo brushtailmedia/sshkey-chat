@@ -1,6 +1,6 @@
 # sshkey-chat
 
-v0.1.1 — Expect breaking changes until v1.0.
+Expect breaking changes until v1.0.
 
 Private messaging server over SSH with end-to-end encryption. No accounts, no passwords -- identity is your SSH key.
 

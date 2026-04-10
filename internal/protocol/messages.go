@@ -244,6 +244,97 @@ type RoomLeft struct {
 	Reason string `json:"reason,omitempty"` // "" | "admin" | "retirement" | "user_retired"
 }
 
+// Room retirement and delete (Phase 12)
+//
+// Retirement is an admin-initiated, server-wide state change that takes
+// a room out of active service while preserving history. Writes are
+// rejected, the display name is suffixed so the original can be reused,
+// and connected members receive a room_retired broadcast. The CLI
+// runs locally (see decision_no_remote_admin_commands.md memory note)
+// and coordinates with the running server via the
+// pending_room_retirements queue table + a polling goroutine.
+//
+// Delete is a client-initiated, per-user action that removes a room
+// from the user's own view (sidebar entry + local history). It uses a
+// dedicated delete_room protocol verb so all of the user's devices get
+// a clean catchup signal, mirroring the group DM delete pattern from
+// Phase 11.
+
+// RoomRetired is broadcast to every connected member of a room at the
+// moment the room is retired. Carries the post-retirement (suffixed)
+// display name so clients can update their local cache immediately.
+// Sent by the server's runRoomRetirementProcessor polling goroutine
+// after consuming a pending_room_retirements queue row.
+//
+// Also used by the retired_rooms catchup list (RetiredRoomsList) sent
+// during the connect handshake for offline devices.
+type RoomRetired struct {
+	Type        string `json:"type"`              // "room_retired"
+	Room        string `json:"room"`              // room nanoid (unchanged by retirement)
+	DisplayName string `json:"display_name"`      // post-retirement suffixed name
+	RetiredAt   string `json:"retired_at"`        // RFC3339 timestamp
+	RetiredBy   string `json:"retired_by"`        // admin user ID
+	Reason      string `json:"reason,omitempty"`  // optional free-text reason
+}
+
+// RetiredRoomsList is sent during the connect handshake (BEFORE
+// room_list) to catch up devices that were offline when a room was
+// retired from the CLI. Carries every retired room where the user is
+// still in room_members (Q8 filter: users who left before retirement
+// don't see the room in this list).
+//
+// Clients process this by applying the same local effects as a live
+// room_retired event for each entry: mark the room as retired in the
+// local rooms table, update the display name to the suffixed version,
+// and surface the read-only banner if the room is currently in view.
+type RetiredRoomsList struct {
+	Type  string        `json:"type"` // "retired_rooms"
+	Rooms []RoomRetired `json:"rooms"`
+}
+
+// DeleteRoom is the client-initiated request to remove a room from the
+// user's own view. The server runs the leave flow (remove from
+// room_members, broadcast room_event{leave} to remaining members,
+// mark for epoch rotation on active rooms), records a deleted_rooms
+// sidecar row BEFORE the leave for multi-device catchup, and echoes
+// RoomDeleted back to all of the caller's connected sessions.
+//
+// Policy-gated by allow_self_leave_rooms (for active rooms) or
+// allow_self_leave_retired_rooms (for retired rooms); server picks
+// which flag based on IsRoomRetired at the time of the request.
+type DeleteRoom struct {
+	Type string `json:"type"` // "delete_room"
+	Room string `json:"room"`
+}
+
+// RoomDeleted confirms to the caller that their delete_room request
+// succeeded. Sent to every active session of the caller so all of
+// their devices can purge local state in lockstep. Client handlers
+// must call PurgeRoomMessages (drop messages, reactions, pins,
+// epoch keys, and the rooms table row) and remove the sidebar entry.
+//
+// Distinct from RoomLeft: RoomLeft is the leave echo (keeps local
+// history), RoomDeleted is the delete echo (purges local history).
+type RoomDeleted struct {
+	Type string `json:"type"` // "room_deleted"
+	Room string `json:"room"`
+}
+
+// DeletedRoomsList is sent during the connect handshake (BEFORE
+// room_list AND retired_rooms) to catch up devices that were offline
+// when a delete_room was issued from another session. Carries every
+// room ID this user has previously /delete'd that has not yet been
+// pruned from the deleted_rooms sidecar.
+//
+// Clients process this by running the same purge path as RoomDeleted
+// for each room ID: drop all local state for the room. The list is
+// deliberately sent first so the local state is reconciled before the
+// sidebar is populated from room_list.
+type DeletedRoomsList struct {
+	Type  string   `json:"type"` // "deleted_rooms"
+	Rooms []string `json:"rooms"`
+}
+
 // 1:1 DM messages
 //
 // 1:1 DMs are fixed two-party conversations stored in the direct_messages
@@ -819,6 +910,7 @@ const (
 	ErrUnknownRoom         = "unknown_room"
 	ErrUnknownDM           = "unknown_dm"
 	ErrUserRetired         = "user_retired"
+	ErrRoomRetired         = "room_retired" // room has been retired — writes rejected
 	ErrServerBusy          = "server_busy"
 )
 

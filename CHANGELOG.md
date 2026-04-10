@@ -10,6 +10,7 @@
 - All user/room management via `sshkey-ctl` CLI — no runtime TOML editing
 - Server reads user/room data from SQLite on demand — no in-memory caches
 - Protocol signature canonical form uses `room_id` instead of `room_name`
+- `handleLeaveRoom` policy gate now branches on retired state: active rooms use `allow_self_leave_rooms`, retired rooms use `allow_self_leave_retired_rooms` (Phase 12)
 
 ### Added
 - `users.db` — user identity, SSH key authentication, admin status, retirement
@@ -17,12 +18,14 @@
 - `sshkey-ctl promote/demote` commands for admin management
 - Room nanoid IDs in `room_list` message (`id` field alongside `name`)
 - `room_list` handled at client layer for room metadata persistence
-
-### Removed
-- `server.toml` `admins` field
-- Runtime `users.toml` writes (`WriteUsers`, `persistRetirement`)
-- `reloadUsers` config watcher (users.db is source of truth)
-- In-memory `config.Users` and `config.Rooms` runtime caches
+- **Room retirement (Phase 12)** — admins can retire rooms via `sshkey-ctl retire-room`; retired rooms become read-only and display-name-suffixed with a random base62 tag, users can `/delete` them to remove from view
+- `sshkey-ctl retire-room` / `list-retired-rooms` CLI commands (local-only, queue + polling pattern)
+- `retired_at` column on `rooms` table; `pending_room_retirements` queue; `deleted_rooms` sidecar for multi-device `/delete` catchup
+- Protocol: `room_retired`, `retired_rooms` (catchup list), `delete_room`, `room_deleted`, `deleted_rooms` (catchup list) message types; new `ErrRoomRetired` and `ErrForbidden` error codes
+- Write rejections on retired rooms (`send`, `react`, `pin`, `unpin`) now return `ErrRoomRetired`; missing membership gates on `react`/`pin`/`unpin` added for privacy
+- `handleDeleteRoom` server handler — sidecar-first ordering so `deleted_rooms` catchup survives last-member cleanup
+- `allow_self_leave_rooms` (default `false`) and `allow_self_leave_retired_rooms` (default `true`) config flags — dual policy gate for self-leave/self-delete
+- `runRoomRetirementProcessor` background goroutine (5s poll) drains the `pending_room_retirements` queue and broadcasts `room_retired` to connected members
 
 ## v0.1.1 — 2026-04-07
 

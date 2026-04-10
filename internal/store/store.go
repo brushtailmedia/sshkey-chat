@@ -354,6 +354,47 @@ func (s *Store) initDataDB() error {
 			queued_at INTEGER NOT NULL
 		);
 
+		-- deleted_rooms records each user's intent to remove a room from
+		-- their view, independent of the room's actual lifetime. The row
+		-- exists from the moment the user runs /delete and persists until
+		-- either (a) the user is retired, or (b) the row is older than
+		-- roomDeletionRetentionSeconds and the opportunistic prune in
+		-- DeleteRoomRecord reclaims it. Used by sync to catch up offline
+		-- devices that missed the live room_deleted echo. Parallel to
+		-- deleted_groups for group DMs.
+		CREATE TABLE IF NOT EXISTS deleted_rooms (
+			user_id    TEXT NOT NULL,
+			room_id    TEXT NOT NULL,
+			deleted_at INTEGER NOT NULL,
+			PRIMARY KEY (user_id, room_id)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_deleted_rooms_user ON deleted_rooms(user_id);
+		CREATE INDEX IF NOT EXISTS idx_deleted_rooms_age ON deleted_rooms(deleted_at);
+
+		-- pending_room_retirements is the queue the CLI writes to when an
+		-- admin runs sshkey-ctl retire-room. The running server polls this
+		-- table on a periodic ticker and, for each row, broadcasts the
+		-- corresponding room_retired event to connected members of the
+		-- room. This is the bridge between the CLI's direct DB mutation
+		-- and the server's live broadcast surface — the only IPC mechanism
+		-- between sshkey-ctl and the running sshkey-server process for
+		-- retirement actions. Parallel to pending_admin_kicks for group
+		-- admin removal.
+		--
+		-- The CLI also performs the SetRoomRetired mutation directly on
+		-- rooms.db, so retirement takes effect at the data layer even if
+		-- the server is down. The server's processing of this queue is
+		-- purely about delivering the live notifications. Rows are deleted
+		-- after the server has fired the broadcasts.
+		CREATE TABLE IF NOT EXISTS pending_room_retirements (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			room_id    TEXT NOT NULL,
+			retired_by TEXT NOT NULL,
+			reason     TEXT NOT NULL DEFAULT '',
+			queued_at  INTEGER NOT NULL
+		);
+
 		-- 1:1 DMs — fixed two-party conversations with per-user history
 		-- cutoffs. The user pair is canonicalized alphabetically so dedup
 		-- is schema-enforced via UNIQUE(user_a, user_b). The *_left_at

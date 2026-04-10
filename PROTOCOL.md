@@ -459,6 +459,61 @@ Capability: `presence`
 
 `room_members` is a lazy query — clients send it when the info panel or member panel opens for a room, not on every room switch. The server rejects with `not_authorized` if the requesting user is not a member of the room. Retired users are excluded from the response. DM/group DM members are known client-side from `conversation_list` and don't need this request.
 
+### Room `/leave` and `/delete`
+
+Two client-initiated room-exit paths, both gated by server policy flags in `[server]`:
+
+- `allow_self_leave_rooms` (default `false`) — may users self-leave active rooms? Admin-managed membership is the default.
+- `allow_self_leave_retired_rooms` (default `true`) — may users self-leave rooms that an admin has already retired? Users can clean up dead rooms even when active-room leave is locked down.
+
+```json
+// Client -> Server
+{"type":"leave_room","room":"room_V1StGXR8_Z5jdHi6B"}
+
+// Server -> Client (echo to all sessions of the leaver after DB write succeeds)
+{"type":"room_left","room":"room_V1StGXR8_Z5jdHi6B"}
+
+// Server -> Server (broadcast to remaining members)
+{"type":"room_event","room":"room_V1StGXR8_Z5jdHi6B","event":"leave","user":"usr_alice"}
+```
+
+`/delete` is a stronger variant that combines the leave with a local-state purge. Works on both active and retired rooms (the retired case uses the `allow_self_leave_retired_rooms` flag). The server records the deletion intent in a `deleted_rooms` sidecar table before running the leave logic, so the catchup signal survives any last-member cleanup cascade.
+
+```json
+// Client -> Server
+{"type":"delete_room","room":"room_V1StGXR8_Z5jdHi6B"}
+
+// Server -> Client (echo to all sessions of the deleter)
+{"type":"room_deleted","room":"room_V1StGXR8_Z5jdHi6B"}
+```
+
+On receipt of `room_deleted`, clients purge local messages, reactions, and epoch keys for that room, then drop the sidebar entry. The server's `deleted_rooms` sidecar drives offline-device catchup via the `deleted_rooms` list below.
+
+### Room Retirement
+
+Admins retire rooms via `sshkey-ctl retire-room` (local-only — no remote admin verb). The CLI writes directly to the server DB and queues a `pending_room_retirements` row; a background processor (5s poll) drains the queue, looks up connected members, and broadcasts `room_retired` to them.
+
+Retiring a room:
+
+- Sets `retired_at` on the `rooms` row
+- Appends a 4-character base62 suffix to the room's display name (e.g. `general` → `general_A3fQ`) so an admin can create a new room with the original name without collision
+- Freezes epoch rotation (no new keys will be generated; existing history remains decryptable with the epoch keys clients already have)
+- Rejects further writes (`send`, `react`, `pin`, `unpin`) from any member with `room_retired` error code
+- Does NOT remove anyone from `room_members` — retirement is orthogonal to leaving. Users can still `/delete` the retired room to remove it from their view.
+
+```json
+// Server -> Client (broadcast to connected members when retirement happens)
+{"type":"room_retired","room":"room_V1StGXR8_Z5jdHi6B","name":"general_A3fQ","retired_at":1712764800}
+
+// Server -> Client (handshake catchup — rooms retired while this device was offline)
+{"type":"retired_rooms","rooms":[{"room":"room_V1StGXR8_Z5jdHi6B","name":"general_A3fQ","retired_at":1712764800}]}
+
+// Server -> Client (handshake catchup — rooms /delete'd from another device while this one was offline)
+{"type":"deleted_rooms","rooms":["room_V1StGXR8_Z5jdHi6B"]}
+```
+
+Clients treat retired rooms as read-only: the sidebar shows a `(retired)` marker, the messages view renders a "this room was archived by an admin" banner, and only `/delete` remains as an exit path. The `retired_rooms` and `deleted_rooms` lists are delivered during the handshake **before** `room_list`, so clients can filter out retired/deleted rooms from the active set before rendering.
+
 ### File Transfer
 
 Capability: `file_transfer`
@@ -691,6 +746,8 @@ The `/pending` command in the terminal client sends `list_pending_keys` and disp
 | `unknown_conversation` | Not a member of this conversation |
 | `unknown_room` | Not in this room |
 | `user_retired` | Sender or target of a DM operation has a retired account |
+| `room_retired` | Room has been retired by an admin — writes (`send`, `react`, `pin`, `unpin`) are rejected |
+| `forbidden` | Policy gate denied the request (e.g. `allow_self_leave_rooms = false` on `/leave` or `/delete`) |
 
 ## Client-Side Storage
 

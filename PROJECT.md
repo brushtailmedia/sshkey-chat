@@ -1321,6 +1321,15 @@ format = "json"                   # structured JSON, one object per line
 - **Room-specific permissions** -- per-user room access managed via `rooms.db` (`room_members` table), controlled by `sshkey-ctl add-to-room/remove-from-room`
 - **Topic / description** -- stored per room in `rooms.db`
 - **Room list on connect** -- client receives list of rooms the user has access to
+- **Self-leave policy** -- off by default. `[server] allow_self_leave_rooms = false` (the default) keeps membership admin-managed. Set to `true` to let users `/leave` rooms on their own. Hot-reloadable — the server reads the flag under the cfg RLock on every `leave_room` / `delete_room`, so a config reload takes effect without client action.
+- **Room retirement** -- admins can permanently archive a room via `sshkey-ctl retire-room`. Retirement is *monotonic*: once set, `retired_at` is never cleared. Retired rooms:
+  - Get a 4-character base62 suffix appended to their display name (e.g. `general` → `general_A3fQ`) so admins can create a new room with the original name without collision
+  - Reject all writes (`send`, `react`, `pin`, `unpin`) with `room_retired` error code
+  - Freeze epoch rotation — no new keys are generated, but existing history remains decryptable with the epoch keys clients already hold
+  - Are broadcast to connected members via `room_retired`; offline devices get the list via `retired_rooms` during the handshake catchup
+  - Can be removed from a user's view via `/delete` (governed by `allow_self_leave_retired_rooms`, default `true`)
+- **`/delete` for rooms** -- sends `delete_room`, which records a `deleted_rooms` sidecar row, runs the leave logic, and echoes `room_deleted` to the deleter's sessions. The sidecar drives offline-device catchup via `deleted_rooms` in the handshake, so a user who `/delete`'d a room from their laptop also sees it removed when their phone reconnects. The sidecar row survives any last-member cleanup cascade because `DeleteRoomRecord` deliberately does not touch `deleted_rooms`.
+- **CLI is local-only** -- `sshkey-ctl retire-room` writes directly to the server DB and enqueues a `pending_room_retirements` row. A background goroutine (5s poll) drains the queue and broadcasts to connected members. This mirrors the Phase 11 `pending_admin_kicks` pattern and keeps remote admin verbs out of the chat protocol.
 
 ---
 
