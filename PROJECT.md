@@ -559,14 +559,14 @@ On leave:
 
 #### Message Deletion
 
-No message editing -- delete and resend. This is a permanent design decision, not a deferred feature.
+Message editing is a planned feature — see the **Future: Message Editing** section below for the full design, and `message_editing.md` for the implementation plan.
 
 ```json
 // Client -> Server
 {"type":"delete","id":"msg_abc123"}
 
 // Server -> Client (pushed to all in room/conversation -- includes routing)
-{"type":"deleted","id":"msg_abc123","deleted_by":"alice","ts":1712345679,"room":"general"}
+{"type":"deleted","id":"msg_abc123","deleted_by":"alice","ts":1712345679,"room":"room_V1StGXR8_Z5jdHi6B"}
 ```
 
 **Deletion permissions:**
@@ -1385,7 +1385,7 @@ Handled entirely client-side. Fall back to text placeholder + download for unsup
 
 ### Message Deletion
 
-Same model as Signal/WhatsApp -- best-effort, no false promises. No message editing -- delete and resend.
+Same model as Signal/WhatsApp -- best-effort, no false promises. Message editing is a planned feature (see **Future: Message Editing** below and `message_editing.md`), tracked alongside delete rather than instead of it.
 
 - User sends a delete request for a message ID via the protocol (own messages only, admins can delete any)
 - Server removes message from DB (or marks as tombstone)
@@ -1393,8 +1393,8 @@ Same model as Signal/WhatsApp -- best-effort, no false promises. No message edit
 - Connected clients remove from display immediately
 - Offline clients receive the tombstone on next sync and remove from local DB. Tombstones are interleaved with regular messages in `sync_batch` and `history_result`:
   ```json
-  {"type":"deleted","id":"msg_abc123","deleted_by":"alice","ts":1712345679,"room":"general"}
-  {"type":"deleted","id":"msg_def456","deleted_by":"bob","ts":1712345700,"conversation":"conv_xK9mQ2pR"}
+  {"type":"deleted","id":"msg_abc123","deleted_by":"alice","ts":1712345679,"room":"room_V1StGXR8_Z5jdHi6B"}
+  {"type":"deleted","id":"msg_def456","deleted_by":"bob","ts":1712345700,"dm":"dm_xK9mQ2pR"}
   ```
   Client processes tombstones in order: if the original message exists in local DB, remove it; if not (message was before the client's sync window), ignore the tombstone.
 - Accept that a determined user with a modified client or DB backup could retain anything they've already seen -- this is an inherent limitation of client-side storage and not worth adding complexity to fight
@@ -1945,19 +1945,26 @@ type Overlay interface {
 
 ## Future: Message Editing
 
-**Status:** Feature request — design complete.
+**Status:** Planned feature — design complete, implementation tracked in `message_editing.md` (Phase 14).
 
 ### Constraints
 
-- **Only the user's most recent message in the current room/conversation** can be edited — not globally, not across contexts. Server validates per-room/per-conversation.
+- **Three context-specific verb families**, mirroring the send/receive split that shipped in Phase 11:
+  - Rooms: `edit` / `edited` (uses `room` + `epoch`, no `wrapped_keys`)
+  - Group DMs: `edit_group` / `group_edited` (uses `group` + `wrapped_keys` over current group members)
+  - 1:1 DMs: `edit_dm` / `dm_edited` (uses `dm` + `wrapped_keys` over exactly 2 entries)
+- **Only the user's most recent message in the current room/conversation** can be edited — not globally, not across contexts. Server validates per-room / per-group / per-dm. "Most recent" includes thread replies — a reply IS the user's most recent message in the parent's context if nothing followed it.
 - **Room messages:** must be in the current or previous epoch (same grace window as sends). Epoch rotation naturally bounds the edit window (~100 messages or 1 hour).
-- **DM messages:** no epoch restriction (per-message keys are independent)
+- **DM / group DM messages:** no epoch restriction (per-message keys are independent), but still gated by the "most recent" rule. Editing an old message first requires scrolling past nothing else from the same user.
+- **Retired rooms reject edits.** Phase 12 added `IsRoomRetired` gates to `handleSend`, `handleReact`, `handlePin`, `handleUnpin`; `handleEdit` joins that set. Retired rooms are read-only, full stop.
+- **Left contexts block the edit shortcut.** A user who has `/leave`d a room or group sees the archived read-only banner. The TUI input block in `app.go` already covers `IsLeft || IsRoomRetired` — edit-mode entry routes through the same gate.
 - **Original content is replaced** — no edit history retained (matches Signal behavior)
-- **`edited_at` is set by the server** (authoritative, in the envelope, not the payload)
-- **Body-only edits.** Attachments are immutable — `file_ids` stay on the message. To change attachments, delete and re-send.
-- **`reply_to` is immutable.** Edits cannot change what a message replies to. Thread structure must be stable.
+- **`edited_at` is set by the server** (authoritative, in the envelope, not the payload). Added as an `omitempty` field to the `Message`, `GroupMessage`, and `DM` protocol types.
+- **Body-only edits.** Attachments are immutable — `file_ids` stay on the message. The `Edit` / `EditGroup` / `EditDM` types do NOT carry `FileIDs` fields, so there's structurally nothing to mutate. Server reads the original row's file_ids on replace and preserves them.
+- **`reply_to` is immutable.** Same structural enforcement — the edit types don't carry `ReplyTo`. Thread structure stays stable.
 - **No notifications on edit.** Mention extraction runs on the edited body for highlight rendering, but no push/notification fires. An edit is a correction, not a new message.
-- **Cannot edit deleted messages.** Server rejects edit/edit_dm if `deleted = 1`. Client does not offer the edit shortcut on deleted messages. Enforced at both layers.
+- **Cannot edit deleted messages.** Server rejects all three edit verbs if `deleted = 1`. Client does not offer the edit shortcut on deleted messages. Enforced at both layers.
+- **Byte-identical privacy** — `handleEdit` / `handleEditGroup` / `handleEditDM` are new membership-gated handlers. Per the Conventions section, each needs a `TestHandleEditX_PrivacyResponsesIdentical` regression test using `bytes.Equal` on wire frames (unknown-context, non-member, and "not the original author" all return the same byte-identical response).
 
 ### Room editing
 
@@ -1965,39 +1972,57 @@ Same epoch key, new ciphertext. Simple — the key everyone already has encrypts
 
 ```json
 // Client -> Server
-{"type":"edit","id":"msg_abc123","room":"general","epoch":3,"payload":"base64...","signature":"base64..."}
+{"type":"edit","id":"msg_abc123","room":"room_V1StGXR8_Z5jdHi6B","epoch":3,"payload":"base64...","signature":"base64..."}
 
 // Server -> Client (broadcast — full envelope, not a diff)
-{"type":"edited","id":"msg_abc123","room":"general","from":"alice","ts":1712345680,"epoch":3,"payload":"base64...","signature":"base64...","edited_at":1712345690}
+{"type":"edited","id":"msg_abc123","room":"room_V1StGXR8_Z5jdHi6B","from":"usr_alice","ts":1712345680,"epoch":3,"payload":"base64...","signature":"base64...","edited_at":1712345690}
 ```
 
-Server validates: sender is original author, message is their most recent in the room, epoch is current or previous, message is not deleted. Replaces stored payload, sets `edited_at`. Broadcasts full envelope with `edited_at`.
+Server validates: sender is original author, message is their most recent in the room, epoch is current or previous, message is not deleted, room is not retired. Replaces stored payload, sets `edited_at`. Broadcasts full envelope with `edited_at`.
 
-### DM editing
+### Group DM editing
 
-Fresh per-message key for the edit. The original K_msg is effectively dead — server no longer stores content encrypted with it. This preserves per-message key isolation (compromising the old key doesn't expose the edited content, and vice versa).
+Fresh per-message key for the edit, wrapped for each current group member. The original K_msg is dead — server no longer stores content encrypted with it.
 
 ```json
 // Client -> Server
-{"type":"edit_dm","id":"msg_def456","conversation":"conv_abc",
- "wrapped_keys":{"alice":"base64...","bob":"base64..."},
+{"type":"edit_group","id":"msg_def456","group":"group_xK9mQ2pR",
+ "wrapped_keys":{"usr_alice":"base64...","usr_bob":"base64...","usr_carol":"base64..."},
  "payload":"base64...","signature":"base64..."}
 
-// Server -> Client (broadcast — full envelope, not a diff)
-{"type":"dm_edited","id":"msg_def456","conversation":"conv_abc","from":"alice","ts":1712345680,
- "wrapped_keys":{"alice":"base64...","bob":"base64..."},
+// Server -> Client (broadcast — full envelope)
+{"type":"group_edited","id":"msg_def456","group":"group_xK9mQ2pR","from":"usr_alice","ts":1712345680,
+ "wrapped_keys":{"usr_alice":"base64...","usr_bob":"base64...","usr_carol":"base64..."},
  "payload":"base64...","signature":"base64...","edited_at":1712345690}
 ```
 
-Server validates: sender is original author, message is their most recent in the conversation, `wrapped_keys` matches current member list, message is not deleted. Replaces stored payload and wrapped_keys, sets `edited_at`. Message ID and original timestamp preserved — replies, reactions, and pins still reference the same ID.
+Server validates: sender is original author, message is their most recent in the group, `wrapped_keys` matches current group member list, message is not deleted. Replaces stored payload and wrapped_keys, sets `edited_at`.
+
+### 1:1 DM editing
+
+Same pattern as groups but `wrapped_keys` has exactly two entries (both parties).
+
+```json
+// Client -> Server
+{"type":"edit_dm","id":"msg_ghi789","dm":"dm_yL0nR3qS",
+ "wrapped_keys":{"usr_alice":"base64...","usr_bob":"base64..."},
+ "payload":"base64...","signature":"base64..."}
+
+// Server -> Client (broadcast — full envelope)
+{"type":"dm_edited","id":"msg_ghi789","dm":"dm_yL0nR3qS","from":"usr_alice","ts":1712345680,
+ "wrapped_keys":{"usr_alice":"base64...","usr_bob":"base64..."},
+ "payload":"base64...","signature":"base64...","edited_at":1712345690}
+```
+
+Server validates: sender is original author, message is their most recent in the DM, `wrapped_keys` has exactly the two DM parties, message is not deleted, neither party has `/leave`d the DM (the Phase 11 one-way ratchet cutoff). Replaces stored payload and wrapped_keys, sets `edited_at`. Message ID and original timestamp preserved — replies, reactions, and pins still reference the same ID.
 
 ### Rate limiting
 
-Edits have their own rate limit bucket: `edits_per_minute`, default 10/min. Separate from sends — an edit is a correction, not a conversation action, and shouldn't compete with the send rate.
+Edits have their own rate limit bucket: `edits_per_minute`, default 10/min. Separate from sends — an edit is a correction, not a conversation action, and shouldn't compete with the send rate. Added as a new `EditsPerMinute` field on `config.RateLimits` with a `server.toml` documentation entry. One shared bucket across all three edit verbs (rooms, groups, DMs) — a user editing furiously in one context shouldn't get a free pass elsewhere.
 
 ### Sync and history
 
-Server stores `edited_at` on the message row. When serializing for `sync_batch` or `history_result`, include `edited_at` in the envelope when non-zero. Clients that reconnect after an edit see the edited body with the "(edited)" marker. Old clients ignore the unknown field (forward compatibility rule).
+Server stores `edited_at` on the message row. When serializing for `sync_batch` or `history_result`, include `edited_at` in the envelope when non-zero. The `Message`, `GroupMessage`, and `DM` protocol types gain an `EditedAt int64 \`json:"edited_at,omitempty"\`` field. Clients that reconnect after an edit see the edited body with the "(edited)" marker. Old clients ignore the unknown field (forward compatibility rule).
 
 ### Client DB
 
@@ -2007,7 +2032,7 @@ Same migration pattern as `deleted`/`deleted_by`:
 ALTER TABLE messages ADD COLUMN edited_at INTEGER NOT NULL DEFAULT 0;
 ```
 
-On receiving `edited`/`dm_edited`, update body and set `edited_at` in local DB and in-memory DisplayMessage. `LoadFromDB` maps it. `View()` renders "(edited)" in timestamp style when non-zero.
+On receiving `edited` / `group_edited` / `dm_edited`, update body and set `edited_at` in local DB and in-memory `DisplayMessage`. `LoadFromDB` maps it. `View()` renders "(edited)" in timestamp style when non-zero.
 
 ### TUI rendering
 
@@ -2015,13 +2040,14 @@ On receiving `edited`/`dm_edited`, update body and set `edited_at` in local DB a
 
 ### TUI interaction
 
-- **Up arrow** when input is empty: populates input with last message body, enters edit mode. Sends as `edit`/`edit_dm` on Enter. `Esc` cancels and returns to normal compose mode.
+- **Up arrow on empty input, when input is focused:** populates input with the user's last editable message body in the current context, enters edit mode. Fires only when `focus == FocusInput`. Up-arrow in messages/sidebar focus keeps its existing navigation meaning. Does not fire when the context is archived (left or retired room) or when the last message is deleted.
+- **Dispatch:** Enter in edit mode sends `edit` / `edit_group` / `edit_dm` depending on whether `messages.room` / `messages.group` / `messages.dm` is set. `Esc` cancels and returns to normal compose mode.
 - **Visual feedback:** Input bar shows "Editing message" indicator (same style as "replying to" indicator).
-- **Stale epoch:** If the epoch rotated between pressing Up and pressing Enter, server rejects. Client shows "Edit window expired" — user can delete the message instead.
+- **Stale epoch:** If the epoch rotated between pressing Up and pressing Enter, server rejects with `edit_window_expired`. Client shows "Edit window expired" and returns to compose mode — user can delete the message instead.
 
 ### Signatures
 
-Same canonical serialization as normal sends. The edit signature covers the new payload bytes + room/epoch (rooms) or conversation/wrapped_keys (DMs). Recipients verify against the sender's key. Invalid signature = same "failed verification" warning as for normal messages.
+Same canonical serialization as normal sends. The edit signature covers the new payload bytes + room/epoch (rooms) or group/wrapped_keys (groups) or dm/wrapped_keys (1:1 DMs). Recipients verify against the sender's key. Invalid signature = same "failed verification" warning as for normal messages.
 
 ### Multi-device
 
@@ -2029,7 +2055,7 @@ Last-write-wins. Two devices editing the same message concurrently — second ed
 
 ### Reactions on edit
 
-Server clears reactions on the edited message (reactions were for the original content). Broadcasts `reaction_removed` for each cleared reaction so clients stay in sync.
+Server clears reactions on the edited message (reactions were for the original content) by reusing the existing `store.DeleteReactionsForMessage` helper from `handleDelete`. Broadcasts `reaction_removed` for each cleared reaction so clients stay in sync.
 
 ### Why not reuse the original DM key?
 
@@ -2042,6 +2068,13 @@ Changing the message ID breaks `reply_to`, reaction, and pin references. Other c
 ### Why full envelope broadcast, not a diff?
 
 A diff is fragile — if the client's local copy diverged (missed a sync, different decryption state), the patch produces garbage. A full envelope is self-contained and idempotent. A client that missed the original message can display the edited version standalone.
+
+### New error codes
+
+- `edit_not_authorized` — sender is not the original author (returned byte-identical to unknown/non-member per privacy convention)
+- `edit_not_most_recent` — target message is no longer the user's most recent in the context
+- `edit_window_expired` — room epoch rotated since send, edit window closed
+- `edit_deleted_message` — target message has `deleted = 1` (returned byte-identical to not-author per privacy convention)
 
 ---
 

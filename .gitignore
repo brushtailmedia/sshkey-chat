@@ -44,7 +44,6 @@ firebase-sa.json
 docker/config/host_key
 
 # Design docs (internal reference only)
-room_retirement.md
 refactor_plan.md
 performance_optimization.md
 leave_chunks.md

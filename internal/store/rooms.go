@@ -316,11 +316,13 @@ func (s *Store) IsRoomRetired(roomID string) bool {
 // Errors if the room doesn't exist, is already retired, or if every
 // retry attempt collides. Mirrors SetUserRetired's shape from users.go.
 //
-// Called from the CLI's cmdRetireRoom (direct DB mutation, no protocol
-// verb — see the Security model section of room_retirement.md). After
-// SetRoomRetired succeeds, the CLI inserts a row into
-// pending_room_retirements so the running server can broadcast
-// room_retired to connected members.
+// Called from the CLI's cmdRetireRoom. sshkey-ctl runs locally on the
+// server box only — the chat protocol does not accept admin verbs over
+// the wire, so retirement is a direct DB mutation rather than a
+// protocol message. After SetRoomRetired succeeds, the CLI inserts a
+// row into pending_room_retirements so the running server can broadcast
+// room_retired to connected members. See PROJECT.md "Rooms / Channels"
+// for the full security rationale.
 func (s *Store) SetRoomRetired(roomID, retiredBy, _reason string) error {
 	// Verify the room exists and isn't already retired. We do this as a
 	// separate read to produce a clearer error than the UPDATE's

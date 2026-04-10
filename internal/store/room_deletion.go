@@ -121,8 +121,11 @@ type PendingRoomRetirement struct {
 // the retirement takes effect at the data layer regardless of whether
 // the server processes the queue row.
 //
-// Mirrors RecordPendingAdminKick. See the Security model section of
-// room_retirement.md for the design rationale.
+// Mirrors RecordPendingAdminKick. The queue + polling pattern exists
+// because sshkey-ctl runs locally on the server box only — it cannot
+// send protocol messages to the running server, so CLI → server
+// coordination happens via these shared SQLite tables. See PROJECT.md
+// "Rooms / Channels" for the full security rationale.
 func (s *Store) RecordPendingRoomRetirement(roomID, retiredBy, reason string) error {
 	_, err := s.dataDB.Exec(
 		`INSERT INTO pending_room_retirements (room_id, retired_by, reason, queued_at) VALUES (?, ?, ?, ?)`,
