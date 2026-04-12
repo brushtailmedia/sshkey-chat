@@ -1,8 +1,10 @@
 # sshkey-chat
 
+> Server architecture, design philosophy, and operational reference. For the wire protocol see [PROTOCOL.md](PROTOCOL.md). For client-specific implementation details see each client's own docs (e.g., sshkey-term's [DESIGN.md](https://github.com/brushtailmedia/sshkey-term/blob/main/DESIGN.md)).
+
 **[sshkey.chat](https://sshkey.chat)**
 
-A private messaging platform that uses SSH for transport, encryption, and authentication. End-to-end encrypted -- the server never sees message content. No accounts, no passwords, no OAuth. Identity is your SSH key.
+A private messaging platform that uses SSH for transport, encryption, and authentication. End-to-end encrypted -- the server never sees message content. No accounts, no passwords, no OAuth. Your identity is your SSH key.
 
 Inspired by [shazow/ssh-chat](https://github.com/shazow/ssh-chat). Credit is in README.
 

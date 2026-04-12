@@ -1,10 +1,32 @@
 # Protocol Reference
 
-Everything you need to build a client for the sshkey chat server.
+> Complete wire protocol reference for building a compatible client. Language-agnostic — this document describes the protocol surface only. Client implementation decisions (local DB schema, caching, TUI rendering) belong in each client's own docs.
+
+Everything you need to build a client for the sshkey-chat server.
+
+**How to read this document:** Start with **Connection** and **Handshake** to understand the session lifecycle. Then read the message types relevant to what you're building (rooms, DMs, groups). The **Encryption** section covers the crypto primitives you'll need to implement. The **Minimal Client Checklist** at the bottom is a good starting point for a first implementation.
 
 ## Connection
 
 Connect via SSH to the server on port 2222 (configurable). Only Ed25519 keys are supported -- the server rejects RSA, ECDSA, and other key types.
+
+### User approval
+
+The server does not allow anonymous access. Before a user can connect and chat, their SSH public key must be approved by a server operator via `sshkey-ctl approve`. The approval flow:
+
+1. **Unknown key connects.** The SSH handshake succeeds (the key type is valid Ed25519) but the server does not recognize the key. The server records the key fingerprint in a `pending_keys` table and immediately disconnects with an error: `{"type":"error","code":"client_required","message":"..."}`. The client should display the user's public key and fingerprint so they can share it with the server operator for approval.
+2. **Operator approves.** The server operator runs `sshkey-ctl approve --key "ssh-ed25519 AAAA..." --rooms general,support` on the server box. This creates the user in `users.db` and assigns them to the specified rooms.
+3. **User reconnects.** The next SSH connection with the approved key proceeds to the normal handshake (`server_hello` → `client_hello` → `welcome`).
+
+**Retired accounts** are also rejected at the SSH handshake level — the key is recognized but the account is marked as retired, and the server disconnects with "account retired."
+
+**Admin notifications.** When an unknown key attempts to connect, the server broadcasts an `admin_notify` event to all connected admin clients:
+
+```json
+{"type":"admin_notify","event":"pending_key","fingerprint":"SHA256:xx...","attempts":3,"first_seen":"2026-04-03T14:22:00Z"}
+```
+
+This lets admins know someone is waiting for approval without polling.
 
 Three SSH channels per connection:
 
@@ -22,34 +44,69 @@ The server's SSH host key is Ed25519, generated on first run. Clients should use
 Client opens SSH connection with Ed25519 key
 Client opens 3 session channels (Channel 1: protocol, Channel 2: downloads, Channel 3: uploads)
 
-  Server -> {"type":"server_hello","protocol":"sshkey-chat","version":1,"server_id":"chat.example.com","capabilities":["typing","reactions","read_receipts","file_transfer","link_previews","presence","pins","mentions","unread","status","signatures"]}
+  Server -> {"type":"server_hello","protocol":"sshkey-chat","version":1,
+             "server_id":"chat.example.com",
+             "capabilities":["typing","reactions","read_receipts","file_transfer",
+                             "link_previews","presence","pins","mentions","unread",
+                             "status","signatures"]}
 
-  Client -> {"type":"client_hello","protocol":"sshkey-chat","version":1,"client":"my-client","client_version":"0.1.0","device_id":"dev_V1StGXR8_Z5jdHi6B-myT","last_synced_at":"2026-04-01T00:00:00Z","capabilities":["typing","reactions","signatures"]}
+  Client -> {"type":"client_hello","protocol":"sshkey-chat","version":1,
+             "client":"my-client","client_version":"0.1.0",
+             "device_id":"dev_V1StGXR8_Z5jdHi6B-myT",
+             "last_synced_at":"2026-04-01T00:00:00Z",
+             "capabilities":["typing","reactions","read_receipts","file_transfer",
+                             "presence","pins","mentions","unread","status","signatures"]}
 
-  Server -> {"type":"welcome","user":"usr_alice","display_name":"Alice Chen","admin":true,"rooms":["room_V1StGXR8_Z5jdHi6B","room_abc123def456"],"groups":["group_xK9mQ2pR"],"pending_sync":true,"active_capabilities":["typing","reactions","signatures"]}
+  Server -> {"type":"welcome","user":"usr_alice","display_name":"Alice Chen","admin":true,
+             "rooms":["room_V1StGXR8_Z5jdHi6B","room_abc123def456"],
+             "groups":["group_xK9mQ2pR"],
+             "pending_sync":true,
+             "active_capabilities":["typing","reactions","read_receipts","file_transfer",
+                                    "presence","pins","mentions","unread","status","signatures"]}
 ```
 
-The client must respond within 2 seconds or the server disconnects with an install banner.
+**Handshake rules:**
 
-The `welcome` envelope carries only the room and group ID lists — 1:1 DMs are enumerated separately via `dm_list` in the sequence below.
+- The client must send `client_hello` within **2 seconds** of receiving `server_hello`. Timeout = the server disconnects with a `client_required` error and an install banner.
+- `protocol` must be `"sshkey-chat"` and `version` must be `1`. Mismatch = disconnect with install banner.
+- The `capabilities` fields exist in the handshake but **the server currently sends all message types regardless of the negotiated set**. The fields are informational and reserved for future gating. Clients must handle (or ignore) any message type the server sends, not rely on the capability list to suppress them.
+- `last_synced_at` controls whether sync batches follow: empty string = no sync (first connect, or client doesn't want catchup), non-empty ISO 8601 timestamp = server sends messages newer than that timestamp.
+- `pending_sync` in the welcome is `true` when `last_synced_at` was non-empty — it tells the client to expect `sync_batch` messages before `sync_complete`.
 
-After `welcome`, the server sends (in this order):
+The `welcome` envelope carries room and group ID lists but NOT 1:1 DMs — those arrive separately via `dm_list` in the connect sequence below.
 
-1. `deleted_rooms` -- rooms the user has `/delete`d from their view on another device; catchup for offline devices (Phase 12). Sent BEFORE `room_list` so the client purges before populating the sidebar.
-2. `retired_rooms` -- rooms that were retired by an admin while this device was offline (Phase 12). Also sent BEFORE `room_list`.
+### Device check (between welcome and connect sequence)
+
+After sending `welcome`, the server checks the device:
+
+1. **Device revoked?** If the device ID has been revoked by an admin or the user, the server sends `device_revoked` and disconnects immediately. The client should show the revocation reason and exit.
+2. **Too many devices?** If registering this device would exceed `max_per_user` (default 10), the server sends `device_limit_exceeded` error and disconnects. The client should tell the user to revoke an old device.
+3. **Device registered.** The server upserts the device in `devices` table with a `last_synced` timestamp.
+
+Only after these checks pass does the connect sequence begin.
+
+### Connect sequence
+
+After the device check, the server sends (in this exact order):
+
+1. `deleted_rooms` -- rooms the user has `/delete`d from their view on another device; catchup for offline devices. Sent BEFORE `room_list` so the client purges before populating the active list.
+2. `retired_rooms` -- rooms that were retired by an admin while this device was offline. Also sent BEFORE `room_list`.
 3. `room_list` -- rooms the user is currently a member of (nanoid IDs + display names; the `room` field in all subsequent messages carries the nanoid ID, not the display name)
-4. `deleted_groups` -- group DMs the user has `/delete`d on another device; catchup for offline devices (Phase 11). Sent BEFORE `group_list`.
+4. `deleted_groups` -- group DMs the user has `/delete`d on another device; catchup for offline devices. Sent BEFORE `group_list`.
 5. `group_list` -- group DMs the user is currently a member of
 6. `dm_list` -- 1:1 DMs (includes the per-user `left_at_for_caller` cutoff for silent multi-device `/delete` propagation)
-7. `profile` -- one per visible user (includes pubkey and fingerprint)
-8. `retired_users` -- users whose accounts have been retired and are visible to this client (so historical messages render with the `[retired]` marker)
-9. `epoch_key` -- current epoch key per room (if any)
-10. `unread` -- unread counts per room / group / dm (if any)
-11. `pins` -- pinned message IDs per room (if any)
-12. `sync_batch` -- catch-up messages (if `pending_sync` is true), may be multiple batches
-13. `sync_complete` -- sync is done, switch to real-time push
+7. `profile` -- one message per visible user (includes pubkey, fingerprint, display name, avatar, retired status)
+8. `retired_users` -- list of users whose accounts have been retired and are visible to this client
+9. `epoch_key` -- one message per room, carrying the current epoch key wrapped for this user
+10. `unread` -- unread counts per room / group / dm
+11. `pins` -- pinned message IDs + full message envelopes per room
+12. `sync_batch` -- catch-up messages (only if `pending_sync` is true), may be multiple batches with `has_more` pagination
+13. `sync_complete` -- sync is done, `synced_to` timestamp included. Client should store this for the next reconnect's `last_synced_at`.
+14. `presence` -- online status broadcast for every currently connected user visible to this client
 
-The catchup lists (`deleted_rooms`, `retired_rooms`, `deleted_groups`) are ordered BEFORE their corresponding active-list message so the client reconciles local state before populating the sidebar. Without that ordering, a room the user `/delete`d on their phone would briefly appear in the sidebar on their laptop before the catchup purge fired.
+After `sync_complete`, the server switches to real-time push — messages, events, and broadcasts arrive as they happen.
+
+The catchup lists (`deleted_rooms`, `retired_rooms`, `deleted_groups`) are ordered BEFORE their corresponding active-list message. This ordering is critical: a room the user `/delete`d on one device must be purged from the other device's local state BEFORE `room_list` populates it, otherwise the deleted room would briefly appear as active.
 
 ## Device Identity
 
@@ -61,13 +118,7 @@ dev_V1StGXR8_Z5jdHi6B-myT
 
 Libraries: `jaevor/go-nanoid` (Go), `nanoid` crate (Rust), `nanoid` npm package (JS).
 
-Max 10 devices per user. Server rejects with `device_limit_exceeded` if exceeded.
-
-## Capability Negotiation
-
-The server advertises capabilities in `server_hello`. The client requests a subset in `client_hello`. The server confirms the active set in `welcome`. Only confirmed capabilities are active for the session.
-
-Available capabilities: `typing`, `reactions`, `read_receipts`, `file_transfer`, `link_previews`, `presence`, `pins`, `mentions`, `unread`, `status`, `signatures`.
+Max 10 devices per user (configurable via `server.toml` `[devices] max_per_user`). Server rejects with `device_limit_exceeded` if exceeded during the handshake device check.
 
 **Forward compatibility:** Clients must ignore unknown message types and unknown fields within known message types. Never reject or error on unrecognised data.
 
@@ -144,21 +195,55 @@ Unwrapping:
 Go: `x/crypto/curve25519`, `crypto/aes`, `crypto/cipher`, `x/crypto/hkdf`.
 Rust: `x25519-dalek`, `aes-gcm`, `hkdf` crates.
 
+### Payload Encryption / Decryption
+
+The key wrapping above gets you the symmetric key. Here's how to use it for the actual message payload:
+
+**Encrypting (sending):**
+
+1. Build the payload JSON (`{"body":"...","seq":42,"device_id":"dev_...","mentions":[...],"reply_to":"...","attachments":[...]}`)
+2. Get the key:
+   - **Rooms:** look up the current epoch key for this room (from your local `epoch_keys` cache)
+   - **Groups/DMs:** generate a random 256-bit AES key (`K_msg`), then wrap it for each member using the Key Wrapping algorithm above
+3. Generate a random 96-bit (12-byte) nonce
+4. AES-256-GCM encrypt the payload JSON bytes with the key and nonce
+5. Prepend the nonce to the ciphertext: `encrypted = nonce (12 bytes) || ciphertext`
+6. Base64-encode: `payload = base64(encrypted)`
+7. Put `payload` in the envelope's `payload` field. For groups/DMs, put the per-member wrapped keys in `wrapped_keys`.
+
+**Decrypting (receiving):**
+
+1. Base64-decode the `payload` field
+2. Split: first 12 bytes = nonce, remaining = ciphertext
+3. Get the key:
+   - **Rooms:** look up the epoch key for the `epoch` value in the envelope
+   - **Groups/DMs:** unwrap `wrapped_keys[your_user_id]` using the Key Wrapping algorithm above to recover `K_msg`
+4. AES-256-GCM decrypt with the key and nonce
+5. Parse the resulting bytes as JSON to get `body`, `seq`, `device_id`, `mentions`, `reply_to`, `attachments`
+
+**Key point:** the nonce is always prepended to the ciphertext, not sent separately. There is no `nonce` field in the envelope — it's embedded in the `payload` blob.
+
 ### Message Signatures
 
 Client signs every message and reaction with their Ed25519 private key. The signature is in the envelope (server can see it, can't modify it without detection).
 
-**Canonical serialization:**
-- Rooms: `Sign(payload_bytes || room_id_utf8 || epoch_as_big_endian_uint64)`
-- Group DMs: `Sign(payload_bytes || group_id_utf8 || wrapped_keys_canonical)`
-- 1:1 DMs: `Sign(payload_bytes || dm_id_utf8 || wrapped_keys_canonical)`
+**Canonical serialization (two forms):**
 
-Where `wrapped_keys_canonical` is the wrapped key values concatenated in sorted user-ID order. All fields are raw bytes (payload is the base64-decoded ciphertext, not the base64 string). The three forms differ only in the context ID (room / group / dm) and the key-material suffix (epoch counter for rooms, wrapped-key blob for DMs), reflecting the two encryption models.
+- **Rooms:** `Sign(payload_bytes || room_id_utf8 || epoch_as_big_endian_uint64)`
+- **Group DMs and 1:1 DMs:** `Sign(payload_bytes || context_id_utf8 || wrapped_keys_canonical)`
+  - `context_id` is the group nanoid for group DMs, or the dm nanoid for 1:1 DMs
+  - Same signing function for both — the context ID is the only difference
+
+Where `wrapped_keys_canonical` is the wrapped key **values** (not keys/usernames) concatenated in sorted **user-ID order**. Implementation: sort the `wrapped_keys` map keys (user nanoids) alphabetically, then concatenate the corresponding base64-decoded wrapped-key values in that order.
+
+All fields are raw bytes: `payload_bytes` is the base64-decoded ciphertext (not the base64 string), `room_id_utf8` / `context_id_utf8` is the UTF-8 nanoid string, `epoch` is an 8-byte big-endian uint64.
 
 **Verification rules:**
 - Valid signature: display normally
-- Missing signature (sender doesn't support `signatures`): show "unsigned" indicator
-- Invalid signature: hard warning -- "This message failed signature verification"
+- Missing signature: show "unsigned" indicator
+- Invalid signature: hard warning — "This message failed signature verification"
+
+**Reactions use the same signing scheme** as messages in their respective context (room reactions sign with epoch, DM/group reactions sign with wrapped keys).
 
 ### Replay Detection
 
@@ -193,6 +278,8 @@ Every room message, group DM, and 1:1 DM is split into:
 - **Payload** (encrypted, server-opaque): `body`, `seq`, `device_id`, `mentions`, `reply_to`, `attachments`, `previews`
 
 The server routes on the envelope but never decrypts the payload. The three context fields (`room`, `group`, `dm`) are mutually exclusive — exactly one is set per message envelope, and it selects the crypto model (epoch key vs per-message wrapped key).
+
+**Server-set fields:** `from`, `id`, and `ts` are always set by the server, never by the client. Clients should NOT set `from` on outbound messages — the server ignores it and fills in the authenticated user ID from the SSH connection. `id` is a server-generated nanoid (`msg_` prefix). `ts` is the server's wall clock (unix seconds), the single source of truth for message ordering.
 
 ### Room Messages
 
@@ -322,7 +409,7 @@ Any member can rename. Pass an empty string to clear the name (group falls back 
 {"type":"group_left","group":"group_xK9mQ2pR","reason":""}
 ```
 
-The leaver receives `group_left` on all of their active sessions so every device greys the sidebar entry and flips the messages view to read-only. Remaining members receive `group_event{event:"leave"}`. The client flow is "send `leave_group` → wait for `group_left` echo → update local state" — never optimistically flip state on the send.
+The leaver receives `group_left` on all of their active sessions so every device can update its local state to reflect the leave (mark as archived, disable input, etc.). Remaining members receive `group_event{event:"leave"}`. The client flow is "send `leave_group` → wait for `group_left` echo → update local state" — never optimistically flip state on the send.
 
 `reason` values on `group_event` and `group_left`:
 - `""` (empty) — self-leave via `/leave`
@@ -341,14 +428,14 @@ The leaver receives `group_left` on all of their active sessions so every device
 
 `delete_group` is a stronger variant of `leave_group`. The server runs the leave logic (remove from `group_members`, broadcast `group_event{leave}` to remaining members) AND records a `deleted_groups` sidecar row so the caller's offline devices can catch up on reconnect. The `group_deleted` echo goes ONLY to the caller's sessions — remaining members see a normal leave event.
 
-On receipt of `group_deleted`, clients purge all local messages and drop the sidebar entry entirely. Offline devices catch up via the `deleted_groups` catchup list delivered BEFORE `group_list` during the handshake:
+On receipt of `group_deleted`, clients purge all local messages and remove the group from their active list. Offline devices catch up via the `deleted_groups` catchup list delivered BEFORE `group_list` during the handshake:
 
 ```json
 // Server -> Client (handshake catchup)
 {"type":"deleted_groups","groups":["group_xK9mQ2pR","group_abc123"]}
 ```
 
-Clients process each entry by running the same purge path as `group_deleted`. The ordering (catchup before list) means the sidebar is populated from `group_list` AFTER the purged IDs have been reconciled.
+Clients process each entry by running the same purge path as `group_deleted`. The ordering (catchup before list) means the active group list is populated from `group_list` AFTER the purged IDs have been reconciled.
 
 **Last-member cleanup.** If a `leave_group` or `delete_group` removes the last remaining member, the server runs the full cleanup cascade: drop the `group_conversations` row, the `group_members` rows, and unlink the per-group DB file. The `deleted_groups` sidecar rows are deliberately preserved by this cascade so the catchup path still works for the user's other devices.
 
@@ -577,6 +664,13 @@ The server filters pins by the user's `first_epoch` -- new members only see pins
 
 Profiles include the user's full public key and fingerprint. Use these for key wrapping and key pinning.
 
+**Display name rules:**
+- Min 2, max 32 characters
+- No leading/trailing whitespace (server trims)
+- Server-enforced uniqueness (case-insensitive) — returns `username_taken` if the name collides with another user
+- Invalid names return `invalid_profile`
+- Rate-limited: 5 profile changes per minute (default)
+
 ### User Status
 
 ```json
@@ -655,7 +749,7 @@ Three separate list messages are delivered during the handshake, one per context
 {"type":"room_members_list","room":"room_V1StGXR8_Z5jdHi6B","members":["usr_abc","usr_def","usr_ghi"]}
 ```
 
-`room_members` is a lazy query — clients send it when the info panel or member panel opens for a room, not on every room switch. The server rejects non-members with `unknown_room` (byte-identical to the response for a room that doesn't exist). Retired users are excluded from the response. Group DM and 1:1 DM members are known client-side from `group_list` / `dm_list` and don't need this request.
+`room_members` is a lazy query — clients send it when they need the full member list for a room (e.g., when displaying room details), not on every room switch. The server rejects non-members with `unknown_room` (byte-identical to the response for a room that doesn't exist). Retired users are excluded from the response. Group DM and 1:1 DM members are known client-side from `group_list` / `dm_list` and don't need this request.
 
 ### Room `/leave` and `/delete`
 
@@ -685,7 +779,7 @@ Two client-initiated room-exit paths, both gated by server policy flags in `[ser
 {"type":"room_deleted","room":"room_V1StGXR8_Z5jdHi6B"}
 ```
 
-On receipt of `room_deleted`, clients purge local messages, reactions, and epoch keys for that room, then drop the sidebar entry. The server's `deleted_rooms` sidecar drives offline-device catchup via the `deleted_rooms` list below.
+On receipt of `room_deleted`, clients purge local messages, reactions, and epoch keys for that room, then remove the room from their active list. The server's `deleted_rooms` sidecar drives offline-device catchup via the `deleted_rooms` list below.
 
 ### Room Retirement
 
@@ -710,7 +804,7 @@ Retiring a room:
 {"type":"deleted_rooms","rooms":["room_V1StGXR8_Z5jdHi6B"]}
 ```
 
-Clients treat retired rooms as read-only: the sidebar shows a `(retired)` marker, the messages view renders a "this room was archived by an admin" banner, and only `/delete` remains as an exit path. The `retired_rooms` and `deleted_rooms` lists are delivered during the handshake **before** `room_list`, so clients can filter out retired/deleted rooms from the active set before rendering.
+Clients should treat retired rooms as read-only — disable message input and surface the retired state to the user. Only `/delete` remains as an exit path. The `retired_rooms` and `deleted_rooms` lists are delivered during the handshake **before** `room_list`, so clients can filter out retired/deleted rooms from the active set before rendering.
 
 ### File Transfer
 
@@ -920,7 +1014,7 @@ Delivered only to connected admin clients.
 ]}
 ```
 
-The `/pending` command in the terminal client sends `list_pending_keys` and displays the result in a read-only panel. Approve/reject is done via `sshkey-ctl`.
+Admin clients send `list_pending_keys` and present the result to the operator. Approve/reject is done via `sshkey-ctl`.
 
 ### Errors
 
@@ -935,11 +1029,11 @@ The `/pending` command in the terminal client sends `list_pending_keys` and disp
 | `not_authorized` | Caller cannot perform the action (e.g. delete another user's message without admin rights) |
 | `rate_limited` | Any rate limit exceeded (messages, uploads, history, deletes, reactions, DM creation, profile changes, pins) |
 | `message_too_large` | Body exceeds 16KB |
-| `upload_too_large` | File exceeds server max |
+| `upload_too_large` | File exceeds server max (default 50MB) |
 | `epoch_conflict` | Another client's rotation was accepted first |
 | `stale_member_list` | Membership changed during rotation |
 | `invalid_wrapped_keys` | DM or group DM `wrapped_keys` don't match the current member list |
-| `device_limit_exceeded` | Max devices per user reached |
+| `device_limit_exceeded` | Max devices per user reached (default 10) |
 | `invalid_epoch` | Epoch too old (outside grace window) or not yet confirmed |
 | `unknown_room` | Caller is not a member of this room (also returned byte-identical for "room does not exist" to protect the social graph) |
 | `unknown_group` | Caller is not a member of this group DM (same byte-identical privacy rule as `unknown_room`) |
@@ -948,14 +1042,54 @@ The `/pending` command in the terminal client sends `list_pending_keys` and disp
 | `room_retired` | Room has been retired by an admin — writes (`send`, `react`, `unreact`, `pin`, `unpin`, `delete`) are rejected |
 | `forbidden` | Policy gate denied the request (e.g. `allow_self_leave_rooms = false` on `leave_room` or `delete_room`) |
 | `server_busy` | A cleanup mutex is held by a concurrent operation; clients should retry with short backoff (used on `create_dm` races) |
+| `invalid_message` | Malformed JSON envelope, missing required fields, or invalid values (e.g. creating a DM with yourself) |
+| `too_many_members` | Group DM exceeds 150-member hard cap |
+| `invalid_profile` | Display name validation failed (too short, too long, invalid characters) |
+| `username_taken` | Display name already in use by another user (server-enforced uniqueness, case-insensitive) |
+| `internal` | Server-side failure (DB error, etc.) — client should retry or reconnect |
+| `client_required` | Connection from an unknown key or non-protocol SSH session — shows install/approval instructions |
 
 **Byte-identical privacy responses.** The three `unknown_*` codes carry byte-identical wire responses across their ambiguous failure modes — "room does not exist" and "not a member of an existing room" return exactly the same bytes, so a probing client cannot enumerate existence via error diffs. The same invariant applies to groups and DMs.
 
+### Rate Limits
+
+The server enforces per-user rate limits on most operations. When exceeded, the server returns `{"type":"error","code":"rate_limited","message":"..."}`. All limits are configurable via `server.toml` `[rate_limits]`. Defaults:
+
+| Operation | Default | Scope |
+|---|---|---|
+| Room/group/DM messages | 5/second | Per user |
+| Uploads | 60/minute | Per user |
+| Connections | 20/minute | Per IP |
+| Failed auth attempts | 5/minute | Per IP |
+| Typing indicators | 1/second | Per user |
+| History requests | 50/minute | Per user |
+| Message deletes | 10/minute | Per user (regular), 50/minute (admin) |
+| Reactions | 30/minute | Per user |
+| DM creation | 5/minute | Per user |
+| Profile changes | 5/minute | Per user |
+| Pin/unpin | 10/minute | Per user |
+
+Clients should handle `rate_limited` errors gracefully — show a "Slow down" message in the status bar and retry after a brief pause. Do not retry automatically in a tight loop.
+
+### Server Validation
+
+The server validates every incoming message. Common rejection reasons a client builder should handle:
+
+- **Message body size:** 16KB max. Exceeding returns `message_too_large`.
+- **File upload size:** 50MB max (configurable). Exceeding returns `upload_too_large`.
+- **Group DM member count:** 150 max. Exceeding returns `too_many_members`.
+- **Display name:** 2-32 characters, no leading/trailing whitespace, unique (case-insensitive). Invalid returns `invalid_profile`; taken returns `username_taken`.
+- **Ed25519 keys only:** RSA, ECDSA, and other key types are rejected at the SSH handshake level.
+- **Malformed messages:** Missing required fields, invalid JSON, or wrong field types return `invalid_message`.
+- **Epoch validation:** Messages encrypted with an epoch older than the grace window (current - 1) are rejected with `invalid_epoch`.
+- **Wrapped-key validation:** `wrapped_keys` on group/DM sends must match the current member list exactly. Mismatch returns `invalid_wrapped_keys`.
+- **Content hash on uploads:** `content_hash` is required on `upload_start`. Format: `blake2b-256:<hex>`. The server verifies the hash after receiving the file; mismatch returns `hash_mismatch`.
+
+---
+
 ## Client-Side Storage
 
-Single encrypted SQLite DB per server. Key derived from SSH private key via HKDF-SHA256. Use SQLCipher for transparent encryption.
-
-Full schema from day one -- all tables exist regardless of capabilities. No migrations for feature toggles.
+Single encrypted SQLite DB per server. Key derived from SSH private key via HKDF-SHA256. Use SQLCipher for transparent encryption. Full schema from day one — all tables exist at creation, no conditional schema.
 
 Recommended libraries:
 - Go: `modernc.org/sqlite` (pure Go) or `go-sqlcipher` (encrypted)
@@ -978,9 +1112,266 @@ A minimal client that can connect and chat needs:
    - `send_group` + `group_message` for group DMs
    - `send_dm` + `dm` for 1:1 DMs
 8. Receive and decrypt all three message types. Each carries exactly one context field (`room`, `group`, or `dm`) on the envelope.
-9. Ed25519 signature generation and verification (if the `signatures` capability is advertised). Canonical form differs per context — see Encryption → Message Signatures.
+9. Ed25519 signature generation and verification. The server always expects signatures on sends. Canonical form differs per context — see Encryption → Message Signatures.
 10. Local key storage (pinned peer fingerprints, epoch keys per room)
 
 A minimal client that understands only rooms + 1:1 DMs is still a usable chat client — group DMs can be deferred — but the handshake sequence MUST be handled correctly (including catchup lists before active-list messages) or multi-device `/delete` will desync.
 
 Everything else (typing, reactions, presence, file transfer, pins, read receipts, safety numbers, replay detection, `/leave`, `/delete`, room retirement) is optional and can be added incrementally. When you add `/leave` or `/delete`, wait for the server echo (`room_left`, `group_left`, `dm_left`, `room_deleted`, `group_deleted`) before touching local state — the server is authoritative.
+
+---
+
+## Reconnect Guidance
+
+Clients should handle disconnects gracefully and reconnect automatically.
+
+**SSH keepalive:** Send SSH keepalive packets every 30 seconds. If 3 consecutive keepalives receive no response, treat the connection as dead and begin reconnecting. This detects dead connections faster than TCP timeout (which can take minutes).
+
+**Exponential backoff:** On disconnect, wait 1s before the first reconnect attempt, then double the delay on each failure: 1s → 2s → 4s → 8s → 16s → 30s → 60s cap. Reset to 1s on successful reconnect. No maximum retry count — keep trying indefinitely.
+
+**What to send on reconnect:** Same `client_hello` as the initial connect, but with `last_synced_at` set to the `synced_to` value from the previous session's `sync_complete`. This tells the server to send only messages newer than that timestamp. If you don't have a stored `synced_to` (first connect, or local DB was wiped), send an empty `last_synced_at` — the server skips sync batches entirely and you start fresh.
+
+**Idempotent sync:** `sync_batch` messages are safe to replay — all messages have unique IDs. If you receive a message you already have locally, skip it.
+
+**Don't queue messages while offline.** The server doesn't accept messages without a live SSH connection. The client can't encrypt for the correct epoch without fresh keys from the server. Show the user that input is disabled during reconnect.
+
+**Status feedback:** Show the user what's happening — "Reconnecting (attempt 3, next retry in 8s)" is better than a silent spinner. On successful reconnect, show "Connected" briefly, then clear.
+
+---
+
+## Connection Lifecycle
+
+```
+SSH connect (Ed25519 key)
+    │
+    ├── Key not approved ──────────→ "client_required" error, disconnect
+    ├── Account retired ───────────→ rejected at SSH level, disconnect
+    │
+    ▼
+server_hello → client_hello (2s timeout) → welcome
+    │
+    ├── Device revoked ────────────→ "device_revoked", disconnect
+    ├── Too many devices ──────────→ "device_limit_exceeded", disconnect
+    │
+    ▼
+Connect sequence (13+ messages: catchup lists → active lists → profiles → keys → sync)
+    │
+    ▼
+sync_complete
+    │
+    ▼
+Real-time push ←──────────────────→ Client sends messages, reactions, etc.
+    │
+    ├── SSH keepalive timeout ─────→ Reconnect with exponential backoff
+    ├── Server shutdown ───────────→ "server_shutdown" with reconnect_in hint
+    ├── Device revoked mid-session → "device_revoked", disconnect
+    │
+    ▼
+Disconnect → Reconnect loop (client_hello with last_synced_at)
+```
+
+---
+
+## Wire Examples (End-to-End Flows)
+
+### Sending a room message
+
+```
+Client                                      Server
+  │                                            │
+  │  1. Look up epoch key for room_abc         │
+  │     (from local epoch_keys cache)          │
+  │                                            │
+  │  2. Build payload JSON:                    │
+  │     {"body":"Hello!","seq":42,             │
+  │      "device_id":"dev_laptop"}             │
+  │                                            │
+  │  3. Encrypt payload with epoch key:        │
+  │     nonce = random 12 bytes                │
+  │     ciphertext = AES-256-GCM(key, nonce,   │
+  │                               payload)     │
+  │     payload_b64 = base64(nonce||ciphertext) │
+  │                                            │
+  │  4. Sign: sig = Sign(payload_bytes          │
+  │           || room_id || epoch_be64)         │
+  │                                            │
+  ├─ {"type":"send",                          ─┤
+  │   "room":"room_abc","epoch":3,             │
+  │   "payload":"base64...","signature":"..."}  │
+  │                                            │
+  │                    5. Server validates:     │
+  │                       - membership         │
+  │                       - room not retired   │
+  │                       - rate limit         │
+  │                       - epoch in window    │
+  │                       - body size ≤ 16KB   │
+  │                    6. Assigns ID + TS      │
+  │                    7. Stores in room DB    │
+  │                    8. Broadcasts to members│
+  │                                            │
+  │◀─ {"type":"message","id":"msg_xyz",       ─┤
+  │    "from":"usr_alice","room":"room_abc",    │
+  │    "ts":1712345678,"epoch":3,              │
+  │    "payload":"base64...","signature":"..."} │
+  │                                            │
+  │  9. Decrypt with same epoch key            │
+  │  10. Verify signature against alice's key  │
+  │  11. Display message                       │
+```
+
+### Sending a 1:1 DM
+
+```
+Client                                      Server
+  │                                            │
+  │  1. Generate random K_msg (256-bit AES)    │
+  │  2. Wrap K_msg for alice + bob:            │
+  │     wrapped_keys = {                       │
+  │       "usr_alice": wrap(K_msg, alice_pub), │
+  │       "usr_bob":   wrap(K_msg, bob_pub)    │
+  │     }                                      │
+  │  3. Encrypt payload with K_msg             │
+  │  4. Sign with dm_id + wrapped_keys         │
+  │                                            │
+  ├─ {"type":"send_dm","dm":"dm_abc",         ─┤
+  │   "wrapped_keys":{...},                    │
+  │   "payload":"base64...","signature":"..."}  │
+  │                                            │
+  │◀─ {"type":"dm","id":"msg_xyz",            ─┤
+  │    "from":"usr_alice","dm":"dm_abc",        │
+  │    "ts":1712345678,                        │
+  │    "wrapped_keys":{...},                   │
+  │    "payload":"base64...","signature":"..."} │
+  │                                            │
+  │  5. Unwrap own key: K_msg =                │
+  │     unwrap(wrapped_keys["usr_bob"],        │
+  │            bob_priv)                       │
+  │  6. Decrypt payload with K_msg             │
+  │  7. Verify signature against alice's key   │
+```
+
+### Epoch rotation
+
+```
+Client A (triggers rotation)                Server
+  │                                            │
+  │  A sends a message to room_abc             │
+  │  Server checks: rotation needed?           │
+  │  (100 msgs or 1 hour since last rotation)  │
+  │                                            │
+  │◀─ {"type":"epoch_trigger",                ─┤
+  │    "room":"room_abc","new_epoch":4,         │
+  │    "members":[                             │
+  │      {"user":"usr_alice","pubkey":"..."},   │
+  │      {"user":"usr_bob","pubkey":"..."}      │
+  │    ]}                                      │
+  │                                            │
+  │  1. Generate random 256-bit epoch key      │
+  │  2. Wrap for each member in the list       │
+  │  3. Hash member list for verification      │
+  │                                            │
+  ├─ {"type":"epoch_rotate","room":"room_abc", ─┤
+  │   "epoch":4,                               │
+  │   "wrapped_keys":{"usr_alice":"...","usr_bob":"..."},│
+  │   "member_hash":"SHA256:abc..."}            │
+  │                                            │
+  │◀─ {"type":"epoch_confirmed",              ─┤
+  │    "room":"room_abc","epoch":4}             │
+  │                                            │
+  │  *** NOW safe to use epoch 4 for sends *** │
+  │                                            │
+  │  All members receive epoch_key:            │
+  │◀─ {"type":"epoch_key","room":"room_abc",  ─┤
+  │    "epoch":4,"wrapped_key":"..."}           │
+```
+
+**Critical:** Do NOT use the new epoch key for anything until `epoch_confirmed` is received. If the server rejects the rotation (e.g., another client's rotation was accepted first — `epoch_conflict`), discard the key entirely.
+
+### File upload
+
+```
+Client                                      Server
+  │                                            │
+  │  1. Encrypt file with epoch key (rooms)    │
+  │     or per-file key K_file (DMs)           │
+  │  2. Hash encrypted bytes:                  │
+  │     content_hash = blake2b-256(encrypted)   │
+  │                                            │
+  ├─ Ch1: {"type":"upload_start",             ─┤
+  │   "upload_id":"up_001",                    │
+  │   "size":45000,                            │
+  │   "content_hash":"blake2b-256:a1b2c3...",   │
+  │   "room":"room_abc"}                       │
+  │                                            │
+  │◀─ Ch1: {"type":"upload_ready",            ─┤
+  │    "upload_id":"up_001"}                    │
+  │                                            │
+  ├─ Ch3: binary frame (id_len|id|data_len|data)─┤
+  │   id = "up_001"                            │
+  │   data = encrypted file bytes              │
+  │                                            │
+  │  Server verifies content_hash              │
+  │                                            │
+  │◀─ Ch1: {"type":"upload_complete",         ─┤
+  │    "upload_id":"up_001","file_id":"file_xyz"}│
+  │                                            │
+  │  3. Reference file_id in message:          │
+  ├─ {"type":"send","room":"room_abc",        ─┤
+  │   "epoch":3,"file_ids":["file_xyz"],       │
+  │   "payload":"base64...","signature":"..."}  │
+```
+
+### Deleting a room from your view
+
+```
+Client                                      Server
+  │                                            │
+  ├─ {"type":"delete_room",                   ─┤
+  │   "room":"room_abc"}                       │
+  │                                            │
+  │  Server:                                   │
+  │  1. Records deletion in deleted_rooms      │
+  │     sidecar (survives cleanup cascade)     │
+  │  2. Removes user from room_members         │
+  │  3. Broadcasts room_event{leave} to        │
+  │     remaining members                      │
+  │  4. Echoes room_deleted to caller's        │
+  │     sessions (all devices)                 │
+  │  5. If last member: cleanup cascade        │
+  │     (drop room row, DB file, epoch keys)   │
+  │                                            │
+  │◀─ {"type":"room_deleted",                 ─┤
+  │    "room":"room_abc"}                       │
+  │                                            │
+  │  Client on receipt:                        │
+  │  - Purge local messages, reactions,        │
+  │    epoch keys for room_abc                 │
+  │  - Remove from active list                 │
+  │  - Clear active context if viewing room_abc│
+  │                                            │
+  │  Other devices (offline):                  │
+  │  - On next connect, deleted_rooms catchup  │
+  │    includes room_abc → same purge path     │
+```
+
+---
+
+## Common Pitfalls
+
+Things every client builder hits at least once:
+
+1. **Forgetting to include yourself in `wrapped_keys`.** On `send_group` and `send_dm`, you must wrap K_msg for your OWN user ID too, not just the other parties. Without this, your other devices can't decrypt your own messages. The server validates that `wrapped_keys` matches the full member list (including you).
+
+2. **Using base64 strings instead of decoded bytes for signatures.** The signature canonical form operates on raw bytes: `payload_bytes` is the base64-DECODED ciphertext, not the base64 string. If you sign the base64 string, every signature verification will fail.
+
+3. **Sending messages before `sync_complete`.** The server will accept them, but your local state may be inconsistent — you might not have the latest epoch key, or you might duplicate a message that's already in a sync batch. Wait for `sync_complete` before enabling the input.
+
+4. **Not handling `server_busy` on `create_dm`.** The server holds a cleanup mutex briefly during DM leave operations. If a `create_dm` hits this window, it returns `server_busy`. Retry with a short backoff (1-2 seconds). Don't show an error to the user — it resolves itself.
+
+5. **Touching local state before the server echo.** When the user runs `/leave` or `/delete`, do NOT update the local DB or UI until the server sends back `room_left`, `group_left`, `dm_left`, `room_deleted`, or `group_deleted`. If the server rejects the request (policy denied, rate limited), the user's local state would be corrupted. The echo is the confirmation.
+
+6. **Assuming `room_list` contains all rooms you've ever been in.** It only contains rooms where the user is a CURRENT member. Rooms the user has left are absent from the list. Rooms the user has `/delete`d are absent. Retired rooms the user is still a member of ARE included (the retirement flag is delivered separately via `retired_rooms` catchup). If your client needs to show "left" rooms, that state must come from local storage.
+
+7. **Not storing `synced_to` from `sync_complete`.** This timestamp is your reconnect bookmark. Without it, every reconnect either gets no sync (empty `last_synced_at`) or the wrong sync window. Store it in your local DB immediately on receipt.
+
+8. **Epoch key confusion during rotation.** During the grace window (between `epoch_trigger` and `epoch_confirmed`), keep sending with the OLD epoch. The server accepts messages encrypted with the current or previous epoch. Only switch to the new epoch after receiving `epoch_confirmed`. If you receive `epoch_conflict`, another client's rotation won — discard your generated key and wait for the winning key via `epoch_key`.
