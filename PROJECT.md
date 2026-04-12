@@ -522,7 +522,7 @@ DM conversations have a Nano ID (`conv_` prefix). A 1:1 DM is just a group DM wi
 - Server deduplicates 1:1 conversations -- creating a DM with just `["bob"]` when a 1:1 already exists returns the existing conversation
 - Group DMs are distinct -- creating a new group with the same members creates a new conversation (like Slack/Signal)
 - Members are set at creation. To add someone, create a new conversation. Old conversation stays as-is (no retroactive access to history)
-- **Max group DM size: 50 members.** Beyond this, use a room -- epoch-based key rotation amortises the per-member wrapping cost. A 50-member group DM means 50 key wraps per message and per reaction, which is fine (microseconds each, ~5KB of wrapped keys). At 100+ members the overhead becomes noticeable and rooms are the better model.
+- **Max group DM size: 150 members.** Hard cap enforced by the server (`too_many_members` error). Per-message wrapped keys scale linearly: 150 members means ~12KB of key material per message and ~15ms of crypto per send. **Recommendation for client implementers:** for groups with 50+ members, surface a warning suggesting a room instead — rooms use a shared epoch key and amortise the per-member wrapping cost. The `sshkey-term` terminal client implements this as a status-bar hint on group creation. The server does not enforce the 50-member soft threshold; it is a UX guideline only.
 - Conversation list sent on connect alongside room list
 - **Group naming:** `create_dm` accepts an optional `name` field. Any member can rename via `rename_conversation`. Groups without a name display as the member list (e.g., "Bob, Carol"). 1:1 DMs typically don't use names — the client displays the other person's display_name.
 

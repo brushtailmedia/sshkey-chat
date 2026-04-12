@@ -47,7 +47,7 @@ Initial release.
 - E2E encrypted rooms (epoch keys, AES-256-GCM) and DMs (per-message keys)
 - Ed25519 key authentication — no passwords, no key rotation
 - Room management with epoch key rotation on membership changes
-- DM conversations (1:1 and group, max 50 members)
+- DM conversations (1:1 and group, max 150 members)
 - File transfer with BLAKE2b-256 content hash verification
 - Reactions, typing indicators, read receipts, presence, pins, mentions
 - Message signatures (Ed25519) with replay detection

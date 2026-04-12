@@ -1334,12 +1334,18 @@ func (s *Server) handleCreateGroup(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Max group size: 50 members
-	if len(allMembers) > 50 {
+	// Max group size: 150 members. Per-message wrapped keys scale linearly
+	// with member count (~80 bytes per member per message on the wire, plus
+	// one ECDH+HKDF+AES-GCM wrapping op per member per send). At 150
+	// members this is ~12KB of key material per message and ~15ms of crypto
+	// per send — acceptable for most use cases but noticeably heavier than
+	// rooms (which use a shared epoch key). The client shows a soft warning
+	// at 50 members suggesting a room for high-traffic conversations.
+	if len(allMembers) > 150 {
 		c.Encoder.Encode(protocol.Error{
 			Type:    "error",
 			Code:    "too_many_members",
-			Message: "Group DMs are limited to 50 members. Use a room for larger groups.",
+			Message: "Group DMs are limited to 150 members. Use a room for larger groups.",
 		})
 		return
 	}

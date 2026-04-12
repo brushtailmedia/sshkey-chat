@@ -1,4 +1,4 @@
-# Message Editing (Phase 14) — Design + Plan
+# Message Editing (Phase 15) — Design + Plan
 
 This document is the working plan for message editing. It lifts the design from PROJECT.md's "Future: Message Editing" section, updates it for the post-Phase-11 / post-Phase-12 codebase, and chunks the implementation into a reviewable order. Open questions are tracked inline in a Decision log at the bottom.
 
@@ -430,7 +430,7 @@ Work the chunks in order. Each chunk is a complete unit of work with its own gat
    - Add new error codes to the errors table
 2. Update `CHANGELOG.md` in both repos
 3. Update `PROJECT.md` — move the "Future: Message Editing" section text into a "Message Editing" subsection under the main features area (no longer future). The design content stays, the "Status" line changes to "Shipped".
-4. Mark this document as implemented: add `> **Shipped 2026-XX-XX** — Phase 14 complete.` to the top
+4. Mark this document as implemented: add `> **Shipped 2026-XX-XX** — Phase 15 complete.` to the top
 
 **Gate:** All docs updated. Full test suite passes on both repos. Commit.
 
@@ -505,7 +505,7 @@ Open or recently-resolved design questions. Keep the resolution notes — they'r
 
 ## Out of scope
 
-These are explicitly NOT part of Phase 14:
+These are explicitly NOT part of Phase 15:
 
 - **Edit history viewer.** Matches Q1 — we don't store it.
 - **Edit notifications / push.** An edit is a correction, not a new message.
@@ -520,7 +520,7 @@ These are explicitly NOT part of Phase 14:
 ## Cross-references
 
 - **PROJECT.md → Future: Message Editing** — canonical design (kept in sync with this document)
-- **refactor_plan.md → Phase 14** — high-level step summary pointing here
+- **refactor_plan.md → Phase 15** — high-level step summary pointing here
 - **Conventions section** — byte-identical privacy pattern that edit handlers follow
 - **Phase 11** — three-verb send/receive split that edit mirrors, reaction clearing helper
 - **Phase 12** — `IsRoomRetired` gate pattern, `IsLeft || IsRoomRetired` input block

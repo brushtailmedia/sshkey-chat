@@ -1,4 +1,8 @@
-# Add users here. Each user needs an Ed25519 SSH public key.
+# Seed file — processed on FIRST SERVER START ONLY.
+# After that, users.db is the source of truth and this file is ignored.
+# Use sshkey-ctl to manage users after the initial seed.
+#
+# Each user needs an Ed25519 SSH public key.
 #
 # Example:
 # [alice]
@@ -9,9 +13,12 @@
 # To get a user's public key:
 #   cat ~/.ssh/id_ed25519.pub
 #
-# To approve a pending user:
+# After first start, approve pending users via:
 #   docker exec sshkey-server sshkey-ctl pending
-#   Then add their key here and the server will hot-reload.
+#   docker exec sshkey-server sshkey-ctl approve --key "ssh-ed25519 AAAA..." --rooms general
+#
+# Admin status is managed via sshkey-ctl, NOT in config files:
+#   docker exec sshkey-server sshkey-ctl promote usr_abc123
 
 [admin]
 key = "REPLACE_WITH_YOUR_ED25519_PUBLIC_KEY"

@@ -291,7 +291,7 @@ Group DMs are multi-party conversations with 3+ members, fixed at creation time.
  "payload":"base64...","signature":"base64..."}
 ```
 
-- **Max 50 members.** Beyond that, use a room.
+- **Max 150 members** (server-enforced hard cap). Per-message wrapped keys scale linearly with member count (~80 bytes per member per message on the wire). At 150 members, each message carries ~12KB of key material. **Recommended:** for groups with 50+ members, clients should suggest using a room instead — rooms use a shared epoch key and are significantly more efficient for high-traffic conversations. The server does not enforce this recommendation; it is a UX guideline for client implementers.
 - **Membership is fixed at creation.** There is no `add_to_group` protocol verb — group membership is set by `create_group` and stays that way. A user who wants a different set of participants creates a new group. See `PROJECT.md` section "Groups are immutable peer DMs" for the design rationale.
 - **`wrapped_keys` must match the current member list exactly.** Server rejects with `invalid_wrapped_keys` on mismatch. Membership is small enough that new sends re-wrapping for every recipient is cheap.
 - **Include yourself in `wrapped_keys`** so your other devices can decrypt your own sends.
