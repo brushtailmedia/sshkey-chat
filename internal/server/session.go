@@ -633,6 +633,14 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 		s.handleLeaveDM(c, raw)
 	case "rename_group":
 		s.handleRenameGroup(c, raw)
+	case "add_to_group":
+		s.handleAddToGroup(c, raw)
+	case "remove_from_group":
+		s.handleRemoveFromGroup(c, raw)
+	case "promote_group_admin":
+		s.handlePromoteGroupAdmin(c, raw)
+	case "demote_group_admin":
+		s.handleDemoteGroupAdmin(c, raw)
 	case "history":
 		s.handleHistory(c, raw)
 	case "react":
@@ -1608,38 +1616,84 @@ func (s *Server) handleLeaveGroup(c *Client, raw json.RawMessage) {
 		}
 	}
 
-	// Self-leave: empty reason. The shared performGroupLeave handles
-	// removal, last-member cleanup, broadcasting group_event{leave} to
-	// remaining members, and echoing group_left to the leaver's own
+	// Phase 14: last-admin gate. If caller is the sole admin AND the
+	// group has other members, reject with ErrForbidden — they must
+	// promote a successor first. The check is skipped when the caller
+	// is the SOLE member of the group: there's no governance concern
+	// (nobody to be ungoverned), no successor to promote to, and the
+	// performGroupLeave path will correctly trigger last-member cleanup
+	// on its own. Without this carve-out a solo member would be
+	// permanently trapped.
+	if s.store != nil {
+		if isAdmin, _ := s.store.IsGroupAdmin(msg.Group, c.UserID); isAdmin {
+			if count, _ := s.store.CountGroupAdmins(msg.Group); count == 1 {
+				if members, _ := s.store.GetGroupMembers(msg.Group); len(members) > 1 {
+					c.Encoder.Encode(protocol.Error{
+						Type:    "error",
+						Code:    protocol.ErrForbidden,
+						Message: "Cannot leave — you are the last admin. Promote another member first, or use /delete to dissolve the group.",
+					})
+					return
+				}
+			}
+		}
+	}
+
+	// Self-leave: empty reason, empty by. The shared performGroupLeave
+	// handles removal, last-member cleanup, broadcasting group_event{leave}
+	// to remaining members, and echoing group_left to the leaver's own
 	// sessions.
-	s.performGroupLeave(msg.Group, c.UserID, "")
+	s.performGroupLeave(msg.Group, c.UserID, "", "")
 }
 
 // performGroupLeave is the shared post-validation leave path used by
-// both handleLeaveGroup (self-leave, empty reason) and the admin kick
-// processor (admin-triggered, reason "admin"). It is idempotent at the
-// data layer:
-//   - RemoveGroupMember is a no-op if the user is already gone (e.g.
-//     the CLI removed them before queueing the kick)
+// handleLeaveGroup (self-leave, empty reason and by), handleRemoveFromGroup
+// (admin-initiated, reason="removed" with by=<admin user ID>), and the
+// per-group branch of handleRetirement (reason="retirement", empty by).
+// It is idempotent at the data layer:
+//   - RemoveGroupMember is a no-op if the user is already gone
 //   - Last-member cleanup is idempotent via DeleteGroupConversation
 //
 // Side effects:
 //   - Removes userID from group_members (idempotent)
+//   - Records a group_events row (per Phase 14 audit contract — this is the
+//     SOLE recording site for "leave" events; callers MUST NOT duplicate).
+//     Audit is written BEFORE the last-member cleanup check so the row lands
+//     in the surviving DB file on non-terminal leaves, and is harmlessly
+//     reaped along with the file on last-member cleanup.
 //   - Triggers DeleteGroupConversation if the group is now empty
-//   - Broadcasts group_event{leave, user, reason} to remaining members
-//   - Echoes group_left{group, reason} to all of userID's connected
+//   - Broadcasts group_event{leave, user, reason, by} to remaining members
+//   - Echoes group_left{group, reason, by} to all of userID's connected
 //     sessions
 //
-// reason is propagated through both the broadcast and the echo so
-// clients can render different status messages for self-leave vs
-// admin-kick. Empty string means self-leave.
-func (s *Server) performGroupLeave(groupID, userID, reason string) {
+// reason/by are propagated through both the audit row, the broadcast, and
+// the echo so clients can render specific status messages — "alice left"
+// vs "bob was removed by alice" vs "carol's account was retired".
+//
+// Ordering inside this helper follows the audit contract from groups_admin.md:
+// mutation → audit → last-member-cleanup → broadcast → echo. The state
+// mutation must commit first; audit runs best-effort (logged + continue);
+// cleanup runs before broadcast so broadcasts reflect fully-committed state;
+// echo last so the leaver's sessions see their removal after remaining members.
+func (s *Server) performGroupLeave(groupID, userID, reason, by string) {
 	if s.store != nil {
 		if err := s.store.RemoveGroupMember(groupID, userID); err != nil {
 			s.logger.Error("failed to remove group member",
 				"user", userID, "group", groupID, "error", err)
 			// Continue anyway — broadcast/echo are best-effort and the
 			// caller may have already done the removal directly.
+		}
+
+		// Record audit event BEFORE last-member cleanup so the row lands
+		// in the surviving file on non-terminal leaves. On last-member
+		// cleanup the per-group DB file gets unlinked and this row dies
+		// with it — harmless, since there's nobody left to read it anyway.
+		// Best-effort: audit failure does not block broadcast or cleanup.
+		if err := s.store.RecordGroupEvent(
+			groupID, "leave", userID, by, reason, "", false, time.Now().Unix(),
+		); err != nil {
+			s.logger.Error("failed to record group event",
+				"group", groupID, "event", "leave", "user", userID, "error", err)
 		}
 
 		// Last-member cleanup: if removing this user emptied the group,
@@ -1662,6 +1716,7 @@ func (s *Server) performGroupLeave(groupID, userID, reason string) {
 		Group:  groupID,
 		Event:  "leave",
 		User:   userID,
+		By:     by,
 		Reason: reason,
 	})
 
@@ -1672,6 +1727,7 @@ func (s *Server) performGroupLeave(groupID, userID, reason string) {
 		Type:   "group_left",
 		Group:  groupID,
 		Reason: reason,
+		By:     by,
 	}
 	s.mu.RLock()
 	for _, client := range s.clients {
@@ -1685,6 +1741,7 @@ func (s *Server) performGroupLeave(groupID, userID, reason string) {
 		"user", userID,
 		"group", groupID,
 		"reason", reason,
+		"by", by,
 	)
 }
 
@@ -1721,6 +1778,48 @@ func (s *Server) handleDeleteGroup(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	// Phase 14: inline last-admin gate. Only applies when caller is
+	// currently a member — non-members can always /delete to clean up
+	// their own view because they cannot be the last admin of a group
+	// they are not in. The check runs BEFORE RecordGroupDeletion so a
+	// rejected /delete leaves no stale sidecar row. Error message is
+	// intentionally identical to handleLeaveGroup's rejection — the
+	// client's inline promote-picker dialog handles the UX delta, the
+	// raw server error is the fallback path.
+	//
+	// This check is inline and does NOT refactor handleDeleteGroup to
+	// delegate to performGroupLeave. Three load-bearing differences
+	// prevent that collapse:
+	//  1. Echo type is GroupDeleted (purge local history) vs GroupLeft
+	//     (keep local history, read-only) — multi-device /delete
+	//     semantics depend on the distinction.
+	//  2. RecordGroupDeletion MUST run BEFORE any leave steps so the
+	//     sidecar row survives potential last-member cleanup.
+	//     performGroupLeave has no equivalent ordering constraint.
+	//  3. Non-member idempotency: handleDeleteGroup still records the
+	//     deletion intent and echoes group_deleted even if the caller
+	//     has already left the group. performGroupLeave assumes the
+	//     caller was a member.
+	isMemberGate, _ := s.store.IsGroupMember(msg.Group, c.UserID)
+	if isMemberGate {
+		if isAdmin, _ := s.store.IsGroupAdmin(msg.Group, c.UserID); isAdmin {
+			if count, _ := s.store.CountGroupAdmins(msg.Group); count == 1 {
+				// Same solo-member carve-out as handleLeaveGroup: if the
+				// caller is the only member of the group, /delete is
+				// equivalent to "dissolve the group entirely" and the
+				// last-admin rule doesn't apply (nobody to be ungoverned).
+				if members, _ := s.store.GetGroupMembers(msg.Group); len(members) > 1 {
+					c.Encoder.Encode(protocol.Error{
+						Type:    "error",
+						Code:    protocol.ErrForbidden,
+						Message: "Cannot leave — you are the last admin. Promote another member first, or use /delete to dissolve the group.",
+					})
+					return
+				}
+			}
+		}
+	}
+
 	// 1. Record the deletion intent FIRST. This is the catchup signal
 	//    for the user's offline devices and must survive any subsequent
 	//    leave/cleanup. INSERT OR IGNORE makes it safe to record before
@@ -1734,18 +1833,31 @@ func (s *Server) handleDeleteGroup(c *Client, raw json.RawMessage) {
 		// purge; only the offline-catchup path is degraded.
 	}
 
-	// 2. Run the leave logic if the user is still a member. If the
-	//    user has already left (e.g. previously /leave'd, or this is a
-	//    second device retroactively /delete'ing), skip the leave but
-	//    still proceed to the echo step. This is the "if the user has
-	//    already left, all good" case from the design discussion.
-	isMember, err := s.store.IsGroupMember(msg.Group, c.UserID)
-	if err == nil && isMember {
+	// 2. Run the leave logic if the user is still a member. Reuse the
+	//    membership result from the last-admin gate above to avoid a
+	//    second query on the hot path. If the user has already left
+	//    (e.g. previously /leave'd, or this is a second device
+	//    retroactively /delete'ing), skip the leave but still proceed
+	//    to the echo step.
+	isMember := isMemberGate
+	if isMember {
 		if err := s.store.RemoveGroupMember(msg.Group, c.UserID); err != nil {
 			s.logger.Error("failed to remove group member during delete",
 				"user", c.UserID, "group", msg.Group, "error", err)
 		} else {
+			// Phase 14 audit: record the leave BEFORE last-member cleanup
+			// so the row lands in the surviving file on non-terminal paths.
+			// On last-member cleanup the row dies with the file (harmless).
+			// Best-effort — audit failures don't block the broadcast.
+			if err := s.store.RecordGroupEvent(
+				msg.Group, "leave", c.UserID, "", "", "", false, time.Now().Unix(),
+			); err != nil {
+				s.logger.Error("failed to record group event",
+					"group", msg.Group, "event", "leave", "user", c.UserID, "error", err)
+			}
+
 			// Notify remaining members the same way leave_group does.
+			// Empty By/Reason mirror self-leave semantics.
 			s.broadcastToGroup(msg.Group, protocol.GroupEvent{
 				Type:  "group_event",
 				Group: msg.Group,
@@ -2105,34 +2217,71 @@ func (s *Server) handleDeleteRoom(c *Client, raw json.RawMessage) {
 	)
 }
 
-// handleRenameGroup updates a group DM's name and broadcasts.
+// handleRenameGroup updates a group DM's name and broadcasts. Phase 14
+// added the admin gate and the byte-identical privacy convention (non-admin
+// rejection collapses into the same ErrUnknownGroup frame as unknown group
+// and non-member). Also added the RecordGroupEvent call (audit contract:
+// rename is one of the five admin event types with a dedicated recording
+// site in this handler) and the Quiet flag.
+//
+// The historical group_renamed echo is KEPT for backward compatibility
+// alongside the new group_event{rename} broadcast. Clients on the latest
+// protocol version process the group_event; older clients fall back to
+// group_renamed. Sending both lets the upgrade land without a coordinated
+// client push.
 func (s *Server) handleRenameGroup(c *Client, raw json.RawMessage) {
 	var msg protocol.RenameGroup
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
 	}
 
-	if s.store != nil {
-		isMember, err := s.store.IsGroupMember(msg.Group, c.UserID)
-		if err != nil || !isMember {
-			c.Encoder.Encode(protocol.Error{
-				Type: "error", Code: protocol.ErrUnknownGroup,
-				Message: "You are not a member of this group",
-			})
-			return
-		}
-
-		if err := s.store.RenameGroup(msg.Group, msg.Name); err != nil {
-			s.logger.Error("failed to rename group", "group", msg.Group, "error", err)
-			return
-		}
+	if !s.checkAdminActionRateLimit(c, msg.Group) {
+		return
+	}
+	if !s.checkGroupAdminAuth(c, msg.Group) {
+		return
 	}
 
+	if err := s.store.RenameGroup(msg.Group, msg.Name); err != nil {
+		s.logger.Error("failed to rename group", "group", msg.Group, "error", err)
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: "internal", Message: "failed to rename group"})
+		return
+	}
+
+	// Audit (best-effort).
+	if err := s.store.RecordGroupEvent(
+		msg.Group, "rename", c.UserID, c.UserID, "", msg.Name, msg.Quiet, time.Now().Unix(),
+	); err != nil {
+		s.logger.Error("failed to record group event",
+			"group", msg.Group, "event", "rename", "error", err)
+	}
+
+	// Dual broadcast during the single-repo upgrade window:
+	//
+	//   1. Legacy GroupRenamed for pre-Phase-14 clients that only know
+	//      about the old shape (sshkey-term is not yet at Phase 14 when
+	//      this server chunk lands — chunks 3-6 update it).
+	//   2. New GroupEvent{rename} for post-Phase-14 clients and sync
+	//      replay (GetGroupEventsSince returns rename events that the
+	//      client routes through the unified group_event dispatch path,
+	//      so live broadcasts and sync replay must use the same shape).
+	//
+	// Once sshkey-term is fully at Phase 14, the legacy GroupRenamed
+	// broadcast can be removed in a follow-up cleanup.
 	s.broadcastToGroup(msg.Group, protocol.GroupRenamed{
 		Type:      "group_renamed",
 		Group:     msg.Group,
 		Name:      msg.Name,
 		RenamedBy: c.UserID,
+	})
+	s.broadcastToGroup(msg.Group, protocol.GroupEvent{
+		Type:  "group_event",
+		Group: msg.Group,
+		Event: "rename",
+		User:  c.UserID,
+		By:    c.UserID,
+		Name:  msg.Name,
+		Quiet: msg.Quiet,
 	})
 
 	s.logger.Info("group renamed",

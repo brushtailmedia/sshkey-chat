@@ -11,10 +11,18 @@ import (
 // TestHandleDeleteGroup_MemberRemoved verifies the happy path: a member
 // runs delete_group, the server runs the leave logic (RemoveGroupMember),
 // records the deletion, and echoes group_deleted to the leaver's session.
+//
+// Phase 14: bob is promoted to co-admin so alice isn't the sole admin
+// when she deletes — otherwise the inline last-admin gate would reject
+// her delete (only the solo-member carve-out would let a sole-admin
+// delete proceed, and this test has two members).
 func TestHandleDeleteGroup_MemberRemoved(t *testing.T) {
 	s := newTestServer(t)
 	if err := s.store.CreateGroup("group_test", "alice", []string{"alice", "bob"}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
+	}
+	if err := s.store.SetGroupMemberAdmin("group_test", "bob", true); err != nil {
+		t.Fatalf("promote bob: %v", err)
 	}
 
 	cc := testClientFor("alice", "dev_alice_1")
@@ -180,10 +188,16 @@ func TestHandleDeleteGroup_LastMemberOfflineCatchup(t *testing.T) {
 // TestHandleDeleteGroup_MultiDeviceLiveEcho verifies that all of the
 // user's currently-connected sessions receive the group_deleted echo,
 // not just the one that initiated the delete.
+//
+// Phase 14: bob is promoted to co-admin so alice's delete isn't blocked
+// by the last-admin gate (same rationale as TestHandleDeleteGroup_MemberRemoved).
 func TestHandleDeleteGroup_MultiDeviceLiveEcho(t *testing.T) {
 	s := newTestServer(t)
 	if err := s.store.CreateGroup("group_test", "alice", []string{"alice", "bob"}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
+	}
+	if err := s.store.SetGroupMemberAdmin("group_test", "bob", true); err != nil {
+		t.Fatalf("promote bob: %v", err)
 	}
 
 	deviceA := testClientFor("alice", "dev_alice_A")
@@ -295,7 +309,7 @@ func TestPerformGroupLeave_EmptyReasonIsSelfLeave(t *testing.T) {
 	s.clients["dev_bob_1"] = bobClient.Client
 	s.mu.Unlock()
 
-	s.performGroupLeave("group_self", "alice", "")
+	s.performGroupLeave("group_self", "alice", "", "")
 
 	// Alice receives group_left with empty reason
 	msgs := aliceClient.messages()
@@ -342,27 +356,42 @@ func TestHandleRenameGroup_BroadcastsToMembers(t *testing.T) {
 	})
 	s.handleRenameGroup(aliceClient.Client, raw)
 
-	// Both alice and bob should receive a group_renamed event
+	// Phase 14: each member gets TWO broadcasts — the legacy group_renamed
+	// (kept for backward compat with pre-Phase-14 clients during the
+	// single-repo upgrade window) AND the new unified group_event{rename}
+	// (for post-Phase-14 clients and sync replay). Both carry the same
+	// new name and same renamer.
 	for _, cc := range []*captureClient{aliceClient, bobClient} {
 		msgs := cc.messages()
-		if len(msgs) != 1 {
-			t.Fatalf("expected 1 group_renamed broadcast, got %d", len(msgs))
+		if len(msgs) != 2 {
+			t.Fatalf("expected 2 broadcasts (legacy + group_event), got %d", len(msgs))
 		}
+
+		// First: legacy group_renamed
 		var renamed protocol.GroupRenamed
 		if err := json.Unmarshal(msgs[0], &renamed); err != nil {
-			t.Fatalf("parse: %v", err)
+			t.Fatalf("parse legacy group_renamed: %v", err)
 		}
 		if renamed.Type != "group_renamed" {
 			t.Errorf("type = %q, want group_renamed", renamed.Type)
 		}
-		if renamed.Group != "group_rename" {
-			t.Errorf("group = %q, want group_rename", renamed.Group)
+		if renamed.Group != "group_rename" || renamed.Name != "New Name" || renamed.RenamedBy != "alice" {
+			t.Errorf("unexpected legacy broadcast: %+v", renamed)
 		}
-		if renamed.Name != "New Name" {
-			t.Errorf("name = %q, want New Name", renamed.Name)
+
+		// Second: Phase 14 group_event{rename}
+		var ev protocol.GroupEvent
+		if err := json.Unmarshal(msgs[1], &ev); err != nil {
+			t.Fatalf("parse group_event: %v", err)
 		}
-		if renamed.RenamedBy != "alice" {
-			t.Errorf("renamed_by = %q, want alice", renamed.RenamedBy)
+		if ev.Type != "group_event" {
+			t.Errorf("type = %q, want group_event", ev.Type)
+		}
+		if ev.Event != "rename" {
+			t.Errorf("event = %q, want rename", ev.Event)
+		}
+		if ev.Group != "group_rename" || ev.Name != "New Name" || ev.By != "alice" {
+			t.Errorf("unexpected group_event{rename}: %+v", ev)
 		}
 	}
 

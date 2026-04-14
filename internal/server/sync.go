@@ -142,7 +142,17 @@ func (s *Server) syncRoom(c *Client, roomID string, sinceTS int64, limit int) {
 	})
 }
 
-// syncGroup sends a sync batch for a single group DM.
+// syncGroup sends a sync batch for a single group DM. Phase 14 extended
+// this to also pack group_events (admin actions) alongside messages and
+// reactions so clients that were offline during admin changes catch up
+// on the event stream via sync_batch. The events table and messages
+// table both live inside the per-group DB file, both use INTEGER unix
+// second timestamps, and both are queried by the same sinceTS — one
+// watermark, two data sources.
+//
+// A group may have new events even when no new messages exist (e.g. an
+// admin /rename'd the group but nobody sent anything since), so the
+// early return is gated on BOTH message count AND event count.
 func (s *Server) syncGroup(c *Client, groupID string, sinceTS int64, limit int) {
 	msgs, err := s.store.GetGroupMessagesSince(groupID, sinceTS, limit)
 	if err != nil {
@@ -150,7 +160,17 @@ func (s *Server) syncGroup(c *Client, groupID string, sinceTS int64, limit int) 
 		return
 	}
 
-	if len(msgs) == 0 {
+	// Phase 14: fetch recent group_events for replay. Best-effort — event
+	// replay failures do not block the message sync path.
+	events, eventsErr := s.store.GetGroupEventsSince(groupID, sinceTS)
+	if eventsErr != nil {
+		s.logger.Error("sync group events failed", "group", groupID, "error", eventsErr)
+		// Fall through — we still want to deliver messages even if events
+		// couldn't be fetched.
+		events = nil
+	}
+
+	if len(msgs) == 0 && len(events) == 0 {
 		return
 	}
 
@@ -164,14 +184,44 @@ func (s *Server) syncGroup(c *Client, groupID string, sinceTS int64, limit int) 
 		}
 	}
 
+	var protoEvents []json.RawMessage
+	if len(events) > 0 {
+		protoEvents = groupEventsToRaw(events, groupID)
+	}
+
 	c.Encoder.Encode(protocol.SyncBatch{
 		Type:      "sync_batch",
 		Messages:  protoMsgs,
 		Reactions: protoReactions,
+		Events:    protoEvents,
 		EpochKeys: nil,
 		Page:      1,
 		HasMore:   false,
 	})
+}
+
+// groupEventsToRaw converts per-group group_events rows to protocol
+// GroupEvent raw messages for inclusion in SyncBatch.Events. Clients
+// route each entry through the same dispatch path used for live
+// group_event broadcasts, so persisted replay and live delivery produce
+// identical local state.
+func groupEventsToRaw(events []store.GroupEventRow, groupID string) []json.RawMessage {
+	result := make([]json.RawMessage, 0, len(events))
+	for _, e := range events {
+		msg := protocol.GroupEvent{
+			Type:   "group_event",
+			Group:  groupID,
+			Event:  e.Event,
+			User:   e.User,
+			By:     e.By,
+			Reason: e.Reason,
+			Name:   e.Name,
+			Quiet:  e.Quiet,
+		}
+		data, _ := json.Marshal(msg)
+		result = append(result, json.RawMessage(data))
+	}
+	return result
 }
 
 // syncDM sends a sync batch for a single 1:1 DM, respecting the per-user

@@ -1,99 +1,15 @@
 package store
 
 import (
-	"sort"
 	"testing"
 )
 
-// TestRetireUserFromGroups_Removed verifies that retiring a user who is in a
-// group DM removes them from group_members.
-func TestRetireUserFromGroups_Removed(t *testing.T) {
-	s, err := Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer s.Close()
-
-	if err := s.CreateGroup("group_abc", "alice", []string{"alice", "bob", "carol"}); err != nil {
-		t.Fatalf("create group: %v", err)
-	}
-
-	groupIDs, err := s.RetireUserFromGroups("alice")
-	if err != nil {
-		t.Fatalf("retire: %v", err)
-	}
-	if len(groupIDs) != 1 || groupIDs[0] != "group_abc" {
-		t.Fatalf("expected [group_abc], got %v", groupIDs)
-	}
-
-	members, err := s.GetGroupMembers("group_abc")
-	if err != nil {
-		t.Fatalf("get members: %v", err)
-	}
-	sort.Strings(members)
-	if len(members) != 2 || members[0] != "bob" || members[1] != "carol" {
-		t.Fatalf("expected [bob carol], got %v", members)
-	}
-}
-
-// TestRetireUserFromGroups_NoMembership verifies no-op for a user not in any group.
-func TestRetireUserFromGroups_NoMembership(t *testing.T) {
-	s, err := Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer s.Close()
-
-	s.CreateGroup("group_bc", "bob", []string{"bob", "carol"})
-
-	groupIDs, err := s.RetireUserFromGroups("alice")
-	if err != nil {
-		t.Fatalf("retire: %v", err)
-	}
-	if len(groupIDs) != 0 {
-		t.Fatalf("expected no affected groups, got %v", groupIDs)
-	}
-
-	members, _ := s.GetGroupMembers("group_bc")
-	if len(members) != 2 {
-		t.Fatalf("expected 2 members unchanged, got %d", len(members))
-	}
-}
-
-// TestRetireUserFromGroups_LargeGroup verifies removal from a large group.
-func TestRetireUserFromGroups_LargeGroup(t *testing.T) {
-	s, err := Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer s.Close()
-
-	members := []string{"alice"}
-	for i := 0; i < 20; i++ {
-		members = append(members, "user_"+string(rune('a'+i)))
-	}
-	if err := s.CreateGroup("group_big", "alice", members); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-
-	groupIDs, err := s.RetireUserFromGroups("alice")
-	if err != nil {
-		t.Fatalf("retire: %v", err)
-	}
-	if len(groupIDs) != 1 {
-		t.Fatalf("expected 1, got %d", len(groupIDs))
-	}
-
-	got, _ := s.GetGroupMembers("group_big")
-	for _, m := range got {
-		if m == "alice" {
-			t.Fatal("alice should have been removed")
-		}
-	}
-	if len(got) != len(members)-1 {
-		t.Fatalf("expected %d members, got %d", len(members)-1, len(got))
-	}
-}
+// Phase 14 removed the TestRetireUserFromGroups_{Removed,NoMembership,LargeGroup}
+// trio — they tested a store helper (RetireUserFromGroups) that was deleted
+// when handleRetirement was restructured to iterate per-group through
+// performGroupLeave. Coverage is subsumed by handler-level succession tests
+// in the server package (TestHandleRetirement_* family, see groups_admin.md
+// Test coverage section).
 
 // TestSetDMLeftAt_OneWayRatchet verifies the per-user cutoff is a one-way ratchet.
 func TestSetDMLeftAt_OneWayRatchet(t *testing.T) {

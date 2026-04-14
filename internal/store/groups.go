@@ -257,48 +257,9 @@ func (s *Store) IsGroupMember(groupID, user string) (bool, error) {
 	return count > 0, err
 }
 
-// RetireUserFromGroups removes a retired user from every group DM they were
-// in. Returns the list of affected group IDs so the caller can broadcast
-// group_event leaves to remaining members.
-//
-// Unlike the previous unified RetireUserFromConversations, this function
-// always removes — there is no 1:1 carve-out, because 1:1 DMs live in a
-// separate table (chunk C of Phase 11) and are handled by their own
-// retirement path.
-func (s *Store) RetireUserFromGroups(user string) ([]string, error) {
-	rows, err := s.dataDB.Query(`
-		SELECT group_id FROM group_members WHERE user = ?`,
-		user,
-	)
-	if err != nil {
-		return nil, err
-	}
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	if len(ids) == 0 {
-		return nil, nil
-	}
-
-	for _, id := range ids {
-		if _, err := s.dataDB.Exec(`
-			DELETE FROM group_members WHERE group_id = ? AND user = ?`,
-			id, user,
-		); err != nil {
-			return nil, err
-		}
-	}
-
-	return ids, nil
-}
+// Phase 14 removed RetireUserFromGroups — the bulk-delete helper was
+// replaced by per-group iteration through performGroupLeave in
+// handleRetirement, which correctly triggers last-admin succession,
+// audit recording via RecordGroupEvent, and last-member cleanup (fixing
+// the pre-Phase-14 orphan-on-solo bug where solo-member retirement left
+// group_conversations rows and per-group DB files orbiting forever).

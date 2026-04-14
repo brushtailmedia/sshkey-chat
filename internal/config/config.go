@@ -113,6 +113,14 @@ type RateLimitsSection struct {
 	DMCreatesPerMinute   int `toml:"dm_creates_per_minute"`
 	ProfilesPerMinute    int `toml:"profiles_per_minute"`
 	PinsPerMinute        int `toml:"pins_per_minute"`
+	// AdminActionsPerMinute caps the rate at which a single user can issue
+	// in-group admin verbs (add_to_group, remove_from_group, promote_group_admin,
+	// demote_group_admin, rename_group) against a single group. Scoped per
+	// user per group so one noisy admin can't starve another group. Default
+	// 20/min is generous enough for any realistic kick-spree but tight enough
+	// to bound abuse. Server-initiated paths (retirement cascade, last-member
+	// cleanup) are exempt — this limit only applies to wire-level verbs.
+	AdminActionsPerMinute int `toml:"admin_actions_per_minute"`
 }
 
 type ShutdownSection struct {
@@ -205,12 +213,13 @@ func DefaultServerConfig() ServerConfig {
 			FailedAuthPerMinute:  5,
 			TypingPerSecond:      1,
 			HistoryPerMinute:     50,
-			DeletesPerMinute:      10,
-			AdminDeletesPerMinute: 50,
-			ReactionsPerMinute:    30,
-			DMCreatesPerMinute:   5,
-			ProfilesPerMinute:    5,
-			PinsPerMinute:        10,
+			DeletesPerMinute:       10,
+			AdminDeletesPerMinute:  50,
+			ReactionsPerMinute:     30,
+			DMCreatesPerMinute:     5,
+			ProfilesPerMinute:      5,
+			PinsPerMinute:          10,
+			AdminActionsPerMinute:  20, // Phase 14: per user per group
 		},
 		Shutdown: ShutdownSection{
 			GracePeriod: "10s",

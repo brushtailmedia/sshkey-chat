@@ -1149,10 +1149,16 @@ func TestDeleteGroup_HappyPath(t *testing.T) {
 	alice := env.connect("/tmp/sshkey-test-key", "dev_alice_dgrp")
 	bob := env.connect("/tmp/sshkey-test-key-bob", "dev_bob_dgrp")
 
-	// alice creates a group with bob
+	// alice creates a group with bob. Phase 14: promote bob to co-admin
+	// so alice isn't the sole admin when she /delete's — otherwise the
+	// inline last-admin gate would reject her delete (the solo-member
+	// carve-out only applies when alice is the ONLY member).
 	groupID := "group_happy"
 	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test", "usr_bob_test"}, "Happy"); err != nil {
 		t.Fatalf("create group: %v", err)
+	}
+	if err := env.srv.Store().SetGroupMemberAdmin(groupID, "usr_bob_test", true); err != nil {
+		t.Fatalf("promote bob: %v", err)
 	}
 
 	// alice deletes
@@ -1331,9 +1337,15 @@ func TestDeleteGroup_MultiDeviceLiveEcho(t *testing.T) {
 	bob := env.connect("/tmp/sshkey-test-key-bob", "dev_bob_multi")
 	_ = bob // bob is just here so the group has a remaining member
 
+	// Phase 14: promote bob to co-admin so alice isn't blocked by the
+	// last-admin gate when she /delete's (same rationale as
+	// TestDeleteGroup_HappyPath).
 	groupID := "group_multi"
 	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test", "usr_bob_test"}, "Multi"); err != nil {
 		t.Fatalf("create group: %v", err)
+	}
+	if err := env.srv.Store().SetGroupMemberAdmin(groupID, "usr_bob_test", true); err != nil {
+		t.Fatalf("promote bob: %v", err)
 	}
 
 	// device A initiates the delete

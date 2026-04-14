@@ -12,15 +12,15 @@ import (
 // The caller must have already marked the user as retired in users.db — this
 // function does not touch the retired flag itself.
 //
-// It fires room_event leaves for every room the user was in, removes them
-// from all group DMs (broadcasting group_event leaves with
-// reason:"retirement" to remaining members), marks affected rooms for epoch
-// rotation, terminates any active sessions, and audits the event.
+// It fires room_event leaves for every room the user was in, iterates the
+// user's group DMs performing last-admin succession + per-group leave via
+// performGroupLeave, sets per-user DM cutoffs, clears the retiring user's
+// deleted_groups records, broadcasts user_retired to all connected clients,
+// terminates any active sessions for the retiring user, and audits the
+// event.
 //
-// Note: 1:1 DMs are NOT handled here yet. They land in chunk C of the
-// Phase 11 refactor with their own per-user history cutoff model. Until
-// then, retiring a user has no effect on any 1:1 conversations they were
-// part of (the table doesn't exist yet).
+// Note: 1:1 DMs are NOT handled by performGroupLeave — they have their own
+// per-user history cutoff model with separate SetDMLeftAt logic below.
 //
 // Called from:
 //   - retireUser (server-side retirement via protocol or CLI)
@@ -48,25 +48,82 @@ func (s *Server) handleRetirement(userID string, oldRooms []string, reason strin
 		s.performRoomLeave(roomID, userID, "user_retired")
 	}
 
-	// 4. Remove user from all group DMs, broadcast leave events
+	// 4. Phase 14: per-group iteration via performGroupLeave with
+	// last-admin succession. Replaces the pre-Phase-14 bulk
+	// RetireUserFromGroups path which had three issues: (a) it was a
+	// separate code path from self-leave and admin-kick, missing the
+	// new RecordGroupEvent audit + unified GroupLeft echo shape;
+	// (b) when the retiring user was solo in a group, the bulk DELETE
+	// never triggered DeleteGroupConversation, leaving the group row
+	// and group-{id}.db file orbiting forever (orphan-on-solo bug);
+	// (c) it couldn't perform last-admin succession because the
+	// broadcast loop ran AFTER the membership mutation.
+	//
+	// New flow per group: check if retiring user is the sole admin; if
+	// so, auto-promote the oldest remaining member before they leave;
+	// then route through performGroupLeave(reason="retirement", by="").
+	// performGroupLeave handles RemoveGroupMember, RecordGroupEvent,
+	// last-member cleanup, and broadcasting to remaining members. For
+	// solo-member groups it naturally triggers the cleanup cascade —
+	// orphan bug fixed as a side effect.
+	//
+	// Reason stays "retirement" (not "user_retired") for groups — the
+	// value is load-bearing across 9+ sites and the Conventions section
+	// in groups_admin.md is authoritative. The By field is empty
+	// because retirement is unilateral, not kicking-admin-initiated.
+	//
+	// While the loop runs, the retiring user's sessions are still open
+	// (termination is step 9 below), so each performGroupLeave call
+	// delivers a GroupLeft echo to those sessions before close. This
+	// is harmless and matches how performRoomLeave already behaves on
+	// the rooms side for the same reason.
 	groupCount := 0
 	if s.store != nil {
-		groupIDs, err := s.store.RetireUserFromGroups(userID)
+		groups, err := s.store.GetUserGroups(userID)
 		if err != nil {
-			s.logger.Error("failed to retire user from groups",
-				"user", userID,
-				"error", err,
-			)
+			s.logger.Error("failed to list groups for retirement",
+				"user", userID, "error", err)
 		} else {
-			groupCount = len(groupIDs)
-			for _, groupID := range groupIDs {
-				s.broadcastToGroup(groupID, protocol.GroupEvent{
-					Type:   "group_event",
-					Group:  groupID,
-					Event:  "leave",
-					User:   userID,
-					Reason: "retirement",
-				})
+			groupCount = len(groups)
+			for _, g := range groups {
+				// Last-admin succession: if retiring user is the sole
+				// admin, auto-promote the oldest remaining member before
+				// leaving. If no other members exist, skip the promote
+				// entirely — the performGroupLeave call below will run
+				// the last-member cleanup cascade.
+				if isAdmin, _ := s.store.IsGroupAdmin(g.ID, userID); isAdmin {
+					if count, _ := s.store.CountGroupAdmins(g.ID); count == 1 {
+						successor, _ := s.store.GetOldestGroupMember(g.ID, userID)
+						if successor != "" {
+							if err := s.store.SetGroupMemberAdmin(g.ID, successor, true); err == nil {
+								s.broadcastToGroup(g.ID, protocol.GroupEvent{
+									Type:   "group_event",
+									Group:  g.ID,
+									Event:  "promote",
+									User:   successor,
+									Reason: "retirement_succession",
+								})
+								// Audit the succession promote. The
+								// subsequent performGroupLeave call
+								// records its own "leave" event — two
+								// distinct event types, two recording
+								// sites, no duplication.
+								if err := s.store.RecordGroupEvent(
+									g.ID, "promote", successor, "", "retirement_succession", "", false, time.Now().Unix(),
+								); err != nil {
+									s.logger.Error("failed to record retirement-succession promote event",
+										"group", g.ID, "successor", successor, "error", err)
+								}
+								s.logger.Info("retirement-succession promote",
+									"group", g.ID, "successor", successor, "retiring_user", userID)
+							} else {
+								s.logger.Error("failed to auto-promote successor",
+									"group", g.ID, "successor", successor, "error", err)
+							}
+						}
+					}
+				}
+				s.performGroupLeave(g.ID, userID, "retirement", "")
 			}
 		}
 	}

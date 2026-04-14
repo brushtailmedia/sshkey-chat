@@ -23,6 +23,7 @@ func TestDefaultRateLimits(t *testing.T) {
 		{"DMCreatesPerMinute", rl.DMCreatesPerMinute, 5},
 		{"ProfilesPerMinute", rl.ProfilesPerMinute, 5},
 		{"PinsPerMinute", rl.PinsPerMinute, 10},
+		{"AdminActionsPerMinute", rl.AdminActionsPerMinute, 20},
 	}
 
 	for _, tc := range tests {
