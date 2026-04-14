@@ -1415,3 +1415,74 @@ func TestDeleteGroup_AlreadyLeft(t *testing.T) {
 		t.Errorf("deletion record for already-left case not found: %v", deleted)
 	}
 }
+
+// ----------------------------------------------------------------------
+// Phase 14 E2E tests
+// ----------------------------------------------------------------------
+
+// TestGroupAdmin_PromoteE2E is the Phase 14 smoke test for the full
+// wire pipeline: real SSH connection, wire-level promote_group_admin,
+// real handler, real broadcast, real store mutation. Exhaustive
+// coverage of every failure mode lives in internal/server — this
+// just proves the verb compiles through the stack end-to-end.
+func TestGroupAdmin_PromoteE2E(t *testing.T) {
+	env := newTestEnv(t)
+	alice := env.connect("/tmp/sshkey-test-key", "dev_alice_promote_e2e")
+
+	groupID := "group_promote_e2e"
+	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test", "usr_bob_test"}, "PromoteE2E"); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+
+	// alice promotes bob. drainUntil skips any unrelated broadcasts
+	// (including alice's own broadcast copy) and stops at the echo.
+	alice.enc.Encode(protocol.PromoteGroupAdmin{
+		Type:  "promote_group_admin",
+		Group: groupID,
+		User:  "usr_bob_test",
+	})
+	raw, _ := alice.drainUntil("promote_admin_result")
+	var result protocol.PromoteAdminResult
+	json.Unmarshal(raw, &result)
+	if result.Group != groupID || result.User != "usr_bob_test" {
+		t.Errorf("result echo wrong: %+v", result)
+	}
+
+	// Server-side state: bob is now an admin
+	if isAdmin, err := env.srv.Store().IsGroupAdmin(groupID, "usr_bob_test"); err != nil || !isAdmin {
+		t.Errorf("bob should be admin after promote (isAdmin=%v err=%v)", isAdmin, err)
+	}
+}
+
+// TestGroupAdmin_LastAdminRejectionOnLeave_E2E is the E2E regression
+// for the "at least one admin" invariant: a sole admin who tries to
+// /leave a group with other members is rejected with ErrForbidden.
+// They must promote a successor first.
+func TestGroupAdmin_LastAdminRejectionOnLeave_E2E(t *testing.T) {
+	env := newTestEnv(t)
+	alice := env.connect("/tmp/sshkey-test-key", "dev_alice_lastadmin")
+
+	// alice is the sole admin of a 2-member group (she + bob regular member)
+	groupID := "group_lastadmin"
+	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test", "usr_bob_test"}, "Last Admin"); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+
+	// alice tries to /leave — should be rejected
+	alice.enc.Encode(protocol.LeaveGroup{Type: "leave_group", Group: groupID})
+
+	// drainUntil skips past any unrelated traffic (shouldn't be any
+	// on the reject path, but defensive).
+	raw, _ := alice.drainUntil("error")
+	var errResp protocol.Error
+	json.Unmarshal(raw, &errResp)
+	if errResp.Code != protocol.ErrForbidden {
+		t.Errorf("expected ErrForbidden, got %q: %s", errResp.Code, errResp.Message)
+	}
+
+	// alice is still a member — the rejection didn't touch state
+	isMember, _ := env.srv.Store().IsGroupMember(groupID, "usr_alice_test")
+	if !isMember {
+		t.Error("alice should still be a member after rejected leave")
+	}
+}

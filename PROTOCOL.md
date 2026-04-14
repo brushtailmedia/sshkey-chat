@@ -358,14 +358,14 @@ Multi-device `/delete` sync for 1:1 DMs uses the `left_at_for_caller` field on `
 
 ### Group DMs
 
-Group DMs are multi-party conversations with 3+ members, fixed at creation time. Identified by `group_` nanoids.
+Group DMs are multi-party conversations with 2–150 members. Identified by `group_` nanoids. **Phase 14 introduced an in-group admin model** — the creator becomes the first admin; admins can add, remove, promote, demote, and rename. The pre-Phase-14 "membership is fixed at creation" model is no longer in force.
 
 ```json
 // Client -> Server (create a group DM — members excludes sender, name optional)
 {"type":"create_group","members":["usr_bob","usr_carol"],"name":"Project Alpha"}
 
-// Server -> Client (echo with server-assigned group ID + full member list)
-{"type":"group_created","group":"group_xK9mQ2pR","members":["usr_alice","usr_bob","usr_carol"],"name":"Project Alpha"}
+// Server -> Client (echo with server-assigned group ID + full member list + admin list)
+{"type":"group_created","group":"group_xK9mQ2pR","members":["usr_alice","usr_bob","usr_carol"],"admins":["usr_alice"],"name":"Project Alpha"}
 
 // Client -> Server (send — fresh K_msg wrapped for every current member)
 {"type":"send_group","group":"group_xK9mQ2pR",
@@ -379,22 +379,110 @@ Group DMs are multi-party conversations with 3+ members, fixed at creation time.
 ```
 
 - **Max 150 members** (server-enforced hard cap). Per-message wrapped keys scale linearly with member count (~80 bytes per member per message on the wire). At 150 members, each message carries ~12KB of key material. **Recommended:** for groups with 50+ members, clients should suggest using a room instead — rooms use a shared epoch key and are significantly more efficient for high-traffic conversations. The server does not enforce this recommendation; it is a UX guideline for client implementers.
-- **Membership is fixed at creation.** There is no `add_to_group` protocol verb — group membership is set by `create_group` and stays that way. A user who wants a different set of participants creates a new group. See `PROJECT.md` section "Groups are immutable peer DMs" for the design rationale.
+- **Membership is mutable by admin action** (Phase 14). The user who calls `create_group` becomes the initial admin. Admins can `add_to_group`, `remove_from_group`, `promote_group_admin`, `demote_group_admin`, and `rename_group`. New members see only post-join messages (per-message wrapped keys; no backfill).
 - **`wrapped_keys` must match the current member list exactly.** Server rejects with `invalid_wrapped_keys` on mismatch. Membership is small enough that new sends re-wrapping for every recipient is cheap.
 - **Include yourself in `wrapped_keys`** so your other devices can decrypt your own sends.
 - **Groups have an optional display `name`.** Unnamed groups render client-side as a comma-joined member list ("Bob, Carol").
+- **`GroupCreated.admins`** (Phase 14) — user IDs of the initial admin set. On a fresh create this is always just the creator. Clients use this to populate the local `is_admin` flag and in-memory admin set without an extra round-trip.
 
-**Renaming a group:**
+#### In-group admin verbs (Phase 14)
+
+Four new wire verbs — `add_to_group`, `remove_from_group`, `promote_group_admin`, `demote_group_admin` — plus a related refit of `rename_group`. All five are scoped to a single group and require admin status on the caller.
+
+**Byte-identical privacy gate.** Unknown group, non-member, and non-admin rejection responses MUST be byte-identical `ErrUnknownGroup` frames so a probing client cannot enumerate group membership or admin status. Only AFTER the caller has proven membership AND admin status does the server return distinct errors (`ErrUnknownUser`, `ErrAlreadyMember`, `ErrAlreadyAdmin`, `ErrForbidden` for last-admin rejections). Client implementations MUST pre-check the local `is_admin` flag before sending to catch the 99% case with a friendlier error than the wire-level "you are not a member of this group".
+
+```json
+// Client -> Server (admin adds a new member; quiet suppresses inline system messages)
+{"type":"add_to_group","group":"group_xK9mQ2pR","user":"usr_dave","quiet":false}
+
+// Server -> Client (echo to caller)
+{"type":"add_group_result","group":"group_xK9mQ2pR","user":"usr_dave"}
+
+// Server -> Client (broadcast to all current members including the new one)
+{"type":"group_event","group":"group_xK9mQ2pR","event":"join","user":"usr_dave","by":"usr_alice"}
+
+// Server -> Client (direct notification to the added user's sessions — inserts the group locally)
+{"type":"group_added_to","group":"group_xK9mQ2pR","name":"Project Alpha",
+ "members":["usr_alice","usr_bob","usr_carol","usr_dave"],
+ "admins":["usr_alice"],"added_by":"usr_alice"}
+```
+
+```json
+// Client -> Server (admin removes a member; kicks are always loud — no quiet flag)
+{"type":"remove_from_group","group":"group_xK9mQ2pR","user":"usr_bob"}
+
+// Server -> Client (echo to caller)
+{"type":"remove_group_result","group":"group_xK9mQ2pR","user":"usr_bob"}
+
+// Server -> Client (broadcast to remaining members; by carries the kicking admin)
+{"type":"group_event","group":"group_xK9mQ2pR","event":"leave","user":"usr_bob","reason":"removed","by":"usr_alice"}
+
+// Server -> Client (echoed to the kicked user's sessions)
+{"type":"group_left","group":"group_xK9mQ2pR","reason":"removed","by":"usr_alice"}
+```
+
+```json
+// Client -> Server (promote a member to admin)
+{"type":"promote_group_admin","group":"group_xK9mQ2pR","user":"usr_bob","quiet":false}
+
+// Server -> Client (echo)
+{"type":"promote_admin_result","group":"group_xK9mQ2pR","user":"usr_bob"}
+
+// Server -> Client (broadcast)
+{"type":"group_event","group":"group_xK9mQ2pR","event":"promote","user":"usr_bob","by":"usr_alice"}
+```
+
+```json
+// Client -> Server (demote an admin back to regular member; may be self-demote)
+{"type":"demote_group_admin","group":"group_xK9mQ2pR","user":"usr_bob","quiet":false}
+
+// Server -> Client (echo)
+{"type":"demote_admin_result","group":"group_xK9mQ2pR","user":"usr_bob"}
+
+// Server -> Client (broadcast)
+{"type":"group_event","group":"group_xK9mQ2pR","event":"demote","user":"usr_bob","by":"usr_alice"}
+```
+
+**"At least one admin" invariant.** Enforced at every mutation path:
+
+| Path | Behavior when violation would occur |
+|---|---|
+| Admin `/leave` | Reject with `ErrForbidden` — "Cannot leave — you are the last admin. Promote another member first, or use /delete to dissolve the group." |
+| Admin `/delete` | Same rejection. |
+| Admin demote-self | Same rejection. |
+| Admin kicked by another admin | Allowed as long as another admin remains. |
+| Admin retires their account | **Auto-promote** oldest remaining member by `joined_at`. Retirement is unilateral — server handles succession. Promoted user receives `group_event{promote, reason:"retirement_succession"}`. |
+
+**Sole-member carve-out.** If the caller is both the only member AND the only admin, `/leave` and `/delete` proceed — there's no governance concern when nobody else is affected, and the last-member cleanup cascade runs naturally.
+
+**Renaming a group (admin-only as of Phase 14):**
 
 ```json
 // Client -> Server
-{"type":"rename_group","group":"group_xK9mQ2pR","name":"New Name"}
+{"type":"rename_group","group":"group_xK9mQ2pR","name":"New Name","quiet":false}
 
-// Server -> Client (broadcast to all members)
+// Server -> Client (legacy broadcast for pre-Phase-14 clients)
 {"type":"group_renamed","group":"group_xK9mQ2pR","name":"New Name","renamed_by":"usr_alice"}
+
+// Server -> Client (Phase 14 unified broadcast; new clients dispatch on this)
+{"type":"group_event","group":"group_xK9mQ2pR","event":"rename","user":"usr_alice","by":"usr_alice","name":"New Name"}
 ```
 
-Any member can rename. Pass an empty string to clear the name (group falls back to member-list rendering).
+The server emits both `group_renamed` (legacy) and `group_event{rename}` (Phase 14) during the single-repo upgrade window. Once client repos are fully at Phase 14 the legacy broadcast can be removed. Pass an empty string to clear the name.
+
+#### `GroupEvent` reference
+
+`group_event` is the generic broadcast envelope for every admin-initiated group mutation and self-leave:
+
+| Field | Semantics |
+|---|---|
+| `group` | Group nanoid. |
+| `event` | `"leave"` \| `"join"` \| `"promote"` \| `"demote"` \| `"rename"` |
+| `user` | Target user (the member this event is about). |
+| `by` | Acting admin user ID. Required (non-empty) for admin-initiated events (`join`, `promote`, `demote`, `rename`, and `leave` with `reason="removed"`). Empty for self-leave, retirement, and retirement-succession promote. |
+| `reason` | On `leave`: `""` (self-leave) \| `"removed"` (admin kick, `by` required) \| `"retirement"` (retiring user). On `promote`: `""` (normal promote, `by` required) \| `"retirement_succession"` (auto-promote by server, `by` empty). |
+| `name` | New group name. Populated only on `rename` events. |
+| `quiet` | When `true`, clients MUST still update member/admin lists and persist the event to the local `group_events` table, but MUST suppress the inline system message. Never `true` for kicks (`leave` with `reason="removed"`) — being removed is high-consequence and clients should always surface it loudly. |
 
 **`/leave` — explicit departure:**
 
@@ -409,12 +497,13 @@ Any member can rename. Pass an empty string to clear the name (group falls back 
 {"type":"group_left","group":"group_xK9mQ2pR","reason":""}
 ```
 
-The leaver receives `group_left` on all of their active sessions so every device can update its local state to reflect the leave (mark as archived, disable input, etc.). Remaining members receive `group_event{event:"leave"}`. The client flow is "send `leave_group` → wait for `group_left` echo → update local state" — never optimistically flip state on the send.
+The leaver receives `group_left` on all of their active sessions so every device can update its local state (mark as archived, disable input, etc.). Remaining members receive `group_event{event:"leave"}`. The client flow is "send `leave_group` → wait for `group_left` echo → update local state" — never optimistically flip state on the send.
 
-`reason` values on `group_event` and `group_left`:
+`reason` values on `group_left`:
 - `""` (empty) — self-leave via `/leave`
-- `"admin"` — admin removed the user via `sshkey-ctl remove-from-group` (CLI escape hatch; slated for removal if in-group admin lands)
+- `"removed"` — admin removed the user via `remove_from_group`. The `by` field carries the kicking admin's user ID so the client can render "You were removed from the group by alice" instead of the generic "by an admin".
 - `"retirement"` — the leaving user's account was retired
+- `"admin"` — **deprecated** legacy value from the pre-Phase-14 CLI escape hatch. No new rows should emit this; clients should treat it as equivalent to `"removed"` with unknown actor for any persisted rows encountered during upgrade.
 
 **`/delete` — silent local purge, multi-device synced:**
 
@@ -470,14 +559,16 @@ On connect, the server sends the current epoch key for each room:
 
 ```json
 // Server -> Client (paginated, oldest-first)
-{"type":"sync_batch","messages":[...],"epoch_keys":[{"room":"room_V1StGXR8_Z5jdHi6B","epoch":12,"wrapped_key":"base64..."}],"reactions":[...],"page":1,"has_more":true}
-{"type":"sync_batch","messages":[...],"epoch_keys":[],"reactions":[],"page":2,"has_more":false}
+{"type":"sync_batch","messages":[...],"epoch_keys":[{"room":"room_V1StGXR8_Z5jdHi6B","epoch":12,"wrapped_key":"base64..."}],"reactions":[...],"events":[...],"page":1,"has_more":true}
+{"type":"sync_batch","messages":[...],"epoch_keys":[],"reactions":[],"events":[],"page":2,"has_more":false}
 
 // Server -> Client
 {"type":"sync_complete","synced_to":"2026-04-03T14:22:00Z"}
 ```
 
 Room sync batches include epoch keys needed to decrypt that batch and reactions for the messages in that batch. DM messages carry their own `wrapped_keys` inline. Epoch key deduplication is the client's responsibility -- skip keys you already have.
+
+**Phase 14: `events` field.** Group DM sync batches may carry an `events` array containing recent `group_event` rows that happened while the client was offline (admin actions like join, leave, promote, demote, rename). Clients route each entry through the same dispatch path used for live `group_event` broadcasts, so persisted replay and live delivery produce identical in-memory state + local DB rows. The `sinceTS` watermark is shared between messages and events — one timestamp, both sources. Non-group sync batches (rooms, 1:1 DMs) omit the field.
 
 ### History (Scroll-back)
 
@@ -700,10 +791,10 @@ Three separate list messages are delivered during the handshake, one per context
   {"id":"room_V1StGXR8_Z5jdHi6B","name":"general","topic":"General chat","members":12}
 ]}
 
-// Server -> Client (group DMs the user is a member of)
+// Server -> Client (group DMs the user is a member of — Phase 14 adds admins field)
 {"type":"group_list","groups":[
-  {"id":"group_xK9mQ2pR","members":["usr_alice","usr_bob","usr_carol"],"name":"Project Alpha"},
-  {"id":"group_yL0nR3qS","members":["usr_alice","usr_dave"]}
+  {"id":"group_xK9mQ2pR","members":["usr_alice","usr_bob","usr_carol"],"admins":["usr_alice"],"name":"Project Alpha"},
+  {"id":"group_yL0nR3qS","members":["usr_alice","usr_dave"],"admins":["usr_alice","usr_dave"]}
 ]}
 
 // Server -> Client (1:1 DMs the user is a party to, with per-user cutoff)
@@ -1036,8 +1127,11 @@ Admin clients send `list_pending_keys` and present the result to the operator. A
 | `device_limit_exceeded` | Max devices per user reached (default 10) |
 | `invalid_epoch` | Epoch too old (outside grace window) or not yet confirmed |
 | `unknown_room` | Caller is not a member of this room (also returned byte-identical for "room does not exist" to protect the social graph) |
-| `unknown_group` | Caller is not a member of this group DM (same byte-identical privacy rule as `unknown_room`) |
+| `unknown_group` | Caller is not a member of this group DM (same byte-identical privacy rule as `unknown_room`). Phase 14: also returned byte-identical for "not an admin" on admin-verb requests so non-admin status is not enumerable via error diffs. |
 | `unknown_dm` | Caller is not a party to this 1:1 DM (same privacy rule) |
+| `unknown_user` | **Phase 14.** `add_to_group` target does not exist or is retired. Only returned AFTER the caller has proven admin status — before that the "unknown user" case collapses into `unknown_group`. |
+| `already_member` | **Phase 14.** `add_to_group` target is already a member of the group. |
+| `already_admin` | **Phase 14.** `promote_group_admin` target is already an admin of the group. |
 | `user_retired` | Sender or target of a DM operation has a retired account |
 | `room_retired` | Room has been retired by an admin — writes (`send`, `react`, `unreact`, `pin`, `unpin`, `delete`) are rejected |
 | `forbidden` | Policy gate denied the request (e.g. `allow_self_leave_rooms = false` on `leave_room` or `delete_room`) |
@@ -1068,6 +1162,7 @@ The server enforces per-user rate limits on most operations. When exceeded, the 
 | DM creation | 5/minute | Per user |
 | Profile changes | 5/minute | Per user |
 | Pin/unpin | 10/minute | Per user |
+| Group admin actions | 20/minute | Per user, per group (Phase 14) — applies to `add_to_group`, `remove_from_group`, `promote_group_admin`, `demote_group_admin`, and `rename_group`. Server-initiated paths (retirement cascade, last-member cleanup) are exempt. |
 
 Clients should handle `rate_limited` errors gracefully — show a "Slow down" message in the status bar and retry after a brief pause. Do not retry automatically in a tight loop.
 

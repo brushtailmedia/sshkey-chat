@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Changed
+- **Group DMs now have an in-group admin model (Phase 14)** — reverses the "immutable peer DMs" decision from Phase 11. Group creators become the first admin; any admin can add/remove/promote/demote/rename. At-least-one-admin invariant enforced at every mutation path (`/leave`, `/delete`, demote, kick, retirement). Retirement cascade auto-promotes the oldest remaining member as successor. See `groups_admin.md` for the full design.
+- **`handleRetirement` group branch restructured** — replaces the bulk `RetireUserFromGroups` store helper with per-group iteration through `performGroupLeave(reason: "retirement", by: "")`. Fixes a latent orphan-on-solo bug where retiring a sole group member never triggered `DeleteGroupConversation`, leaving the `group_conversations` row + per-group DB file orbiting forever. `RetireUserFromGroups` and its 3 store-level tests are deleted.
+- **`performGroupLeave` signature extended** from `(groupID, userID, reason string)` to `(groupID, userID, reason, by string)` so admin-initiated removals can render "You were removed from X by alice" instead of the generic "by an admin". `by` is empty for self-leave and retirement paths.
+- **`handleRenameGroup` now requires admin** — matches the byte-identical privacy convention (non-admin attempts collapse to `ErrUnknownGroup`). Pre-Phase-14 any member could rename.
+- **`handleLeaveGroup` and `handleDeleteGroup` reject last-admin** with `ErrForbidden` when the group has other members. Sole-member carve-out: a user who is both the only member and the only admin can leave or delete freely (last-member cleanup runs).
+- **Group retirement reason code** stays `"retirement"` (rooms use `"user_retired"`) — 9+ sites across both repos depend on this distinction.
+- **`performGroupLeave` now records an audit row** to the per-group `group_events` table before broadcasting, best-effort. Sole recording site for `leave` events per the audit contract.
 - Rooms and users migrated from TOML files to SQLite databases (`rooms.db`, `users.db`)
 - Room identity switched from display names to nanoid IDs (`room_` prefix) in all protocol messages
 - Admin status moved from `server.toml` to `users.db` (managed via `sshkey-ctl promote/demote`)
@@ -13,6 +20,19 @@
 - `handleLeaveRoom` policy gate now branches on retired state: active rooms use `allow_self_leave_rooms`, retired rooms use `allow_self_leave_retired_rooms` (Phase 12)
 
 ### Added
+- **Phase 14 in-group admin verbs** — four new protocol messages: `add_to_group`, `remove_from_group`, `promote_group_admin`, `demote_group_admin`. Each has a corresponding server-to-caller echo (`add_group_result`, `remove_group_result`, `promote_admin_result`, `demote_admin_result`). All three of add/promote/demote support an optional `quiet` flag to suppress inline system messages on receiving clients; `remove_from_group` is always loud.
+- **`group_added_to` direct notification** — sent to the target's active sessions when an admin adds them to an existing group. Carries the full group metadata (name, members, admins, added_by) so the client can insert the group into local state immediately.
+- **`group_event` extended** — five event variants now (`leave`, `join`, `promote`, `demote`, `rename`). New fields: `by` (acting admin, required on admin-initiated events), `quiet` (suppress inline rendering), `name` (for rename events). New reasons on `leave`: `"removed"` (replaces deprecated `"admin"`) and the implicit `"retirement"`. New reason on `promote`: `"retirement_succession"` (server-initiated auto-promote).
+- **`GroupCreated` and `GroupInfo` carry an `admins` field** — populated from the new `group_members.is_admin` column. Empty on pre-Phase-14 servers for graceful upgrade.
+- **`GroupLeft` carries a `by` field** (non-empty only when `reason == "removed"`) so the kicked user's client can render "You were removed from the group by alice" instead of the generic fallback.
+- **New `group_events` per-group audit table** — stored in each `group-{id}.db` file (`ts INTEGER` unix seconds matching `messages.ts` for shared sync watermark). Populated by `RecordGroupEvent` at each admin-action recording site. Automatic GC via `DeleteGroupConversation` — the file unlink drops the events with it.
+- **`SyncBatch.Events` field** — `syncGroup` now replays recent group admin events via `GetGroupEventsSince` alongside messages and reactions. Offline clients catch up on admin history via the same sync pass (no separate catchup verb).
+- **`is_admin` column on `group_members`** — CREATE TABLE edited in place (no ALTER, no live users). Only the designated admin's row starts with `is_admin = 1`; all others default `0`. Updated via the new `SetGroupMemberAdmin` store helper, read via `IsGroupAdmin` / `CountGroupAdmins` / `GetGroupAdminIDs` / `GetOldestGroupMember`.
+- **`AdminActionsPerMinute` rate limit** — new config field on `RateLimitsSection`, default 20/min per user per group. Applies to all five admin verbs (the four new + `rename_group`); server-initiated paths (retirement cascade, last-member cleanup) are exempt.
+- **New error codes**: `ErrUnknownUser` (add target not found), `ErrAlreadyMember` (add target already in group), `ErrAlreadyAdmin` (promote target already admin).
+- **Byte-identical privacy gate** — unknown-group, non-member, and non-admin rejections on all admin verbs collapse to the same `ErrUnknownGroup` frame. `TestHandle*_PrivacyResponsesIdentical` regression tests use `bytes.Equal` on wire frames.
+- **`CreateGroup` store signature** changed to `CreateGroup(id, adminID, members, name ...)` with validation that `adminID` appears in `members`. 23 call sites updated across tests.
+- Deletion inventory for the Phase 11 CLI escape hatch: `admin_kicks.go` (75 lines) + `runAdminKickProcessor` goroutine + `pending_admin_kicks` table + `RecordPendingAdminKick`/`ConsumePendingAdminKicks` store fns + `cmdRemoveFromGroup` CLI command + 6 dedicated tests + stale "Phase 12 counterpart to runAdminKickProcessor" / "Mirrors PendingAdminKick" comments in `room_retirements.go` and `room_deletion.go`.
 - `users.db` — user identity, SSH key authentication, admin status, retirement
 - `rooms.db` — room identity, membership, metadata (existed since v0.1.1, now sole source of truth)
 - `sshkey-ctl promote/demote` commands for admin management
@@ -26,6 +46,15 @@
 - `handleDeleteRoom` server handler — sidecar-first ordering so `deleted_rooms` catchup survives last-member cleanup
 - `allow_self_leave_rooms` (default `false`) and `allow_self_leave_retired_rooms` (default `true`) config flags — dual policy gate for self-leave/self-delete
 - `runRoomRetirementProcessor` background goroutine (5s poll) drains the `pending_room_retirements` queue and broadcasts `room_retired` to connected members
+
+### Removed
+- **CLI group-kick escape hatch (Phase 14)** — `sshkey-ctl remove-from-group` deleted. Moderation now lives in-group entirely via the admin verbs. For TOS violations, operators retire the offending user's account (`sshkey-ctl retire-user`), which triggers the retirement cascade including per-group leave + succession.
+- `admin_kicks.go` file (`runAdminKickProcessor` polling goroutine, `processPendingAdminKicks` queue drain).
+- `server.go`: `adminKickStop` channel, `adminKickPollInterval` constant, goroutine startup, `Close()` stopchan teardown.
+- `pending_admin_kicks` table + `RecordPendingAdminKick` / `ConsumePendingAdminKicks` / `PendingAdminKick` struct store fns.
+- `RetireUserFromGroups` store helper (replaced by per-group iteration in `handleRetirement`).
+- 6 test functions that exercised the deleted escape-hatch paths.
+- Legacy `"admin"` reason value on `group_event` / `group_left` is deprecated (still parsed defensively, but no new rows emit it in v1).
 
 ## v0.1.1 — 2026-04-07
 

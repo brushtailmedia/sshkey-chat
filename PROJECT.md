@@ -523,10 +523,12 @@ DM conversations have a Nano ID (`conv_` prefix). A 1:1 DM is just a group DM wi
 **Conversation rules:**
 - Server deduplicates 1:1 conversations -- creating a DM with just `["bob"]` when a 1:1 already exists returns the existing conversation
 - Group DMs are distinct -- creating a new group with the same members creates a new conversation (like Slack/Signal)
-- Members are set at creation. To add someone, create a new conversation. Old conversation stays as-is (no retroactive access to history)
+- **Phase 14: group DMs are self-governed by in-group admins.** The creator becomes the first admin; admins can add, remove, promote, demote, and rename. All admins are peers (flat model — no protected tier). The "at least one admin" invariant is enforced at every mutation path. New members cannot decrypt pre-join history (per-message wrapped keys; no backfill). See `groups_admin.md` for the full design. Pre-Phase-14 groups were immutable peer DMs with no membership changes post-creation; that decision was reversed in Phase 14.
 - **Max group DM size: 150 members.** Hard cap enforced by the server (`too_many_members` error). Per-message wrapped keys scale linearly: 150 members means ~12KB of key material per message and ~15ms of crypto per send. **Recommendation for client implementers:** for groups with 50+ members, surface a warning suggesting a room instead — rooms use a shared epoch key and amortise the per-member wrapping cost. The `sshkey-term` terminal client implements this as a status-bar hint on group creation. The server does not enforce the 50-member soft threshold; it is a UX guideline only.
 - Conversation list sent on connect alongside room list
-- **Group naming:** `create_dm` accepts an optional `name` field. Any member can rename via `rename_conversation`. Groups without a name display as the member list (e.g., "Bob, Carol"). 1:1 DMs typically don't use names — the client displays the other person's display_name.
+- **Group naming:** `create_dm` accepts an optional `name` field. **Phase 14: rename is now admin-only** (pre-Phase-14 any member could rename). Groups without a name display as the member list (e.g., "Bob, Carol"). 1:1 DMs typically don't use names — the client displays the other person's display_name.
+
+**Moderation (Phase 14).** Group DMs are entirely self-governed. The CLI escape hatch (`sshkey-ctl remove-from-group`, the `pending_admin_kicks` queue, the `runAdminKickProcessor` polling goroutine) has been **deleted**. Server operators stay out of group membership — the server admin manages rooms and nothing else. For ToS violations that require operator intervention, the correct recourse is `sshkey-ctl retire-user` on the offending account, which triggers the retirement cascade including per-group leave + last-admin succession. The philosophical line is clean: **rooms are admin-managed, groups and DMs are self-governed by their participants.**
 
 #### Rename Conversation
 
