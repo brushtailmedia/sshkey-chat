@@ -362,9 +362,21 @@ func (s *Server) sendGroupList(c *Client) {
 
 	var infos []protocol.GroupInfo
 	for _, g := range groups {
+		// Phase 14: fetch the admin subset so the client can render
+		// admin indicators and gate admin commands on reconnect without
+		// a round-trip. Failures are logged and fall through to an empty
+		// admins list — the client will still see the group, just
+		// without admin state (the next group_event{promote/demote}
+		// will populate the in-memory cache).
+		admins, err := s.store.GetGroupAdminIDs(g.ID)
+		if err != nil {
+			s.logger.Error("failed to fetch group admins for group_list",
+				"group", g.ID, "error", err)
+		}
 		infos = append(infos, protocol.GroupInfo{
 			ID:      g.ID,
 			Members: g.Members,
+			Admins:  admins,
 			Name:    g.Name,
 		})
 	}
@@ -1371,10 +1383,15 @@ func (s *Server) handleCreateGroup(c *Client, raw json.RawMessage) {
 		}
 	}
 
+	// Phase 14: the creator becomes the initial admin, so GroupCreated
+	// carries a single-element Admins list. Clients use this to
+	// populate the local is_admin flag and in-memory admin set
+	// without an extra round-trip.
 	created := protocol.GroupCreated{
 		Type:    "group_created",
 		Group:   groupID,
 		Members: allMembers,
+		Admins:  []string{c.UserID},
 		Name:    msg.Name,
 	}
 

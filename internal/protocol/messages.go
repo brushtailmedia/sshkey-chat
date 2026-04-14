@@ -756,6 +756,7 @@ type GroupList struct {
 type GroupInfo struct {
 	ID      string   `json:"id"`
 	Members []string `json:"members"`
+	Admins  []string `json:"admins,omitempty"` // Phase 14: admin user IDs (subset of Members); empty on pre-14 servers
 	Name    string   `json:"name,omitempty"`
 }
 
