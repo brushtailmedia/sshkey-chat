@@ -14,7 +14,7 @@ func TestRetireUserFromGroups_Removed(t *testing.T) {
 	}
 	defer s.Close()
 
-	if err := s.CreateGroup("group_abc", []string{"alice", "bob", "carol"}); err != nil {
+	if err := s.CreateGroup("group_abc", "alice", []string{"alice", "bob", "carol"}); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -44,7 +44,7 @@ func TestRetireUserFromGroups_NoMembership(t *testing.T) {
 	}
 	defer s.Close()
 
-	s.CreateGroup("group_bc", []string{"bob", "carol"})
+	s.CreateGroup("group_bc", "bob", []string{"bob", "carol"})
 
 	groupIDs, err := s.RetireUserFromGroups("alice")
 	if err != nil {
@@ -72,7 +72,7 @@ func TestRetireUserFromGroups_LargeGroup(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		members = append(members, "user_"+string(rune('a'+i)))
 	}
-	if err := s.CreateGroup("group_big", members); err != nil {
+	if err := s.CreateGroup("group_big", "alice", members); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 

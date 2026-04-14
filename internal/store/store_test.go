@@ -108,7 +108,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 
 	// Test group creation
-	err = s.CreateGroup("group_test001", []string{"alice", "bob", "carol"})
+	err = s.CreateGroup("group_test001", "alice", []string{"alice", "bob", "carol"})
 	if err != nil {
 		t.Fatalf("create group: %v", err)
 	}

@@ -196,7 +196,7 @@ func TestHandleRetirement_RemovesFromGroups(t *testing.T) {
 	s := newTestServer(t)
 
 	// Create a group DM with alice, bob, carol
-	if err := s.store.CreateGroup("group_abc", []string{"alice", "bob", "carol"}); err != nil {
+	if err := s.store.CreateGroup("group_abc", "alice", []string{"alice", "bob", "carol"}); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 

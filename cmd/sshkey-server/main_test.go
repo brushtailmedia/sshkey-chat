@@ -1151,7 +1151,7 @@ func TestDeleteGroup_HappyPath(t *testing.T) {
 
 	// alice creates a group with bob
 	groupID := "group_happy"
-	if err := env.srv.Store().CreateGroup(groupID, []string{"usr_alice_test", "usr_bob_test"}, "Happy"); err != nil {
+	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test", "usr_bob_test"}, "Happy"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -1219,7 +1219,7 @@ func TestDeleteGroup_LastMemberCleanupAndOfflineCatchup(t *testing.T) {
 
 	// alice solo in a group
 	groupID := "group_solo"
-	if err := env.srv.Store().CreateGroup(groupID, []string{"usr_alice_test"}, "Solo"); err != nil {
+	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test"}, "Solo"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -1332,7 +1332,7 @@ func TestDeleteGroup_MultiDeviceLiveEcho(t *testing.T) {
 	_ = bob // bob is just here so the group has a remaining member
 
 	groupID := "group_multi"
-	if err := env.srv.Store().CreateGroup(groupID, []string{"usr_alice_test", "usr_bob_test"}, "Multi"); err != nil {
+	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test", "usr_bob_test"}, "Multi"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -1372,7 +1372,7 @@ func TestDeleteGroup_AlreadyLeft(t *testing.T) {
 
 	// Group exists but alice is NOT a member
 	groupID := "group_not_a_member"
-	if err := env.srv.Store().CreateGroup(groupID, []string{"usr_bob_test", "usr_carol_test"}, "Without Alice"); err != nil {
+	if err := env.srv.Store().CreateGroup(groupID, "usr_bob_test", []string{"usr_bob_test", "usr_carol_test"}, "Without Alice"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 

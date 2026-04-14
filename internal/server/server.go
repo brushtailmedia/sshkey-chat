@@ -49,37 +49,23 @@ type Server struct {
 	// (or has just been) deleted.
 	dmCleanupMu sync.Mutex
 
-	// adminKickStop signals the admin-kick processor goroutine to stop.
-	// Closed by Close() during shutdown. The processor polls
-	// pending_admin_kicks every adminKickPollInterval and dispatches
-	// each row through performGroupLeave so the kicked user and the
-	// remaining group members get live group_left / group_event echoes.
-	adminKickStop chan struct{}
-
 	// roomRetirementStop signals the room retirement processor goroutine
 	// to stop. Closed by Close() during shutdown. The processor polls
 	// pending_room_retirements every roomRetirementPollInterval and
 	// broadcasts room_retired to connected members for each queued row.
-	// Parallel to adminKickStop — same pattern for the same reason (no
-	// IPC between sshkey-ctl and sshkey-server, table is the bridge).
-	// Phase 12.
+	// The queue + polling pattern exists because sshkey-ctl runs locally
+	// on the server box only — it cannot send protocol messages to the
+	// running server, so CLI → server coordination happens via shared
+	// SQLite tables. Phase 12.
 	roomRetirementStop chan struct{}
 }
 
-// adminKickPollInterval is how often the admin-kick processor checks
-// the pending_admin_kicks queue. Five seconds is fine for an emergency
-// moderation action — the kick takes effect at the data layer
-// immediately (CLI mutates group_members directly), this just
-// determines how soon the affected sessions see the live notification.
-const adminKickPollInterval = 5 * time.Second
-
 // roomRetirementPollInterval is how often the room retirement
-// processor checks the pending_room_retirements queue. Same rationale
-// as adminKickPollInterval — the retirement takes effect at the data
-// layer immediately (CLI mutates rooms.db directly via SetRoomRetired),
-// and this polling interval just determines the live-notification
-// latency for connected members. Five seconds matches the admin kick
-// processor for consistency.
+// processor checks the pending_room_retirements queue. Five seconds is
+// fine because the retirement takes effect at the data layer
+// immediately (CLI mutates rooms.db directly via SetRoomRetired) — this
+// polling interval just determines the live-notification latency for
+// connected members.
 const roomRetirementPollInterval = 5 * time.Second
 
 // New creates a new server with the given config and data directory.
@@ -96,7 +82,6 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		limiter:            newRateLimiter(),
 		clients:            make(map[string]*Client),
 		dataDir:            dir,
-		adminKickStop:      make(chan struct{}),
 		roomRetirementStop: make(chan struct{}),
 	}
 
@@ -183,18 +168,12 @@ func (s *Server) ListenAndServe() error {
 	// Start config file watcher
 	s.watchConfig()
 
-	// Start the admin-kick processor — this is the bridge between the
-	// CLI's pending_admin_kicks queue and the server's live broadcast
-	// surface. Polls every adminKickPollInterval and dispatches each
-	// queued kick through performGroupLeave.
-	go s.runAdminKickProcessor()
-
-	// Start the room retirement processor — Phase 12 parallel to the
-	// admin kick processor. Polls pending_room_retirements every
-	// roomRetirementPollInterval and broadcasts room_retired to
-	// connected members of each newly-retired room. On startup, runs
-	// one immediate consume pass before entering the ticker loop to
-	// handle any rows that were queued while the server was down.
+	// Start the room retirement processor (Phase 12). Polls
+	// pending_room_retirements every roomRetirementPollInterval and
+	// broadcasts room_retired to connected members of each
+	// newly-retired room. On startup, runs one immediate consume pass
+	// before entering the ticker loop to handle any rows that were
+	// queued while the server was down.
 	s.processPendingRoomRetirements()
 	go s.runRoomRetirementProcessor()
 
@@ -251,16 +230,6 @@ func (s *Server) Close() error {
 		s.listener = nil
 		if err := ln.Close(); err != nil {
 			firstErr = err
-		}
-	}
-
-	// Stop the admin-kick processor goroutine
-	if s.adminKickStop != nil {
-		select {
-		case <-s.adminKickStop:
-			// already closed
-		default:
-			close(s.adminKickStop)
 		}
 	}
 

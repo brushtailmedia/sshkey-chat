@@ -200,7 +200,7 @@ func TestDeleteGroupConversation(t *testing.T) {
 	defer s.Close()
 
 	// Create a group with two members
-	if err := s.CreateGroup("group_x", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.CreateGroup("group_x", "alice", []string{"alice", "bob"}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -256,7 +256,7 @@ func TestDeleteGroupConversation_Idempotent(t *testing.T) {
 		t.Errorf("delete of nonexistent group should be no-op, got: %v", err)
 	}
 
-	s.CreateGroup("group_x", []string{"alice"}, "")
+	s.CreateGroup("group_x", "alice", []string{"alice"}, "")
 	s.DeleteGroupConversation("group_x")
 	if err := s.DeleteGroupConversation("group_x"); err != nil {
 		t.Errorf("second delete should be no-op, got: %v", err)
@@ -282,7 +282,7 @@ func TestDeleteGroupConversation_PreservesDeletedGroupsRows(t *testing.T) {
 	}
 
 	// Create the group then immediately fully clean it up
-	s.CreateGroup("group_x", []string{"alice"}, "")
+	s.CreateGroup("group_x", "alice", []string{"alice"}, "")
 	if err := s.DeleteGroupConversation("group_x"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -292,95 +292,6 @@ func TestDeleteGroupConversation_PreservesDeletedGroupsRows(t *testing.T) {
 	got, _ := s.GetDeletedGroupsForUser("alice")
 	if len(got) != 1 || got[0] != "group_x" {
 		t.Errorf("deletion record must survive group cleanup; got %v", got)
-	}
-}
-
-// TestRecordAndConsumePendingAdminKick verifies the round-trip for the
-// admin-kick queue: CLI inserts a row via RecordPendingAdminKick, the
-// server processor reads + atomically deletes via
-// ConsumePendingAdminKicks.
-func TestRecordAndConsumePendingAdminKick(t *testing.T) {
-	dir := t.TempDir()
-	s, err := Open(dir)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer s.Close()
-
-	if err := s.RecordPendingAdminKick("alice", "group_1", "admin"); err != nil {
-		t.Fatalf("record: %v", err)
-	}
-	if err := s.RecordPendingAdminKick("bob", "group_2", "admin"); err != nil {
-		t.Fatalf("record: %v", err)
-	}
-
-	kicks, err := s.ConsumePendingAdminKicks()
-	if err != nil {
-		t.Fatalf("consume: %v", err)
-	}
-	if len(kicks) != 2 {
-		t.Fatalf("expected 2 kicks, got %d", len(kicks))
-	}
-
-	// Verify field round-trip
-	gotUsers := make(map[string]bool)
-	for _, k := range kicks {
-		gotUsers[k.UserID] = true
-		if k.Reason != "admin" {
-			t.Errorf("kick reason = %q, want admin", k.Reason)
-		}
-		if k.QueuedAt == 0 {
-			t.Errorf("queued_at should be set, got 0")
-		}
-	}
-	if !gotUsers["alice"] || !gotUsers["bob"] {
-		t.Errorf("missing user in consumed kicks: %v", gotUsers)
-	}
-
-	// After consume, queue should be empty
-	kicks2, _ := s.ConsumePendingAdminKicks()
-	if len(kicks2) != 0 {
-		t.Errorf("queue should be empty after consume, got %d", len(kicks2))
-	}
-}
-
-// TestRecordPendingAdminKick_DefaultReason verifies the empty-reason
-// fallback writes "admin" so the polling processor always has a usable
-// reason value.
-func TestRecordPendingAdminKick_DefaultReason(t *testing.T) {
-	dir := t.TempDir()
-	s, err := Open(dir)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer s.Close()
-
-	if err := s.RecordPendingAdminKick("alice", "group_1", ""); err != nil {
-		t.Fatalf("record: %v", err)
-	}
-
-	kicks, _ := s.ConsumePendingAdminKicks()
-	if len(kicks) != 1 || kicks[0].Reason != "admin" {
-		t.Errorf("expected default reason 'admin', got %+v", kicks)
-	}
-}
-
-// TestConsumePendingAdminKicks_Empty verifies the empty-table case
-// returns nil without error.
-func TestConsumePendingAdminKicks_Empty(t *testing.T) {
-	dir := t.TempDir()
-	s, err := Open(dir)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer s.Close()
-
-	kicks, err := s.ConsumePendingAdminKicks()
-	if err != nil {
-		t.Errorf("consume on empty queue should not error: %v", err)
-	}
-	if len(kicks) != 0 {
-		t.Errorf("expected 0 kicks, got %d", len(kicks))
 	}
 }
 
@@ -404,7 +315,7 @@ func TestDeleteGroupConversation_OpportunisticPrune(t *testing.T) {
 	s.RecordGroupDeletion("alice", "fresh_group")
 
 	// Trigger a cleanup of an unrelated group — the prune piggybacks
-	s.CreateGroup("unrelated", []string{"bob"}, "")
+	s.CreateGroup("unrelated", "bob", []string{"bob"}, "")
 	if err := s.DeleteGroupConversation("unrelated"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}

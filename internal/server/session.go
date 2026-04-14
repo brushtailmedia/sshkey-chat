@@ -1353,7 +1353,10 @@ func (s *Server) handleCreateGroup(c *Client, raw json.RawMessage) {
 	groupID := generateID("group_")
 
 	if s.store != nil {
-		if err := s.store.CreateGroup(groupID, allMembers, msg.Name); err != nil {
+		// Phase 14: caller becomes the initial admin. c.UserID is already at
+		// index 0 of allMembers (via the append above), so the validation
+		// inside CreateGroup will pass.
+		if err := s.store.CreateGroup(groupID, c.UserID, allMembers, msg.Name); err != nil {
 			s.logger.Error("failed to create group", "error", err)
 			c.Encoder.Encode(protocol.Error{Type: "error", Code: "internal", Message: "failed to create group"})
 			return

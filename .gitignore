@@ -1,6 +1,8 @@
-# Binaries
-sshkey-server
-sshkey-ctl
+# Binaries (root-only — leading slash is load-bearing; bare `sshkey-server` /
+# `sshkey-ctl` would match the cmd/sshkey-server/ and cmd/sshkey-ctl/ source
+# directories as well, quietly ignoring every file inside them)
+/sshkey-server
+/sshkey-ctl
 *.exe
 *.exe~
 *.dll

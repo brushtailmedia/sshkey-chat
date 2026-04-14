@@ -8,12 +8,11 @@ import (
 
 // runRoomRetirementProcessor is the polling loop that bridges the
 // CLI's pending_room_retirements queue with the running server's
-// broadcast surface. Phase 12 counterpart to runAdminKickProcessor.
+// broadcast surface. Phase 12.
 //
-// Why polling instead of IPC: same rationale as the admin-kick
-// processor. The CLI is a separate process that owns nothing but
-// filesystem access to the server's data dir. There is no existing
-// IPC mechanism between sshkey-ctl and sshkey-server — the
+// Why polling instead of IPC: the CLI is a separate process that owns
+// nothing but filesystem access to the server's data dir. There is no
+// existing IPC mechanism between sshkey-ctl and sshkey-server — the
 // decision_no_remote_admin_commands.md memory note explains the
 // security design ("no remote admin commands, ever"). A queue table +
 // polling goroutine is the canonical bridge pattern for CLI-initiated

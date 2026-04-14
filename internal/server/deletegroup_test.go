@@ -13,7 +13,7 @@ import (
 // records the deletion, and echoes group_deleted to the leaver's session.
 func TestHandleDeleteGroup_MemberRemoved(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_test", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup("group_test", "alice", []string{"alice", "bob"}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -59,7 +59,7 @@ func TestHandleDeleteGroup_MemberRemoved(t *testing.T) {
 // no error is returned.
 func TestHandleDeleteGroup_AlreadyLeft(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_test", []string{"bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup("group_test", "bob", []string{"bob"}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 	// alice is NOT in the group (was never added)
@@ -96,7 +96,7 @@ func TestHandleDeleteGroup_AlreadyLeft(t *testing.T) {
 // cleanup of the group_conversations row + the group-<id>.db file.
 func TestHandleDeleteGroup_LastMemberCleanup(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_solo", []string{"alice"}, "Solo"); err != nil {
+	if err := s.store.CreateGroup("group_solo", "alice", []string{"alice"}, "Solo"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -132,7 +132,7 @@ func TestHandleDeleteGroup_LastMemberCleanup(t *testing.T) {
 // deletion record so it can purge its local copy of the group.
 func TestHandleDeleteGroup_LastMemberOfflineCatchup(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_solo", []string{"alice"}, "Solo"); err != nil {
+	if err := s.store.CreateGroup("group_solo", "alice", []string{"alice"}, "Solo"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -182,7 +182,7 @@ func TestHandleDeleteGroup_LastMemberOfflineCatchup(t *testing.T) {
 // not just the one that initiated the delete.
 func TestHandleDeleteGroup_MultiDeviceLiveEcho(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_test", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup("group_test", "alice", []string{"alice", "bob"}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -227,7 +227,7 @@ func TestSendDeletedGroups_None(t *testing.T) {
 // leak when users use the regular /leave command.
 func TestHandleLeaveGroup_LastMemberCleanup(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_solo", []string{"alice"}, "Solo"); err != nil {
+	if err := s.store.CreateGroup("group_solo", "alice", []string{"alice"}, "Solo"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -254,7 +254,7 @@ func TestHandleLeaveGroup_LastMemberCleanup(t *testing.T) {
 // group existence or membership.
 func TestHandleLeaveGroup_PrivacyResponsesIdentical(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_real", []string{"alice"}, "Real"); err != nil {
+	if err := s.store.CreateGroup("group_real", "alice", []string{"alice"}, "Real"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -280,138 +280,11 @@ func TestHandleLeaveGroup_PrivacyResponsesIdentical(t *testing.T) {
 	}
 }
 
-// TestProcessPendingAdminKicks_FullFlow verifies the end-to-end admin
-// kick path: a kick is queued (as the CLI would do), the processor
-// runs, the kicked user receives a group_left echo with reason "admin",
-// the remaining members receive a group_event{leave, reason: admin},
-// and the queue is emptied.
-func TestProcessPendingAdminKicks_FullFlow(t *testing.T) {
-	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_kick", []string{"alice", "bob", "carol"}, "Test"); err != nil {
-		t.Fatalf("create group: %v", err)
-	}
-
-	// Bob is the troublemaker. Simulate the CLI: directly remove him,
-	// then queue the broadcast.
-	if err := s.store.RemoveGroupMember("group_kick", "bob"); err != nil {
-		t.Fatalf("remove member: %v", err)
-	}
-	if err := s.store.RecordPendingAdminKick("bob", "group_kick", "admin"); err != nil {
-		t.Fatalf("queue kick: %v", err)
-	}
-
-	// Register sessions: bob (the kicked user, gets the echo), alice
-	// and carol (the remaining members, get the broadcast)
-	bobClient := testClientFor("bob", "dev_bob_1")
-	aliceClient := testClientFor("alice", "dev_alice_1")
-	carolClient := testClientFor("carol", "dev_carol_1")
-	s.mu.Lock()
-	s.clients["dev_bob_1"] = bobClient.Client
-	s.clients["dev_alice_1"] = aliceClient.Client
-	s.clients["dev_carol_1"] = carolClient.Client
-	s.mu.Unlock()
-
-	// Run the processor (simulates one tick of the polling goroutine)
-	s.processPendingAdminKicks()
-
-	// Bob should have received exactly one group_left with reason=admin
-	bobMsgs := bobClient.messages()
-	if len(bobMsgs) != 1 {
-		t.Fatalf("bob expected 1 message, got %d", len(bobMsgs))
-	}
-	var bobLeft protocol.GroupLeft
-	if err := json.Unmarshal(bobMsgs[0], &bobLeft); err != nil {
-		t.Fatalf("parse bob's message: %v", err)
-	}
-	if bobLeft.Type != "group_left" {
-		t.Errorf("type = %q, want group_left", bobLeft.Type)
-	}
-	if bobLeft.Group != "group_kick" {
-		t.Errorf("group = %q, want group_kick", bobLeft.Group)
-	}
-	if bobLeft.Reason != "admin" {
-		t.Errorf("reason = %q, want admin", bobLeft.Reason)
-	}
-
-	// Alice and carol should each have received exactly one
-	// group_event{leave, user: bob, reason: admin}
-	for _, cc := range []*captureClient{aliceClient, carolClient} {
-		msgs := cc.messages()
-		if len(msgs) != 1 {
-			t.Fatalf("expected 1 broadcast on remaining-member session, got %d", len(msgs))
-		}
-		var ev protocol.GroupEvent
-		if err := json.Unmarshal(msgs[0], &ev); err != nil {
-			t.Fatalf("parse: %v", err)
-		}
-		if ev.Type != "group_event" {
-			t.Errorf("type = %q, want group_event", ev.Type)
-		}
-		if ev.Event != "leave" {
-			t.Errorf("event = %q, want leave", ev.Event)
-		}
-		if ev.User != "bob" {
-			t.Errorf("user = %q, want bob", ev.User)
-		}
-		if ev.Reason != "admin" {
-			t.Errorf("reason = %q, want admin", ev.Reason)
-		}
-	}
-
-	// Queue should be empty after processing
-	leftover, _ := s.store.ConsumePendingAdminKicks()
-	if len(leftover) != 0 {
-		t.Errorf("queue should be empty after processing, got %d", len(leftover))
-	}
-}
-
-// TestProcessPendingAdminKicks_LastMemberCleanup verifies that if the
-// kick empties the group, the cleanup cascade still fires from the
-// performGroupLeave path. (The CLI may or may not have already done
-// the cleanup before queueing — performGroupLeave is idempotent.)
-func TestProcessPendingAdminKicks_LastMemberCleanup(t *testing.T) {
-	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_solo_kick", []string{"alice"}, "Solo"); err != nil {
-		t.Fatalf("create group: %v", err)
-	}
-
-	// CLI removes alice + queues
-	s.store.RemoveGroupMember("group_solo_kick", "alice")
-	s.store.RecordPendingAdminKick("alice", "group_solo_kick", "admin")
-
-	aliceClient := testClientFor("alice", "dev_alice_1")
-	s.mu.Lock()
-	s.clients["dev_alice_1"] = aliceClient.Client
-	s.mu.Unlock()
-
-	s.processPendingAdminKicks()
-
-	// Alice receives the group_left echo
-	if len(aliceClient.messages()) != 1 {
-		t.Errorf("expected 1 echo, got %d", len(aliceClient.messages()))
-	}
-
-	// Group should be fully cleaned up (last-member cleanup fired)
-	groups, _ := s.store.GetUserGroups("alice")
-	for _, g := range groups {
-		if g.ID == "group_solo_kick" {
-			t.Error("group should be cleaned up after last member removal")
-		}
-	}
-}
-
-// TestProcessPendingAdminKicks_EmptyQueue verifies the no-op path.
-func TestProcessPendingAdminKicks_EmptyQueue(t *testing.T) {
-	s := newTestServer(t)
-	// Just confirm it doesn't panic / error on an empty queue
-	s.processPendingAdminKicks()
-}
-
 // TestPerformGroupLeave_EmptyReasonIsSelfLeave verifies the existing
 // self-leave path still works after the refactor (regression).
 func TestPerformGroupLeave_EmptyReasonIsSelfLeave(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_self", []string{"alice", "bob"}, "Self"); err != nil {
+	if err := s.store.CreateGroup("group_self", "alice", []string{"alice", "bob"}, "Self"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -453,7 +326,7 @@ func TestPerformGroupLeave_EmptyReasonIsSelfLeave(t *testing.T) {
 // (including the renamer themselves).
 func TestHandleRenameGroup_BroadcastsToMembers(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_rename", []string{"alice", "bob"}, "Old Name"); err != nil {
+	if err := s.store.CreateGroup("group_rename", "alice", []string{"alice", "bob"}, "Old Name"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -513,7 +386,7 @@ func TestHandleRenameGroup_BroadcastsToMembers(t *testing.T) {
 // the same response.
 func TestHandleRenameGroup_PrivacyResponsesIdentical(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_real", []string{"alice"}, "Real"); err != nil {
+	if err := s.store.CreateGroup("group_real", "alice", []string{"alice"}, "Real"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -553,7 +426,7 @@ func TestHandleRenameGroup_PrivacyResponsesIdentical(t *testing.T) {
 // byte-identical property for handleSendGroup.
 func TestHandleSendGroup_PrivacyResponsesIdentical(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_real", []string{"alice"}, "Real"); err != nil {
+	if err := s.store.CreateGroup("group_real", "alice", []string{"alice"}, "Real"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 

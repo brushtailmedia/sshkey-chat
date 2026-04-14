@@ -309,6 +309,7 @@ func (s *Store) initDataDB() error {
 		CREATE TABLE IF NOT EXISTS group_members (
 			group_id    TEXT NOT NULL,
 			user        TEXT NOT NULL,
+			is_admin    INTEGER NOT NULL DEFAULT 0,
 			joined_at   TEXT NOT NULL DEFAULT (datetime('now')),
 			PRIMARY KEY (group_id, user),
 			FOREIGN KEY (group_id) REFERENCES group_conversations(id)
@@ -330,29 +331,6 @@ func (s *Store) initDataDB() error {
 
 		CREATE INDEX IF NOT EXISTS idx_deleted_groups_user ON deleted_groups(user_id);
 		CREATE INDEX IF NOT EXISTS idx_deleted_groups_age ON deleted_groups(deleted_at);
-
-		-- pending_admin_kicks is the queue the CLI writes to when an
-		-- admin runs sshkey-ctl remove-from-group. The running server
-		-- polls this table on a periodic ticker and, for each row,
-		-- broadcasts the corresponding group_event{leave, reason} to
-		-- remaining members and echoes group_left{reason} to all of
-		-- the kicked user's connected sessions. This is the bridge
-		-- between the CLI's direct DB mutation and the server's live
-		-- broadcast surface — the only IPC mechanism between sshkey-ctl
-		-- and the running sshkey-server process.
-		--
-		-- The CLI also performs the RemoveGroupMember mutation directly,
-		-- so the kick takes effect at the data layer even if the server
-		-- is down. The server's processing of this queue is purely about
-		-- delivering the live notifications. Rows are deleted after the
-		-- server has fired the broadcasts.
-		CREATE TABLE IF NOT EXISTS pending_admin_kicks (
-			id        INTEGER PRIMARY KEY AUTOINCREMENT,
-			user_id   TEXT NOT NULL,
-			group_id  TEXT NOT NULL,
-			reason    TEXT NOT NULL DEFAULT 'admin',
-			queued_at INTEGER NOT NULL
-		);
 
 		-- deleted_rooms records each user's intent to remove a room from
 		-- their view, independent of the room's actual lifetime. The row
@@ -379,8 +357,7 @@ func (s *Store) initDataDB() error {
 		-- room. This is the bridge between the CLI's direct DB mutation
 		-- and the server's live broadcast surface — the only IPC mechanism
 		-- between sshkey-ctl and the running sshkey-server process for
-		-- retirement actions. Parallel to pending_admin_kicks for group
-		-- admin removal.
+		-- retirement actions.
 		--
 		-- The CLI also performs the SetRoomRetired mutation directly on
 		-- rooms.db, so retirement takes effect at the data layer even if
@@ -522,6 +499,29 @@ func (s *Store) initMessageDB(db *sql.DB) error {
 			ts         INTEGER NOT NULL,
 			FOREIGN KEY (message_id) REFERENCES messages(id)
 		);
+
+		-- group_events is Phase 14's audit trail for admin-initiated group
+		-- mutations (join, leave, promote, demote, rename). Rooms and 1:1
+		-- DMs get an empty unused copy — the cost is one schema block, the
+		-- benefit is automatic GC via DeleteGroupConversation (the per-group
+		-- DB file unlink drops the events with it) and alignment with the
+		-- DB-per-context invariant. Populated via RecordGroupEvent by each
+		-- admin-action handler, read by GetGroupEventsSince during sync_batch
+		-- replay so offline clients get "alice promoted bob on Tuesday"
+		-- history entries on reconnect. ts is INTEGER (unix seconds) to
+		-- match messages.ts for shared sinceTS watermark in sync.
+		CREATE TABLE IF NOT EXISTS group_events (
+			id     INTEGER PRIMARY KEY AUTOINCREMENT,
+			event  TEXT NOT NULL,
+			user   TEXT NOT NULL,
+			by     TEXT NOT NULL DEFAULT '',
+			reason TEXT NOT NULL DEFAULT '',
+			name   TEXT NOT NULL DEFAULT '',
+			quiet  INTEGER NOT NULL DEFAULT 0,
+			ts     INTEGER NOT NULL
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_group_events_ts ON group_events(ts);
 	`)
 	return err
 }

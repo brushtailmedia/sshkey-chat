@@ -104,7 +104,7 @@ func (s *Store) PruneOldRoomDeletions(maxAgeSeconds int64) (int, error) {
 // PendingRoomRetirement is one row from the pending_room_retirements
 // queue — an admin-triggered room retirement that the CLI has staged
 // for the running server to broadcast. Returned by
-// ConsumePendingRoomRetirements. Mirrors PendingAdminKick.
+// ConsumePendingRoomRetirements.
 type PendingRoomRetirement struct {
 	ID        int64
 	RoomID    string
@@ -121,11 +121,11 @@ type PendingRoomRetirement struct {
 // the retirement takes effect at the data layer regardless of whether
 // the server processes the queue row.
 //
-// Mirrors RecordPendingAdminKick. The queue + polling pattern exists
-// because sshkey-ctl runs locally on the server box only — it cannot
-// send protocol messages to the running server, so CLI → server
-// coordination happens via these shared SQLite tables. See PROJECT.md
-// "Rooms / Channels" for the full security rationale.
+// The queue + polling pattern exists because sshkey-ctl runs locally
+// on the server box only — it cannot send protocol messages to the
+// running server, so CLI → server coordination happens via these
+// shared SQLite tables. See PROJECT.md "Rooms / Channels" for the
+// full security rationale.
 func (s *Store) RecordPendingRoomRetirement(roomID, retiredBy, reason string) error {
 	_, err := s.dataDB.Exec(
 		`INSERT INTO pending_room_retirements (room_id, retired_by, reason, queued_at) VALUES (?, ?, ?, ?)`,
@@ -142,7 +142,7 @@ func (s *Store) RecordPendingRoomRetirement(roomID, retiredBy, reason string) er
 // Atomic semantics: a transaction wraps the SELECT and DELETE so a
 // concurrent invocation can't double-process a retirement. The
 // transaction is short-lived (typically zero or a handful of rows) so
-// contention is negligible. Mirrors ConsumePendingAdminKicks.
+// contention is negligible.
 func (s *Store) ConsumePendingRoomRetirements() ([]PendingRoomRetirement, error) {
 	tx, err := s.dataDB.Begin()
 	if err != nil {

@@ -85,8 +85,6 @@ func run() error {
 		return cmdRetireRoom(dataDir, cmdArgs)
 	case "list-retired-rooms":
 		return cmdListRetiredRooms(dataDir)
-	case "remove-from-group":
-		return cmdRemoveFromGroup(dataDir, cmdArgs)
 	case "list-groups":
 		return cmdListGroups(dataDir)
 	case "status":
@@ -127,12 +125,6 @@ Commands:
                                           seconds via the polling bridge.
   list-retired-rooms                      List all retired rooms
   list-groups                             List all group DMs (and their members)
-  remove-from-group --user USER --group GROUP_ID
-                                          Eject a user from a group DM. Emergency
-                                          escape hatch only — groups are normally
-                                          private peer DMs with no admin management.
-                                          Use when a member is causing problems and
-                                          another member has asked an admin to step in.
   revoke-device --user USER --device DEV  Revoke a device
   restore-device --user USER --device DEV Restore a revoked device
   status                                  Show server overview (users, rooms, data)
@@ -785,11 +777,11 @@ func cmdListRetiredRooms(dataDir string) error {
 	return nil
 }
 
-// cmdListGroups dumps every group DM and its current members. Used by
-// admins to look up a group ID for the remove-from-group escape hatch.
-// Group IDs are nanoid-style and not human-friendly, so this is the
-// primary way to find the right group when responding to a moderation
-// request.
+// cmdListGroups dumps every group DM and its current members. Group
+// IDs are nanoid-style and not human-friendly, so this is the primary
+// way to find a specific group when debugging or inspecting state.
+// Phase 14 removed the CLI's remove-from-group escape hatch — all
+// group moderation now lives in-group via admin protocol verbs.
 func cmdListGroups(dataDir string) error {
 	st, err := store.Open(dataDir)
 	if err != nil {
@@ -834,128 +826,6 @@ func cmdListGroups(dataDir string) error {
 		}
 		fmt.Printf("%-25s name=%q members=%d %v\n", g.id, name, len(members), members)
 	}
-	return nil
-}
-
-// cmdRemoveFromGroup is the admin escape hatch for removing a member
-// from a group DM when normal peer-to-peer membership control isn't
-// enough — for example, when a member is causing problems and another
-// member has asked an admin to intervene.
-//
-// IMPORTANT design context: groups are private peer DMs and have NO
-// regular admin management. Membership is fixed at create time, and the
-// only mutations are self-leave / self-delete / retirement. This command
-// exists ONLY for the abuse / moderation edge case and is deliberately
-// NOT exposed via the protocol — it lives in the local CLI so that
-// triggering it requires filesystem access to the server's data dir.
-//
-// Mechanics: directly mutates group_members like other CLI commands
-// (matches the pattern of remove-from-room and retire-user). The kicked
-// user finds out via the multi-device offline catchup reconciliation on
-// their next reconnect (their group_list won't include the group, the
-// client marks it locally as left). Currently-connected sessions of the
-// kicked user keep the group in their sidebar until they reconnect; any
-// send attempt against the group returns ErrUnknownGroup.
-//
-// If removing this user empties the group, the cleanup cascade runs
-// (DeleteGroupConversation drops the row + group-<id>.db file + WAL
-// sidecars).
-func cmdRemoveFromGroup(dataDir string, args []string) error {
-	var user, group string
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--user":
-			if i+1 < len(args) {
-				user = args[i+1]
-				i++
-			}
-		case "--group":
-			if i+1 < len(args) {
-				group = args[i+1]
-				i++
-			}
-		}
-	}
-	if user == "" || group == "" {
-		return fmt.Errorf("usage: remove-from-group --user USER --group GROUP_ID\n" +
-			"(use list-groups to find the group ID)")
-	}
-
-	st, err := store.Open(dataDir)
-	if err != nil {
-		return fmt.Errorf("open store: %w", err)
-	}
-	defer st.Close()
-
-	// Validate user exists. We don't reject retired users — if a retired
-	// user is somehow still in a group, the admin can still kick them.
-	u := st.GetUserByID(user)
-	if u == nil {
-		return fmt.Errorf("user %q not found", user)
-	}
-
-	// Validate group exists and the user is currently a member. The
-	// member check gives a better error than silently no-op'ing.
-	isMember, err := st.IsGroupMember(group, user)
-	if err != nil {
-		return fmt.Errorf("check membership: %w", err)
-	}
-	if !isMember {
-		return fmt.Errorf("user %q is not a member of group %q", user, group)
-	}
-
-	if err := st.RemoveGroupMember(group, user); err != nil {
-		return fmt.Errorf("remove member: %w", err)
-	}
-
-	// Queue the kick for the running server's broadcast surface. The
-	// server's admin-kick processor (a polling goroutine) reads this
-	// queue every few seconds and dispatches each row through the same
-	// performGroupLeave path that handleLeaveGroup uses, with reason
-	// "admin". This is what gives the kicked user a live group_left
-	// echo (so their TUI shows "You were removed from group X") and
-	// the remaining members a group_event{leave, reason: admin}
-	// (so they see "alice was removed by an admin").
-	//
-	// Idempotent at the data layer — even if the server is down, the
-	// kick has already taken effect via the RemoveGroupMember call
-	// above. The queue row sits in the table until the server picks it
-	// up on next start.
-	if err := st.RecordPendingAdminKick(user, group, "admin"); err != nil {
-		// Non-fatal: the membership removal already succeeded, this is
-		// just the live notification path.
-		fmt.Printf("Warning: failed to queue admin kick broadcast: %v\n", err)
-		fmt.Println("The kick still took effect at the data layer; affected")
-		fmt.Println("clients will see it on next reconnect via reconciliation.")
-	}
-
-	// Last-member cleanup: if removing this user emptied the group, drop
-	// the group row + dm file. Same path the live handlers use.
-	remaining, err := st.GetGroupMembers(group)
-	if err != nil {
-		return fmt.Errorf("check remaining members: %w", err)
-	}
-	if len(remaining) == 0 {
-		if err := st.DeleteGroupConversation(group); err != nil {
-			return fmt.Errorf("cleanup empty group: %w", err)
-		}
-		fmt.Printf("Removed %s (%s) from group %s.\n", u.DisplayName, user, group)
-		fmt.Println("Group was emptied by this removal — cleaned up automatically.")
-		fmt.Println("The kicked user will see the leave notification on their")
-		fmt.Println("connected sessions within ~5 seconds (live broadcast path)")
-		fmt.Println("or on their next reconnect (offline catchup path).")
-		return nil
-	}
-
-	fmt.Printf("Removed %s (%s) from group %s.\n", u.DisplayName, user, group)
-	fmt.Printf("Group has %d remaining members.\n", len(remaining))
-	fmt.Println()
-	fmt.Println("The kicked user will see a 'You were removed from group X'")
-	fmt.Println("notification on their connected sessions within ~5 seconds")
-	fmt.Println("(via the running server's admin-kick processor). Other")
-	fmt.Println("members will see a group_event{leave} broadcast in the same")
-	fmt.Println("window. Sessions that are offline now will catch up via the")
-	fmt.Println("usual group_list reconciliation on their next reconnect.")
 	return nil
 }
 
