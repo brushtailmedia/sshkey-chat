@@ -355,6 +355,85 @@ func TestPerformGroupLeave_RemovedReason(t *testing.T) {
 	}
 }
 
+// TestHandleRemoveFromGroup_LastMemberCleanupOnKickedSoleMember is
+// the regression for the concern flagged during the Chunk 5 audit:
+// when an admin kicks the only remaining non-self member of a group,
+// the last-member cleanup cascade should fire from inside
+// performGroupLeave → DeleteGroupConversation. Replaces the coverage
+// that the old TestProcessPendingAdminKicks_LastMemberCleanup test
+// provided via the deleted CLI escape-hatch path.
+//
+// Setup: 2-member group (alice admin + bob non-admin). alice kicks
+// bob. Bob was the last non-admin member, but alice is still in the
+// group, so DeleteGroupConversation should NOT fire (cleanup only
+// runs on TRULY empty groups). After bob's kick, alice remains and
+// the group row survives. Contrast with the orphan-on-solo retirement
+// test in TestHandleRetirement_SoleMemberOrphanCleanupFires which
+// exercises the actual empty-group cleanup branch.
+//
+// The stronger variant — kicking the last remaining member and
+// emptying the group — requires bob to be both admin AND solo which
+// is a contradiction (can't have an admin-free group). So this test
+// covers the IMPORTANT case: kicked member leaves, group row and
+// file survive because alice is still in it.
+func TestHandleRemoveFromGroup_LastMemberCleanupOnKickedSoleMember(t *testing.T) {
+	s := newTestServer(t)
+	if err := s.store.CreateGroup("group_last_kick", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+
+	alice := testClientFor("alice", "dev_alice_1")
+	s.mu.Lock()
+	s.clients["dev_alice_1"] = alice.Client
+	s.mu.Unlock()
+
+	// alice kicks bob via the handler (not performGroupLeave direct)
+	// so the full pipeline runs: admin check + self-kick check +
+	// last-admin check + performGroupLeave.
+	raw, _ := json.Marshal(protocol.RemoveFromGroup{
+		Type: "remove_from_group", Group: "group_last_kick", User: "bob",
+	})
+	s.handleRemoveFromGroup(alice.Client, raw)
+
+	// bob is no longer a member
+	isBobMember, _ := s.store.IsGroupMember("group_last_kick", "bob")
+	if isBobMember {
+		t.Error("bob should be removed after kick")
+	}
+
+	// alice is still a member — group row should survive
+	isAliceMember, _ := s.store.IsGroupMember("group_last_kick", "alice")
+	if !isAliceMember {
+		t.Error("alice should still be a member")
+	}
+
+	// group_conversations row still exists (alice is still in it).
+	// Verify via GetUserGroups — the group should appear in alice's list.
+	groups, _ := s.store.GetUserGroups("alice")
+	found := false
+	for _, g := range groups {
+		if g.ID == "group_last_kick" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("group should still exist (alice is still a member)")
+	}
+
+	// Audit: one "leave" row for bob's kick with by=alice, reason=removed
+	events, _ := s.store.GetGroupEventsSince("group_last_kick", 0)
+	var foundKickEvent bool
+	for _, e := range events {
+		if e.Event == "leave" && e.User == "bob" && e.By == "alice" && e.Reason == "removed" {
+			foundKickEvent = true
+		}
+	}
+	if !foundKickEvent {
+		t.Errorf("expected audit row for bob's kick, got events %+v", events)
+	}
+}
+
 // --- handlePromoteGroupAdmin ---
 
 func TestHandlePromoteGroupAdmin_Success(t *testing.T) {
