@@ -14,6 +14,7 @@ Inspired by [ssh-chat](https://github.com/shazow/ssh-chat).
 - **SSH identity** -- no accounts, no passwords, your Ed25519 key is your permanent identity (no key rotation; lost or compromised keys require account retirement + a fresh account)
 - **Rooms** with epoch-based key rotation (forward secrecy, bounded exposure) and admin-initiated retirement
 - **1:1 DMs and group DMs** with per-message keys (Signal-level forward secrecy), separate protocol verbs for each
+- **Group DMs are self-governed by in-group admins** (Phase 14) — creator becomes the first admin; admins can add, remove, promote, demote, and rename. Server operators stay out of group membership. At-least-one-admin invariant enforced at every mutation path; retirement cascade auto-promotes the oldest remaining member as successor.
 - **`/leave` and `/delete`** for rooms, 1:1 DMs, and group DMs with multi-device sync via server-side sidecar tables
 - **Admin-initiated room retirement** (`sshkey-ctl retire-room`) — read-only, display-name suffixed to free the original, broadcast to connected members
 - **File sharing** via encrypted upload/download channels (server can't see filenames, types, or content)
@@ -269,12 +270,13 @@ sshkey-ctl retire-room --room engineering --reason "project ended"  # archive a 
 sshkey-ctl list-retired-rooms                                  # list retired rooms
 ```
 
-**Groups (escape hatch — slated for removal when in-group admin lands):**
+**Groups:**
 
 ```bash
 sshkey-ctl list-groups                                         # list all group DMs
-sshkey-ctl remove-from-group --user usr_abc123 --group group_xyz  # kick a user from a group DM
 ```
+
+Group DMs are self-governed by in-group admins (Phase 14). The creator becomes the first admin; admins can add/remove/promote/demote/rename via in-group slash commands. The server operator stays out of group membership — there is no `sshkey-ctl remove-from-group` or similar. For ToS violations that require operator intervention, retire the offending account (`sshkey-ctl retire-user`), which triggers a cascading per-group leave + last-admin succession.
 
 **Devices:**
 

@@ -570,6 +570,8 @@ Room sync batches include epoch keys needed to decrypt that batch and reactions 
 
 **Phase 14: `events` field.** Group DM sync batches may carry an `events` array containing recent `group_event` rows that happened while the client was offline (admin actions like join, leave, promote, demote, rename). Clients route each entry through the same dispatch path used for live `group_event` broadcasts, so persisted replay and live delivery produce identical in-memory state + local DB rows. The `sinceTS` watermark is shared between messages and events — one timestamp, both sources. Non-group sync batches (rooms, 1:1 DMs) omit the field.
 
+**New-member pre-join gate (groups).** When a group sync batch is built for a user whose `joined_at` on `group_members` is later than the incoming `sinceTS`, the server raises `sinceTS` to `joined_at` before querying. This filters both `messages` and `events` to only post-join rows — new members never receive pre-join timestamps, sender IDs, or admin-audit entries in their sync batch. The analogous filter on `handleHistory`'s group branch post-filters `messages` by `m.TS < joined_at`. Rooms have had the equivalent filter (`first_seen` / `first_epoch`) since v0.1.0; groups gained it in the Phase 14 post-implementation pass. Leaves + re-adds get a fresh `joined_at`, so the "invisible window" a leaver was away for cannot be rewound.
+
 ### History (Scroll-back)
 
 The `history` request carries exactly one context field (`room`, `group`, or `dm`) matching the message family the caller wants to scroll back through. The response mirrors the shape of the corresponding sync batch for that context.

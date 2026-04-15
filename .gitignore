@@ -46,11 +46,11 @@ firebase-sa.json
 docker/config/host_key
 
 # Design docs (internal working files, not checked in)
-/refactor_plan.md
-/performance_optimization.md
-/groups_admin.md
-/message_editing.md
-/business_edition.md
+refactor_plan.md
+performance_optimization.md
+groups_admin.md
+message_editing.md
+business_edition.md
 
 # OS
 .DS_Store
