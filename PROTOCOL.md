@@ -633,6 +633,68 @@ Deletion is a **soft-delete** — the server keeps the message row with `deleted
 
 Retired rooms reject `delete` with `room_retired` — the history becomes permanently frozen once the room is retired.
 
+### Message Editing
+
+Capability: implicit (part of the core message verb set since Phase 15).
+
+Three verb families mirror the send-family split: `edit` / `edited` for rooms, `edit_group` / `group_edited` for group DMs, `edit_dm` / `dm_edited` for 1:1 DMs. Each verb replaces the encrypted payload of an existing message row in place, preserving the original timestamp and attachment list while setting a new server-authoritative `edited_at` on the broadcast echo.
+
+```json
+// Client -> Server (rooms)
+{"type":"edit","id":"msg_abc123","room":"room_V1StGXR8_Z5jdHi6B","epoch":3,
+ "payload":"base64...","signature":"base64..."}
+
+// Server -> Client (rooms — broadcast to all room members)
+{"type":"edited","id":"msg_abc123","room":"room_V1StGXR8_Z5jdHi6B","from":"usr_alice",
+ "ts":1712345678,"epoch":3,
+ "payload":"base64...","signature":"base64...","edited_at":1712345690}
+
+// Client -> Server (group DMs — fresh K_msg wrapped for current members)
+{"type":"edit_group","id":"msg_def456","group":"group_xK9mQ2pR",
+ "wrapped_keys":{"usr_alice":"base64...","usr_bob":"base64..."},
+ "payload":"base64...","signature":"base64..."}
+
+// Server -> Client (group DMs)
+{"type":"group_edited","id":"msg_def456","group":"group_xK9mQ2pR","from":"usr_alice",
+ "ts":1712345678,
+ "wrapped_keys":{"usr_alice":"base64...","usr_bob":"base64..."},
+ "payload":"base64...","signature":"base64...","edited_at":1712345690}
+
+// Client -> Server (1:1 DMs — exactly 2 wrapped_keys entries)
+{"type":"edit_dm","id":"msg_ghi789","dm":"dm_yL0nR3qS",
+ "wrapped_keys":{"usr_alice":"base64...","usr_bob":"base64..."},
+ "payload":"base64...","signature":"base64..."}
+
+// Server -> Client (1:1 DMs — delivered to both parties)
+{"type":"dm_edited","id":"msg_ghi789","dm":"dm_yL0nR3qS","from":"usr_alice",
+ "ts":1712345678,
+ "wrapped_keys":{"usr_alice":"base64...","usr_bob":"base64..."},
+ "payload":"base64...","signature":"base64...","edited_at":1712345690}
+```
+
+`ts` in every edit broadcast is the ORIGINAL send time, preserved from the stored row — the message stays in its original position in the stream and reply chains stay stable. `edited_at` is the wall clock at the moment the server processed the edit. Clients render `"(edited)"` in dim style after the timestamp when `edited_at > 0`.
+
+**Validation on the server side** (all three handlers):
+
+1. **Membership / party check.** Non-members and non-parties get the byte-identical `unknown_room` / `unknown_group` / `unknown_dm` response — matching the unknown-context shape so probing clients cannot enumerate authorship or context existence.
+2. **Retired room gate.** Rooms only. Retired rooms reject edits with `room_retired`, matching the Phase 12 gate on `send` / `react` / `pin` / `unpin`.
+3. **Rate limit.** `edits_per_minute` bucket (default 10/min) shared across all three verbs per user. One bucket, not three — can't bypass by interleaving contexts.
+4. **Authorship.** `row.Sender == c.UserID` — non-authors collapse into the byte-identical unknown response so tombstone / authorship state does not leak.
+5. **Deleted check.** Tombstoned rows reject edits, also collapsed into the byte-identical unknown response.
+6. **Most-recent rule.** The edit target must be the user's most recent non-deleted message in the current context. If not, returns `edit_not_most_recent` (surfaced — caller is proven author at this point).
+7. **Epoch window (rooms only).** The edit's `epoch` must be in the current-or-previous epoch grace window, matching the send path. If the epoch has rotated past the grace window, returns `edit_window_expired`.
+8. **Wrapped-key match (groups/DMs only).** `wrapped_keys` must exactly match the current member set. Mid-flight membership changes between client-side compose and server-side validate produce `invalid_wrapped_keys`.
+
+**Immutable fields.** The edit envelope does NOT carry `file_ids`, `reply_to`, `mentions`, or `attachments`. The server preserves `file_ids` from the stored row on replace. The payload-internal fields (`ReplyTo`, `Mentions`, `Attachments[*]`) live inside the encrypted `DecryptedPayload` and the client's send path copies them verbatim from the original decrypted payload into the new one before re-encrypting, replacing only `Body` (and regenerating `Seq` + `DeviceID` for the new wire frame). Clients re-extract `Mentions` from the new body for highlight rendering. This is client-side enforcement by construction — the server never sees these fields and cannot validate them.
+
+**Reactions on edited messages are cleared.** The server drops all rows for the edited message ID from the per-context `reactions` table in the same transaction as the payload replace. Clients unconditionally clear their locally-cached reaction state for the edited message ID when they process the `edited` / `group_edited` / `dm_edited` envelope — no per-reaction `reaction_removed` broadcasts are emitted, matching the delete-tombstone pattern. Reaction preservation across edits is explicitly NOT a goal (Signal behaves the same way).
+
+**Signature is a pass-through blob.** The server does not verify `signature` on `edit` / `edit_group` / `edit_dm`, matching the existing `send` / `send_group` / `send_dm` behaviour where signatures are relayed opaquely and recipients verify client-side via their local TOFU pinned-key table. Authorship for the row replacement is established by the authenticated SSH channel, not the signature. Cross-cutting server-side signature verification is a separate future hardening decision.
+
+**No edit history retained.** The original payload is replaced in place. No prior-versions list, no `/edits` verb, no edit-history viewer — matches Signal. Edits preserve the thread graph (same ID, same `ts`, same `reply_to`), but the pre-edit text is gone.
+
+**Rate limit.** `edits_per_minute` defaults to 10/min, shared across `edit` / `edit_group` / `edit_dm` per user. Configurable via `[server.rate_limits]` in `server.toml`.
+
 ### Typing Indicators
 
 Capability: `typing`
@@ -1134,6 +1196,8 @@ Admin clients send `list_pending_keys` and present the result to the operator. A
 | `unknown_user` | **Phase 14.** `add_to_group` target does not exist or is retired. Only returned AFTER the caller has proven admin status — before that the "unknown user" case collapses into `unknown_group`. |
 | `already_member` | **Phase 14.** `add_to_group` target is already a member of the group. |
 | `already_admin` | **Phase 14.** `promote_group_admin` target is already an admin of the group. |
+| `edit_not_most_recent` | **Phase 15.** `edit` / `edit_group` / `edit_dm` target is not the caller's most recent message in the context. Only returned AFTER authorship has been proven — the unknown-context response shape is used before that. |
+| `edit_window_expired` | **Phase 15.** Rooms only. The epoch has rotated past the grace window since the original message was sent, so the room edit cannot be signed with a valid epoch key. Client should exit edit mode and compose a fresh message. |
 | `user_retired` | Sender or target of a DM operation has a retired account |
 | `room_retired` | Room has been retired by an admin — writes (`send`, `react`, `unreact`, `pin`, `unpin`, `delete`) are rejected |
 | `forbidden` | Policy gate denied the request (e.g. `allow_self_leave_rooms = false` on `leave_room` or `delete_room`) |
@@ -1165,6 +1229,7 @@ The server enforces per-user rate limits on most operations. When exceeded, the 
 | Profile changes | 5/minute | Per user |
 | Pin/unpin | 10/minute | Per user |
 | Group admin actions | 20/minute | Per user, per group (Phase 14) — applies to `add_to_group`, `remove_from_group`, `promote_group_admin`, `demote_group_admin`, and `rename_group`. Server-initiated paths (retirement cascade, last-member cleanup) are exempt. |
+| Message edits | 10/minute | Per user (Phase 15) — SHARED bucket across `edit`, `edit_group`, `edit_dm`. One user cannot interleave edits across contexts to bypass the limit. |
 
 Clients should handle `rate_limited` errors gracefully — show a "Slow down" message in the status bar and retry after a brief pause. Do not retry automatically in a tight loop.
 

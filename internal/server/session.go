@@ -621,6 +621,12 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 	switch msgType {
 	case "send":
 		s.handleSend(c, raw)
+	case "edit":
+		s.handleEdit(c, raw)
+	case "edit_group":
+		s.handleEditGroup(c, raw)
+	case "edit_dm":
+		s.handleEditDM(c, raw)
 	case "send_group":
 		s.handleSendGroup(c, raw)
 	case "create_group":
@@ -994,6 +1000,25 @@ func (s *Server) handleRead(c *Client, raw json.RawMessage) {
 	}
 }
 
+// isReactableMessage reports whether a message row in the given
+// per-context DB is a valid react target: it must exist AND not be
+// tombstoned. Used by handleReact's Phase 15 follow-up guard that
+// closes the race between an incoming `react` envelope and a
+// concurrent `delete` tombstoning the target row. Silent false on any
+// error (missing row, DB failure, scan error) — the caller treats
+// any ambiguity as "don't insert" and skips the broadcast.
+//
+// The check is a single indexed point query on the primary key so
+// the overhead is negligible even at high reaction rates.
+func (s *Server) isReactableMessage(db *sql.DB, msgID string) bool {
+	var deleted int
+	err := db.QueryRow(`SELECT deleted FROM messages WHERE id = ?`, msgID).Scan(&deleted)
+	if err != nil {
+		return false
+	}
+	return deleted == 0
+}
+
 // handleReact processes a reaction.
 func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 	if !s.limiter.allowPerMinute("react:"+c.UserID, s.cfg.Server.RateLimits.ReactionsPerMinute) {
@@ -1047,41 +1072,73 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 		Signature:   msg.Signature,
 	}
 
-	// Store in the appropriate DB
+	// Store in the appropriate DB.
+	//
+	// Phase 15 follow-up: guard against reacting to a tombstoned or
+	// nonexistent message. Before Phase 15 this gate was missing,
+	// allowing a race where a `react` envelope could arrive after a
+	// `delete` had already tombstoned the target row. The old path
+	// inserted an orphan reaction row (FK passes because soft-delete
+	// keeps the row) and broadcast it; receiving clients' TUI filtered
+	// it at render time but the orphan persisted in per-context DBs
+	// and in clients' local stores. Now we check the `deleted` column
+	// before INSERT and silently return on miss/tombstone — matches
+	// `handleDelete`'s behavior when a target msgID isn't found
+	// (silent no-op, no error surfaced to the caller). Uses the same
+	// privacy posture as delete: the caller is already proven to be a
+	// room member, but revealing "your target was tombstoned" adds
+	// nothing useful over "your react silently failed" and avoids an
+	// extra protocol surface.
 	if s.store != nil {
 		if msg.Room != "" {
 			db, err := s.store.RoomDB(msg.Room)
-			if err == nil {
-				db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, epoch, payload, signature)
-					VALUES (?, ?, ?, ?, ?, ?, ?)`,
-					reactionID, msg.ID, c.UserID, reaction.TS, msg.Epoch, msg.Payload, msg.Signature)
+			if err != nil {
+				return
 			}
+			if !s.isReactableMessage(db, msg.ID) {
+				return
+			}
+			db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, epoch, payload, signature)
+				VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				reactionID, msg.ID, c.UserID, reaction.TS, msg.Epoch, msg.Payload, msg.Signature)
 		} else if msg.Group != "" {
 			db, err := s.store.GroupDB(msg.Group)
-			if err == nil {
-				wrappedKeys := ""
-				if len(msg.WrappedKeys) > 0 {
-					data, _ := json.Marshal(msg.WrappedKeys)
-					wrappedKeys = string(data)
-				}
-				db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, epoch, payload, signature, wrapped_keys)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-					reactionID, msg.ID, c.UserID, reaction.TS, msg.Epoch, msg.Payload, msg.Signature, wrappedKeys)
+			if err != nil {
+				return
 			}
+			if !s.isReactableMessage(db, msg.ID) {
+				return
+			}
+			wrappedKeys := ""
+			if len(msg.WrappedKeys) > 0 {
+				data, _ := json.Marshal(msg.WrappedKeys)
+				wrappedKeys = string(data)
+			}
+			db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, epoch, payload, signature, wrapped_keys)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				reactionID, msg.ID, c.UserID, reaction.TS, msg.Epoch, msg.Payload, msg.Signature, wrappedKeys)
 		} else if msg.DM != "" {
 			db, err := s.store.DMDB(msg.DM)
-			if err == nil {
-				wrappedKeys := ""
-				if len(msg.WrappedKeys) > 0 {
-					data, _ := json.Marshal(msg.WrappedKeys)
-					wrappedKeys = string(data)
-				}
-				db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, epoch, payload, signature, wrapped_keys)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-					reactionID, msg.ID, c.UserID, reaction.TS, msg.Epoch, msg.Payload, msg.Signature, wrappedKeys)
+			if err != nil {
+				return
 			}
+			if !s.isReactableMessage(db, msg.ID) {
+				return
+			}
+			wrappedKeys := ""
+			if len(msg.WrappedKeys) > 0 {
+				data, _ := json.Marshal(msg.WrappedKeys)
+				wrappedKeys = string(data)
+			}
+			db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, epoch, payload, signature, wrapped_keys)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				reactionID, msg.ID, c.UserID, reaction.TS, msg.Epoch, msg.Payload, msg.Signature, wrappedKeys)
 		}
 	}
+	// If s.store is nil (unusual, only hit in in-memory tests without
+	// persistence wired up) we fall through to the broadcast below.
+	// Real deployments always have a store, so the tombstone guard
+	// always fires in production.
 
 	// Broadcast
 	if msg.Room != "" {

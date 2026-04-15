@@ -121,6 +121,13 @@ type RateLimitsSection struct {
 	// to bound abuse. Server-initiated paths (retirement cascade, last-member
 	// cleanup) are exempt — this limit only applies to wire-level verbs.
 	AdminActionsPerMinute int `toml:"admin_actions_per_minute"`
+	// EditsPerMinute caps the rate at which a single user can issue
+	// message-edit verbs (edit, edit_group, edit_dm). Shared bucket per
+	// user across all three contexts — one bucket, not three — so a
+	// user can't bypass the limit by interleaving edits across rooms
+	// and DMs. Default 10/min is tight enough to bound abuse while
+	// generous enough for realistic typo fixes. Phase 15.
+	EditsPerMinute int `toml:"edits_per_minute"`
 }
 
 type ShutdownSection struct {
@@ -220,6 +227,7 @@ func DefaultServerConfig() ServerConfig {
 			ProfilesPerMinute:      5,
 			PinsPerMinute:          10,
 			AdminActionsPerMinute:  20, // Phase 14: per user per group
+			EditsPerMinute:         10, // Phase 15: shared bucket per user across edit/edit_group/edit_dm
 		},
 		Shutdown: ShutdownSection{
 			GracePeriod: "10s",

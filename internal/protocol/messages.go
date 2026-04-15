@@ -80,15 +80,51 @@ type Message struct {
 	Payload   string   `json:"payload"`             // base64 encrypted, pass-through
 	FileIDs   []string `json:"file_ids,omitempty"`
 	Signature string   `json:"signature"`           // base64, pass-through
+	EditedAt  int64    `json:"edited_at,omitempty"` // Phase 15: server sets on edit, absent on unedited messages
+}
+
+// Edit is the client → server envelope for replacing a room message's
+// encrypted payload (Phase 15). Intentionally omits FileIDs and any
+// reply/mention/attachment metadata — those are immutable under the
+// plan's split-enforcement model. FileIDs is envelope-level and
+// preserved by the server from the stored row on replace. ReplyTo,
+// Mentions, and Attachments live inside the encrypted payload and are
+// preserved by the client via the preserve-and-replace pattern before
+// re-encrypting (see message_editing.md Chunk 6).
+type Edit struct {
+	Type      string `json:"type"`      // "edit"
+	ID        string `json:"id"`        // msg ID of the message being edited
+	Room      string `json:"room"`      // room nanoid
+	Epoch     int64  `json:"epoch"`     // current epoch (grace window same as send)
+	Payload   string `json:"payload"`   // base64 encrypted new payload
+	Signature string `json:"signature"` // base64 Ed25519 signature over canonical form
+}
+
+// Edited is the server → client broadcast shape after a successful
+// room-message edit. Carries the original `ts` preserved from the
+// stored row plus the authoritative `edited_at` timestamp set at the
+// moment the server processed the edit. `file_ids` is the preserved
+// list from the original row. Clients unconditionally clear their
+// locally-cached reactions for this message ID when they process this
+// event (see message_editing.md Decision log Q12).
+type Edited struct {
+	Type      string   `json:"type"`                // "edited"
+	ID        string   `json:"id"`
+	From      string   `json:"from"`
+	Room      string   `json:"room"`
+	TS        int64    `json:"ts"`                  // ORIGINAL send time, preserved
+	Epoch     int64    `json:"epoch"`
+	Payload   string   `json:"payload"`             // new encrypted payload
+	FileIDs   []string `json:"file_ids,omitempty"`  // preserved from stored row
+	Signature string   `json:"signature"`
+	EditedAt  int64    `json:"edited_at"`           // server-authoritative edit wall clock
 }
 
 // Group DM messages
 //
-// 1:1 DMs are NOT supported in this protocol version — they live on the
-// `direct_messages` table introduced in chunk C of the Phase 11 refactor and
-// will get their own type set (`create_dm`, `dm`, `dm_left`, etc.). Until
-// then, every "DM" surface in this file refers to a multi-party group DM
-// living in the `group_conversations` / `group_members` tables.
+// (Pre-Phase-11 comment about 1:1 DMs being unsupported has been deleted —
+// they shipped in Phase 11 with their own type family: `CreateDM`, `SendDM`,
+// `DM`, `LeaveDM`, `DMInfo`, etc. See the DM section further down.)
 
 type CreateGroup struct {
 	Type    string   `json:"type"`              // "create_group"
@@ -137,6 +173,36 @@ type GroupMessage struct {
 	Payload     string            `json:"payload"`               // pass-through
 	FileIDs     []string          `json:"file_ids,omitempty"`
 	Signature   string            `json:"signature"`             // pass-through
+	EditedAt    int64             `json:"edited_at,omitempty"`   // Phase 15
+}
+
+// EditGroup is the client → server envelope for replacing a group DM
+// message's encrypted payload (Phase 15). Fresh K_msg wrapped for the
+// CURRENT group member set (not the set at original send time — the
+// server validates against GetGroupMembers at edit time). FileIDs is
+// omitted; the server preserves file_ids from the stored row.
+type EditGroup struct {
+	Type        string            `json:"type"`        // "edit_group"
+	ID          string            `json:"id"`
+	Group       string            `json:"group"`
+	WrappedKeys map[string]string `json:"wrapped_keys"`
+	Payload     string            `json:"payload"`
+	Signature   string            `json:"signature"`
+}
+
+// GroupEdited is the server → client broadcast for a successful group
+// DM edit. Shape mirrors GroupMessage plus EditedAt.
+type GroupEdited struct {
+	Type        string            `json:"type"`                // "group_edited"
+	ID          string            `json:"id"`
+	From        string            `json:"from"`
+	Group       string            `json:"group"`
+	TS          int64             `json:"ts"`                  // ORIGINAL send time
+	WrappedKeys map[string]string `json:"wrapped_keys"`
+	Payload     string            `json:"payload"`
+	FileIDs     []string          `json:"file_ids,omitempty"`  // preserved from stored row
+	Signature   string            `json:"signature"`
+	EditedAt    int64             `json:"edited_at"`
 }
 
 // Leave group
@@ -515,6 +581,37 @@ type DM struct {
 	Payload     string            `json:"payload"`
 	FileIDs     []string          `json:"file_ids,omitempty"`
 	Signature   string            `json:"signature"`
+	EditedAt    int64             `json:"edited_at,omitempty"`   // Phase 15
+}
+
+// EditDM is the client → server envelope for replacing a 1:1 DM
+// message's encrypted payload (Phase 15). WrappedKeys must have
+// exactly 2 entries matching the DM's two parties. Server rejects
+// if the caller's per-user left_at ratchet is set (frozen view
+// can't be mutated).
+type EditDM struct {
+	Type        string            `json:"type"`        // "edit_dm"
+	ID          string            `json:"id"`
+	DM          string            `json:"dm"`
+	WrappedKeys map[string]string `json:"wrapped_keys"`
+	Payload     string            `json:"payload"`
+	Signature   string            `json:"signature"`
+}
+
+// DMEdited is the server → client broadcast for a successful 1:1 DM
+// edit. Delivered to both parties' active sessions, provided neither
+// has a frozen view on the affected message.
+type DMEdited struct {
+	Type        string            `json:"type"`                // "dm_edited"
+	ID          string            `json:"id"`
+	From        string            `json:"from"`
+	DM          string            `json:"dm"`
+	TS          int64             `json:"ts"`                  // ORIGINAL send time
+	WrappedKeys map[string]string `json:"wrapped_keys"`
+	Payload     string            `json:"payload"`
+	FileIDs     []string          `json:"file_ids,omitempty"`  // preserved from stored row
+	Signature   string            `json:"signature"`
+	EditedAt    int64             `json:"edited_at"`
 }
 
 type LeaveDM struct {
@@ -1049,12 +1146,25 @@ const (
 	ErrUnknownGroup        = "unknown_group"
 	ErrUnknownRoom         = "unknown_room"
 	ErrUnknownDM           = "unknown_dm"
-	ErrUnknownUser         = "unknown_user"    // Phase 14: add_to_group target not found
-	ErrAlreadyMember       = "already_member"  // Phase 14: add_to_group target already in group
-	ErrAlreadyAdmin        = "already_admin"   // Phase 14: promote_group_admin target already admin
+	ErrUnknownUser         = "unknown_user"   // Phase 14: add_to_group target not found
+	ErrAlreadyMember       = "already_member" // Phase 14: add_to_group target already in group
+	ErrAlreadyAdmin        = "already_admin"  // Phase 14: promote_group_admin target already admin
 	ErrUserRetired         = "user_retired"
 	ErrRoomRetired         = "room_retired" // room has been retired — writes rejected
 	ErrServerBusy          = "server_busy"
+	// Phase 15: message editing error codes. ErrEditNotAuthorized and
+	// ErrEditDeletedMessage are byte-identical to ErrUnknownX on the
+	// wire per the privacy rule (non-authors and not-deleted-check
+	// failures collapse into the unknown-context response so probing
+	// clients can't enumerate authorship). They exist as named constants
+	// for internal logging and future hardening. ErrEditNotMostRecent
+	// and ErrEditWindowExpired are surfaced to the caller because by
+	// the time those checks run the caller has already proven
+	// membership and authorship.
+	ErrEditNotAuthorized  = "edit_not_authorized"  // internal only — wire response is ErrUnknownX
+	ErrEditNotMostRecent  = "edit_not_most_recent" // surfaced
+	ErrEditWindowExpired  = "edit_window_expired"  // surfaced
+	ErrEditDeletedMessage = "edit_deleted_message" // internal only — wire response is ErrUnknownX
 )
 
 // RawMessage is a JSON object that hasn't been decoded into a specific type yet.

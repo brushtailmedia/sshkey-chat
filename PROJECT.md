@@ -563,7 +563,7 @@ On leave:
 
 #### Message Deletion
 
-Message editing is a planned feature — see the **Future: Message Editing** section below for the full design, and `message_editing.md` for the implementation plan.
+Message editing is a planned feature — see the **Message Editing** section below for the full design, and `message_editing.md` for the implementation plan.
 
 ```json
 // Client -> Server
@@ -1389,7 +1389,7 @@ Handled entirely client-side. Fall back to text placeholder + download for unsup
 
 ### Message Deletion
 
-Same model as Signal/WhatsApp -- best-effort, no false promises. Message editing is a planned feature (see **Future: Message Editing** below and `message_editing.md`), tracked alongside delete rather than instead of it.
+Same model as Signal/WhatsApp -- best-effort, no false promises. Message editing is a planned feature (see **Message Editing** below and `message_editing.md`), tracked alongside delete rather than instead of it.
 
 - User sends a delete request for a message ID via the protocol (own messages only, admins can delete any)
 - Server removes message from DB (or marks as tombstone)
@@ -1949,9 +1949,9 @@ type Overlay interface {
 
 ---
 
-## Future: Message Editing
+## Message Editing
 
-**Status:** Planned feature — design complete, implementation tracked in `message_editing.md` (Phase 14).
+**Status:** Shipped in Phase 15 (2026-04-15). Three verb families (`edit` / `edit_group` / `edit_dm`) with corresponding echoes (`edited` / `group_edited` / `dm_edited`). `edited_at` is a new envelope field on `Message` / `GroupMessage` / `DM`. See `PROTOCOL.md` "Message Editing" section for the full wire format and `message_editing.md` for the design document.
 
 ### Constraints
 

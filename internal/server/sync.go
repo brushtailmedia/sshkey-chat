@@ -305,6 +305,7 @@ func storedToRawDMMessages(msgs []store.StoredMessage, dmID string) []json.RawMe
 				Payload:     m.Payload,
 				FileIDs:     m.FileIDs,
 				Signature:   m.Signature,
+				EditedAt:    m.EditedAt, // Phase 15
 			}
 			data, _ = json.Marshal(msg)
 		}
@@ -573,6 +574,7 @@ func storedToRawMessages(msgs []store.StoredMessage, roomID, groupID string) []j
 				Payload:   m.Payload,
 				FileIDs:   m.FileIDs,
 				Signature: m.Signature,
+				EditedAt:  m.EditedAt, // Phase 15: 0 on unedited rows (omitempty)
 			}
 			data, _ = json.Marshal(msg)
 		} else {
@@ -586,6 +588,7 @@ func storedToRawMessages(msgs []store.StoredMessage, roomID, groupID string) []j
 				Payload:     m.Payload,
 				FileIDs:     m.FileIDs,
 				Signature:   m.Signature,
+				EditedAt:    m.EditedAt, // Phase 15
 			}
 			data, _ = json.Marshal(msg)
 		}

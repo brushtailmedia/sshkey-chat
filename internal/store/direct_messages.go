@@ -205,7 +205,7 @@ func (s *Store) GetDMMessagesBeforeForUser(dmID, userID, beforeID string, limit 
 	// cutoff as an additional WHERE ts > cutoff.
 	if cutoff > 0 {
 		rows, err := db.Query(`
-			SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted
+			SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at
 			FROM messages
 			WHERE rowid < (SELECT rowid FROM messages WHERE id = ?)
 			  AND ts > ?
