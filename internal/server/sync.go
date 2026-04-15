@@ -154,6 +154,20 @@ func (s *Server) syncRoom(c *Client, roomID string, sinceTS int64, limit int) {
 // admin /rename'd the group but nobody sent anything since), so the
 // early return is gated on BOTH message count AND event count.
 func (s *Server) syncGroup(c *Client, groupID string, sinceTS int64, limit int) {
+	// Apply joined_at filter — new members only see post-join messages
+	// and events. Mirrors syncRoom's first_seen gate. The wrapped-key
+	// crypto model already prevents a new member from DECRYPTING pre-join
+	// messages, but the server must also not SERVE them: timestamps,
+	// sender IDs, and event replay (pre-join /promote, /rename, /kick
+	// audit entries) are social-graph metadata leaks even without
+	// plaintext. One raise here covers both branches of the sync batch
+	// (GetGroupMessagesSince and GetGroupEventsSince) — both use the same
+	// sinceTS watermark, so the filter is free on the events side.
+	joinedAt, _ := s.store.GetUserGroupJoinedAt(c.UserID, groupID)
+	if joinedAt > 0 && joinedAt > sinceTS {
+		sinceTS = joinedAt
+	}
+
 	msgs, err := s.store.GetGroupMessagesSince(groupID, sinceTS, limit)
 	if err != nil {
 		s.logger.Error("sync group failed", "group", groupID, "error", err)
@@ -409,6 +423,23 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 		if err != nil {
 			s.logger.Error("history failed", "group", req.Group, "error", err)
 			return
+		}
+
+		// Apply joined_at filter — post-query filter (not sinceTS raise)
+		// because GetGroupMessagesBefore is id+limit shaped, not
+		// timestamp-shaped. Mirrors the rooms history branch which does
+		// the same post-filter on first_seen/first_epoch. Messages at
+		// exactly joined_at are kept (strict less-than).
+		joinedAt, _ := s.store.GetUserGroupJoinedAt(c.UserID, req.Group)
+		if joinedAt > 0 {
+			filtered := msgs[:0]
+			for _, m := range msgs {
+				if m.TS < joinedAt {
+					continue
+				}
+				filtered = append(filtered, m)
+			}
+			msgs = filtered
 		}
 
 		hasMore := len(msgs) > limit

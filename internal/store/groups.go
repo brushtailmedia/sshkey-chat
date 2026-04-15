@@ -172,6 +172,42 @@ func (s *Store) GetOldestGroupMember(groupID, excludeUserID string) (string, err
 	return user, err
 }
 
+// GetUserGroupJoinedAt returns the unix-second timestamp of when the given
+// user joined the given group, or 0 if they're not a member. Used by
+// syncGroup and handleHistory's group branch as the new-member pre-join
+// history gate — the group-side analogue of first_seen on room_members.
+//
+// The wrapped-key crypto model already prevents a new member from
+// DECRYPTING pre-join messages, but the server must also not SERVE them:
+// timestamps, sender IDs, and event replay (pre-join /promote, /rename,
+// /kick audit entries) are social-graph metadata leaks even without
+// plaintext. This helper is the floor that sync/history raise sinceTS to
+// when a new member reconnects.
+//
+// joined_at is stored as TEXT (datetime('now')) so we convert to unix
+// seconds at query time via SQLite's strftime('%s', ...). The conversion
+// is lossless for the default format and per-second stable across
+// re-adds — each AddGroupMember is a fresh INSERT with a new
+// datetime('now') default, so a leaver who rejoins gets a new joined_at
+// and cannot see the messages-while-absent window.
+//
+// Fail-open on DB error (matches rooms' GetUserRoom behaviour): on error
+// joinedAt = 0 and no raise happens. For long-standing members this is
+// harmless because their client-side sinceTS from lastSyncedAt is already
+// after their join; the only exposure is a brand-new member's first
+// sync, which is acceptable for consistency with the rooms pattern.
+func (s *Store) GetUserGroupJoinedAt(userID, groupID string) (int64, error) {
+	var joined int64
+	err := s.dataDB.QueryRow(
+		`SELECT CAST(strftime('%s', joined_at) AS INTEGER) FROM group_members WHERE group_id = ? AND user = ?`,
+		groupID, userID,
+	).Scan(&joined)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return joined, err
+}
+
 // GetGroupMembers returns the members of a group DM.
 func (s *Store) GetGroupMembers(groupID string) ([]string, error) {
 	rows, err := s.dataDB.Query(`
