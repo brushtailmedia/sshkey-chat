@@ -2243,13 +2243,12 @@ This is the only path to bulk message deletion. It is permanent, tied to an irre
 
 ---
 
-## Future: Display Room Topics in TUI
+## Display Room Topics in TUI
 
-**Status:** Feature request.
+**Status:** Shipped (Phase 18, 2026-04-15). The server has always sent room topics in `room_list` via `RoomInfo.Topic`, and the terminal client has persisted them to the local `rooms` table since Phase 7b — but nothing ever read them. Phase 18 wired the display-only path through to the TUI:
 
-Room topics are sent by the server in `room_list` but the terminal client never displays them. They should show in:
+- **Messages pane two-line header** — room name (bold) on line 1, topic (dim italic) on line 2. Rooms only; groups and 1:1 DMs show line 1 only. Topic line omitted when empty. Pinned permanently at the top of the messages pane on every `View()` call.
+- **Info panel (`Ctrl+I`)** — `Topic:` line between the `/leave` hint and the mute toggle. The render code has had `if i.topic != ""` since v0.1.0 but was never fed data until Phase 18 populated the field via `Client.DisplayRoomTopic`.
+- **`/topic` slash command** — read-only. Status bar shows "#general — topic text" or "#general has no topic set" in a room context; rejects with "/topic is only available in rooms" in group or 1:1 DM contexts.
 
-- **Info panel (`Ctrl+I`)** — under the room name, above the member list
-- **Message panel header** — subtle line under `#general` showing the topic
-
-Topic changes (if supported later) would update via `room_list` refresh.
+Topic changes picked up on reconnect when the server re-sends `room_list`. Changing a topic post-creation via a CLI verb (`sshkey-ctl update-topic`) and broadcasting live updates via a new `room_updated` protocol event are scheduled for the Admin CLI audit phase, where they naturally belong alongside the broader CLI broadcast mechanism decision. See `refactor_plan.md` Phase 16 for the committed write-path scope.
