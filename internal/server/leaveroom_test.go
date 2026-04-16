@@ -229,35 +229,35 @@ func TestPerformRoomLeave_AdminReason(t *testing.T) {
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
 
-	// Call performRoomLeave directly with an "admin" reason. Bypasses
+	// Call performRoomLeave directly with an "removed" reason. Bypasses
 	// the handler's policy gate — this is what the admin path would
 	// look like internally.
-	s.performRoomLeave(generalID, "bob", "admin")
+	s.performRoomLeave(generalID, "bob", "removed", "test-admin")
 
 	// Bob removed from members
 	if s.store.IsRoomMemberByID(generalID, "bob") {
 		t.Error("bob should be removed")
 	}
 
-	// Bob's echo carries Reason: "admin"
+	// Bob's echo carries Reason: "removed"
 	bobMsgs := bob.messages()
 	if len(bobMsgs) != 1 {
 		t.Fatalf("bob expected 1 echo, got %d", len(bobMsgs))
 	}
 	var left protocol.RoomLeft
 	json.Unmarshal(bobMsgs[0], &left)
-	if left.Reason != "admin" {
+	if left.Reason != "removed" {
 		t.Errorf("echo reason = %q, want admin", left.Reason)
 	}
 
-	// Alice's broadcast also carries Reason: "admin"
+	// Alice's broadcast also carries Reason: "removed"
 	aliceMsgs := alice.messages()
 	if len(aliceMsgs) != 1 {
 		t.Fatalf("alice expected 1 broadcast, got %d", len(aliceMsgs))
 	}
 	var ev protocol.RoomEvent
 	json.Unmarshal(aliceMsgs[0], &ev)
-	if ev.Reason != "admin" {
+	if ev.Reason != "removed" {
 		t.Errorf("broadcast reason = %q, want admin", ev.Reason)
 	}
 }
@@ -277,7 +277,7 @@ func TestPerformRoomLeave_RetirementReason(t *testing.T) {
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
 
-	s.performRoomLeave(generalID, "bob", "retirement")
+	s.performRoomLeave(generalID, "bob", "user_retired", "system")
 
 	bobMsgs := bob.messages()
 	if len(bobMsgs) != 1 {
@@ -285,7 +285,7 @@ func TestPerformRoomLeave_RetirementReason(t *testing.T) {
 	}
 	var left protocol.RoomLeft
 	json.Unmarshal(bobMsgs[0], &left)
-	if left.Reason != "retirement" {
+	if left.Reason != "user_retired" {
 		t.Errorf("echo reason = %q, want retirement", left.Reason)
 	}
 
@@ -295,7 +295,7 @@ func TestPerformRoomLeave_RetirementReason(t *testing.T) {
 	}
 	var ev protocol.RoomEvent
 	json.Unmarshal(aliceMsgs[0], &ev)
-	if ev.Reason != "retirement" {
+	if ev.Reason != "user_retired" {
 		t.Errorf("broadcast reason = %q, want retirement", ev.Reason)
 	}
 }

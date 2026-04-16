@@ -521,35 +521,33 @@ func (s *Store) initDataDB() error {
 			queued_at   INTEGER NOT NULL
 		);
 
-		-- user_left_rooms is the dual-purpose sidecar table for
-		-- Phase 16 Gap 1's remove-from-room AND Phase 20's
-		-- server-authoritative leave catchup.
-		--
-		-- Phase 16 use: when an admin runs sshkey-ctl remove-from-room,
-		-- the CLI inserts a row here with reason='removed' and
-		-- processed=0. The server's runRemoveFromRoomProcessor drains
+		-- pending_remove_from_room is the queue for sshkey-ctl
+		-- remove-from-room. Phase 20 (bundled with the leave-catchup
+		-- restructure): when an admin runs the CLI, the CLI inserts
+		-- a row here. The server's runRemoveFromRoomProcessor drains
 		-- unprocessed rows, calls performRoomLeave (which removes the
-		-- user from room_members, broadcasts the leave event with the
-		-- reason, echoes room_left to the leaver's connected sessions,
-		-- and marks the room for epoch rotation), and flips processed
-		-- to 1. Rows are kept after processing rather than deleted so
-		-- Phase 20 can read them as a leave-history catchup signal.
+		-- user from room_members, writes a history row to
+		-- user_left_rooms, broadcasts the leave event, echoes
+		-- room_left to the leaver's connected sessions, and marks
+		-- the room for epoch rotation), then the row is DELETEd as
+		-- part of the consume-atomic transaction.
 		--
-		-- Phase 20 use (NOT IMPLEMENTED YET — Phase 16 just builds
-		-- the table for Phase 20 to read later): on client connect,
-		-- the server queries this table to build a "rooms you were
-		-- removed from while offline" catchup list, replacing the
-		-- current client-side reconciliation walk. Phase 20 will
-		-- also extend the writers — self-leave / retirement
-		-- cascade / etc. will all start writing rows here, not just
-		-- the CLI remove-from-room path.
-		--
-		-- The reason enum is loosely constrained at the column level
-		-- (no CHECK constraint) because Phase 20 will introduce
-		-- additional reason values and locking the enum down now
-		-- would create a migration burden later. Phase 16 only
-		-- writes 'removed'; the column stores it as a free-form
-		-- string for forward compatibility.
+		-- Same shape as the other Phase 16 pending_* queues (DELETE
+		-- on consume, not mark-processed). Before Phase 20, this
+		-- queue was fused with the user_left_rooms history table via
+		-- a processed flag — Phase 20 split them into two
+		-- pure-purpose tables for vocabulary clarity and to match
+		-- the other five Phase 16 queues. See refactor_plan.md
+		-- Phase 20 (Option D) for the rationale.
+		CREATE TABLE IF NOT EXISTS pending_remove_from_room (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id       TEXT NOT NULL,
+			room_id       TEXT NOT NULL,
+			reason        TEXT NOT NULL DEFAULT 'removed',
+			initiated_by  TEXT NOT NULL,
+			queued_at     INTEGER NOT NULL
+		);
+
 		-- blocked_fingerprints is the pre-approval defense against
 		-- fingerprint spam. Phase 16: when an admin runs sshkey-ctl
 		-- block-fingerprint, the fingerprint is inserted here.
@@ -569,19 +567,47 @@ func (s *Store) initDataDB() error {
 			blocked_by   TEXT NOT NULL
 		);
 
+		-- user_left_rooms is the pure-history sidecar for server-
+		-- authoritative leave catchup (Phase 20). Every leave path
+		-- (self-leave, retirement cascade, admin remove via CLI)
+		-- writes a row here via performRoomLeave — single write
+		-- point. GetUserLeftRoomsCatchup reads the most recent row
+		-- per (user, room) on the connect handshake.
+		--
+		-- Rows are DELETEd on re-add (DeleteUserLeftRoomRows from
+		-- cmdAddToRoom) and pruned after 1 year
+		-- (PruneOldUserLeftRooms).
+		--
+		-- Phase 20 split the queue concern out to
+		-- pending_remove_from_room above (Option D — queue is a
+		-- queue, history is history). Before Phase 20 this table
+		-- was dual-purpose with a processed flag; the flag and its
+		-- index are gone.
 		CREATE TABLE IF NOT EXISTS user_left_rooms (
 			id            INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id       TEXT NOT NULL,
 			room_id       TEXT NOT NULL,
 			reason        TEXT NOT NULL,
 			initiated_by  TEXT NOT NULL,
-			left_at       INTEGER NOT NULL,
-			processed     INTEGER NOT NULL DEFAULT 0
+			left_at       INTEGER NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS idx_user_left_rooms_user_left_at
 			ON user_left_rooms(user_id, left_at);
-		CREATE INDEX IF NOT EXISTS idx_user_left_rooms_processed
-			ON user_left_rooms(processed) WHERE processed = 0;
+
+		-- user_left_groups is the group-side parallel of user_left_rooms.
+		-- Phase 20 addition. No queue counterpart — all group leaves
+		-- run inline via performGroupLeave (no CLI async path since
+		-- Phase 14 deleted the escape hatch).
+		CREATE TABLE IF NOT EXISTS user_left_groups (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id       TEXT NOT NULL,
+			group_id      TEXT NOT NULL,
+			reason        TEXT NOT NULL,
+			initiated_by  TEXT NOT NULL,
+			left_at       INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_user_left_groups_user_left_at
+			ON user_left_groups(user_id, left_at);
 
 		-- 1:1 DMs — fixed two-party conversations with per-user history
 		-- cutoffs. The user pair is canonicalized alphabetically so dedup

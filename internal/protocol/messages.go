@@ -854,15 +854,23 @@ type RoomInfo struct {
 // Reason on a "leave" event distinguishes the trigger so client UIs can
 // render different system messages to remaining members:
 //   - "" (empty): self-leave (the user ran /leave themselves)
-//   - "admin": an admin removed the user via sshkey-ctl remove-from-room
-//   - "retirement": the room itself was retired (Phase 12)
+//   - "removed": an admin removed the user via sshkey-ctl remove-from-room
 //   - "user_retired": the leaving user's account was retired
+//
+// Phase 20 extended RoomEvent with By and Name fields to support the
+// room event audit trail (bundled with the leave-catchup work). Rooms
+// now write group_events rows for leave/join/topic/rename/retire
+// events via RecordRoomEvent, mirroring Phase 14's group-side audit
+// model. By carries the acting operator/admin; Name carries the new
+// topic/display-name for topic/rename events.
 type RoomEvent struct {
 	Type   string `json:"type"`             // "room_event"
 	Room   string `json:"room"`
-	Event  string `json:"event"`            // "join", "leave"
+	Event  string `json:"event"`            // "join" | "leave" | "topic" | "rename" | "retire"
 	User   string `json:"user"`
-	Reason string `json:"reason,omitempty"` // "" | "admin" | "retirement" | "user_retired"
+	By     string `json:"by,omitempty"`     // Phase 20: acting admin/operator
+	Reason string `json:"reason,omitempty"` // "" | "removed" | "user_retired"
+	Name   string `json:"name,omitempty"`   // Phase 20: new value for "topic" / "rename" events
 }
 
 // Group list

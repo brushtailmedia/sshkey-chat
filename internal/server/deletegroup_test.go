@@ -309,7 +309,7 @@ func TestPerformGroupLeave_EmptyReasonIsSelfLeave(t *testing.T) {
 	s.clients["dev_bob_1"] = bobClient.Client
 	s.mu.Unlock()
 
-	s.performGroupLeave("group_self", "alice", "", "")
+	s.performGroupLeave("group_self", "alice", "", "", "alice")
 
 	// Alice receives group_left with empty reason
 	msgs := aliceClient.messages()

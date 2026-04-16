@@ -45,7 +45,7 @@ func (s *Server) handleRetirement(userID string, oldRooms []string, reason strin
 	// (step 9), so any room_left echoes from performRoomLeave will be
 	// briefly delivered before the connection closes. Harmless.
 	for _, roomID := range oldRooms {
-		s.performRoomLeave(roomID, userID, "user_retired")
+		s.performRoomLeave(roomID, userID, "user_retired", "system")
 	}
 
 	// 4. Phase 14: per-group iteration via performGroupLeave with
@@ -123,7 +123,7 @@ func (s *Server) handleRetirement(userID string, oldRooms []string, reason strin
 						}
 					}
 				}
-				s.performGroupLeave(g.ID, userID, "retirement", "")
+				s.performGroupLeave(g.ID, userID, "retirement", "", "system")
 			}
 		}
 	}

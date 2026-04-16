@@ -815,6 +815,28 @@ func cmdAddToRoom(configDir, dataDir string, args []string) error {
 		return fmt.Errorf("add member: %w", err)
 	}
 
+	// Phase 20: clear any prior leave-history rows for this (user, room).
+	// Rejoining is the affirmative undo of a prior leave — without this,
+	// stale rows would re-surface on the user's next catchup handshake.
+	// Best-effort: a cleanup failure is also defended against at the
+	// catchup-query level (GetUserLeftRoomsCatchup filters against
+	// room_members via the caller).
+	if err := st.DeleteUserLeftRoomRows(user, roomRecord.ID); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to clear prior leave history for %s in %s: %v\n", user, room, err)
+	}
+
+	// Phase 20: record a "join" room_event in the per-room audit trail.
+	// Other members see "alice added bob to the room" inline on their
+	// next sync (CLI adds don't have a live broadcast wire-up yet; that's
+	// a separate future item). Best-effort: audit failure doesn't block
+	// the add.
+	initiatedBy := fmt.Sprintf("os:%d", os.Getuid())
+	if err := st.RecordRoomEvent(
+		roomRecord.ID, "join", user, initiatedBy, "", "", false, time.Now().Unix(),
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to record room join event for %s in %s: %v\n", user, room, err)
+	}
+
 	fmt.Printf("Added %s (%s) to room %q.\n", u.DisplayName, user, room)
 	return nil
 }
@@ -854,24 +876,20 @@ func cmdRemoveFromRoom(configDir, dataDir string, args []string) error {
 		return fmt.Errorf("user %q is not in room %q", user, room)
 	}
 
-	// Phase 16 Gap 1: enqueue a row in user_left_rooms instead of
-	// removing the member directly. The server's
+	// Phase 20 (Option D): enqueue a row in pending_remove_from_room
+	// — a pure queue table matching the shape of the other five
+	// Phase 16 pending_* queues. The server's
 	// runRemoveFromRoomProcessor drains the queue and calls
 	// performRoomLeave, which:
 	//   - removes the user from room_members
+	//   - writes the authoritative history row to user_left_rooms
+	//   - records a room_event audit row (leave) in the per-room DB
 	//   - broadcasts room_event{leave, reason='removed'} to remaining
 	//     members so client UIs render "alice was removed by an admin"
 	//   - echoes room_left to the kicked user's connected sessions
-	//     so their TUI flips the room to read-only immediately
-	//   - marks the room for epoch rotation (forward secrecy: the
-	//     kicked user can't decrypt messages sent after this point)
-	//
-	// The user_left_rooms row is also the foundation for Phase 20's
-	// server-authoritative leave catchup. Phase 16 only writes
-	// reason='removed' here; Phase 20 will extend the writers to
-	// cover self-leave and retirement-cascade paths too.
+	//   - marks the room for epoch rotation (forward secrecy)
 	initiatedBy := fmt.Sprintf("os:%d", os.Getuid())
-	if _, err := st.RecordUserLeftRoom(user, roomRecord.ID, "removed", initiatedBy); err != nil {
+	if err := st.RecordPendingRemoveFromRoom(user, roomRecord.ID, "removed", initiatedBy); err != nil {
 		return fmt.Errorf("enqueue remove-from-room: %w", err)
 	}
 

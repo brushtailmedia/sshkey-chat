@@ -1717,7 +1717,7 @@ func (s *Server) handleLeaveGroup(c *Client, raw json.RawMessage) {
 	// handles removal, last-member cleanup, broadcasting group_event{leave}
 	// to remaining members, and echoing group_left to the leaver's own
 	// sessions.
-	s.performGroupLeave(msg.Group, c.UserID, "", "")
+	s.performGroupLeave(msg.Group, c.UserID, "", "", c.UserID)
 }
 
 // performGroupLeave is the shared post-validation leave path used by
@@ -1749,13 +1749,22 @@ func (s *Server) handleLeaveGroup(c *Client, raw json.RawMessage) {
 // mutation must commit first; audit runs best-effort (logged + continue);
 // cleanup runs before broadcast so broadcasts reflect fully-committed state;
 // echo last so the leaver's sessions see their removal after remaining members.
-func (s *Server) performGroupLeave(groupID, userID, reason, by string) {
+func (s *Server) performGroupLeave(groupID, userID, reason, by, initiatedBy string) {
 	if s.store != nil {
 		if err := s.store.RemoveGroupMember(groupID, userID); err != nil {
 			s.logger.Error("failed to remove group member",
 				"user", userID, "group", groupID, "error", err)
 			// Continue anyway — broadcast/echo are best-effort and the
 			// caller may have already done the removal directly.
+		}
+
+		// Phase 20: write the leave-history row for multi-device
+		// catchup. Lives in data.db, so it survives the per-group DB
+		// file unlink that happens on last-member cleanup below.
+		// Single write point for every group leave path.
+		if _, err := s.store.RecordUserLeftGroup(userID, groupID, reason, initiatedBy); err != nil {
+			s.logger.Error("failed to record user_left_groups history",
+				"user", userID, "group", groupID, "error", err)
 		}
 
 		// Record audit event BEFORE last-member cleanup so the row lands
@@ -2050,7 +2059,7 @@ func (s *Server) handleLeaveRoom(c *Client, raw json.RawMessage) {
 	// removal, broadcasting room_event{leave} to remaining members,
 	// echoing room_left to the leaver's own sessions, and marking the
 	// room for epoch rotation.
-	s.performRoomLeave(msg.Room, c.UserID, "")
+	s.performRoomLeave(msg.Room, c.UserID, "", c.UserID)
 }
 
 // performRoomLeave is the shared post-validation leave path for rooms.
@@ -2077,7 +2086,7 @@ func (s *Server) handleLeaveRoom(c *Client, raw json.RawMessage) {
 //     RemoveRoomMember call above. No manual filtering needed.
 //
 // Caller must have already validated membership and policy.
-func (s *Server) performRoomLeave(roomID, userID, reason string) {
+func (s *Server) performRoomLeave(roomID, userID, reason, initiatedBy string) {
 	if s.store == nil {
 		return
 	}
@@ -2088,6 +2097,26 @@ func (s *Server) performRoomLeave(roomID, userID, reason string) {
 		// Continue anyway — broadcast/echo are best-effort.
 	}
 
+	// Phase 20: write the authoritative history row for multi-device
+	// leave catchup. Every leave path (self, retirement, admin remove
+	// via CLI) funnels through here — single write point, callers
+	// don't need to track sidecar state.
+	if _, err := s.store.RecordUserLeftRoom(userID, roomID, reason, initiatedBy); err != nil {
+		s.logger.Error("failed to record user_left_rooms history",
+			"user", userID, "room", roomID, "error", err)
+	}
+
+	// Phase 20: write a room_event audit row so remaining members
+	// see an inline system message ("alice left the room", "bob was
+	// removed by an admin"). Rooms' group_events table is shared
+	// schema with groups — see room_events.go.
+	if err := s.store.RecordRoomEvent(
+		roomID, "leave", userID, initiatedBy, reason, "", false, time.Now().Unix(),
+	); err != nil {
+		s.logger.Error("failed to record room event",
+			"room", roomID, "event", "leave", "user", userID, "error", err)
+	}
+
 	// Notify remaining members. broadcastToRoom rebuilds the member set
 	// AFTER the delete above, so the leaver is automatically excluded.
 	s.broadcastToRoom(roomID, protocol.RoomEvent{
@@ -2095,6 +2124,7 @@ func (s *Server) performRoomLeave(roomID, userID, reason string) {
 		Room:   roomID,
 		Event:  "leave",
 		User:   userID,
+		By:     initiatedBy,
 		Reason: reason,
 	})
 
@@ -2125,6 +2155,7 @@ func (s *Server) performRoomLeave(roomID, userID, reason string) {
 		"user", userID,
 		"room", roomID,
 		"reason", reason,
+		"initiated_by", initiatedBy,
 	)
 }
 

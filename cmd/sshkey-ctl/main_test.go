@@ -443,7 +443,7 @@ func TestRemoveFromRoom_EnqueuesPendingRow(t *testing.T) {
 	}
 
 	// Verify the queue row exists with the expected fields.
-	pending, err := st.ConsumePendingUserLeftRooms()
+	pending, err := st.ConsumePendingRemoveFromRooms()
 	if err != nil {
 		t.Fatalf("consume pending: %v", err)
 	}

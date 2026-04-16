@@ -33,7 +33,7 @@ func TestProcessPendingRemoveFromRoom_HappyPath(t *testing.T) {
 	}
 
 	// CLI side: enqueue the removal.
-	if _, err := s.store.RecordUserLeftRoom("bob", generalID, "removed", "os:1000"); err != nil {
+	if err := s.store.RecordPendingRemoveFromRoom("bob", generalID, "removed", "os:1000"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -88,10 +88,10 @@ func TestProcessPendingRemoveFromRoom_HappyPath(t *testing.T) {
 		t.Errorf("bob echo reason = %q, want removed", left.Reason)
 	}
 
-	// Queue should be processed (zero unprocessed remaining).
-	pending, _ := s.store.ConsumePendingUserLeftRooms()
+	// Queue should be drained (DELETE on consume — no rows remain).
+	pending, _ := s.store.ConsumePendingRemoveFromRooms()
 	if len(pending) != 0 {
-		t.Errorf("queue should be drained, got %d unprocessed rows", len(pending))
+		t.Errorf("queue should be drained, got %d remaining rows", len(pending))
 	}
 }
 
@@ -108,7 +108,7 @@ func TestProcessPendingRemoveFromRoom_SkipsNonMember(t *testing.T) {
 	s.store.InsertUser("dave", "ssh-ed25519 AAAA fake", "dave")
 
 	// Enqueue a removal for dave from general.
-	s.store.RecordUserLeftRoom("dave", generalID, "removed", "os:1000")
+	s.store.RecordPendingRemoveFromRoom("dave", generalID, "removed", "os:1000")
 
 	alice := testClientFor("alice", "dev_alice_1")
 	s.mu.Lock()
@@ -130,7 +130,7 @@ func TestProcessPendingRemoveFromRoom_AuditCreditsOperator(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	s.store.RecordUserLeftRoom("bob", generalID, "removed", "os:5678")
+	s.store.RecordPendingRemoveFromRoom("bob", generalID, "removed", "os:5678")
 	s.processPendingRemoveFromRoom()
 
 	auditBytes, err := readAuditLog(s)
@@ -159,8 +159,8 @@ func TestProcessPendingRemoveFromRoom_MultipleRowsInOneTick(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	// Both bob and carol are in general per the test fixtures.
-	s.store.RecordUserLeftRoom("bob", generalID, "removed", "os:1000")
-	s.store.RecordUserLeftRoom("carol", generalID, "removed", "os:1000")
+	s.store.RecordPendingRemoveFromRoom("bob", generalID, "removed", "os:1000")
+	s.store.RecordPendingRemoveFromRoom("carol", generalID, "removed", "os:1000")
 
 	s.processPendingRemoveFromRoom()
 

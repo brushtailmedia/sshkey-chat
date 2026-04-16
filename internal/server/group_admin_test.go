@@ -314,7 +314,7 @@ func TestPerformGroupLeave_RemovedReason(t *testing.T) {
 
 	// Direct call to the shared helper with reason="removed" + by="alice".
 	// Asserts that the new By field is routed through broadcast + echo.
-	s.performGroupLeave("group_r", "bob", "removed", "alice")
+	s.performGroupLeave("group_r", "bob", "removed", "alice", "alice")
 
 	// alice (remaining member) should receive group_event{leave, by: alice, reason: removed}
 	aliceMsgs := alice.messages()

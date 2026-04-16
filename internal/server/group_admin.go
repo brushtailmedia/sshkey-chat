@@ -156,6 +156,16 @@ func (s *Server) handleAddToGroup(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	// Phase 20: clear any prior leave-history rows for this (user, group).
+	// Rejoining is the affirmative undo of a prior leave; stale rows would
+	// re-surface in the target's next left_groups catchup otherwise. The
+	// catchup-query filter against group_members is defensive against
+	// cleanup failures.
+	if err := s.store.DeleteUserLeftGroupRows(msg.User, msg.Group); err != nil {
+		s.logger.Error("failed to clear prior leave history on re-add",
+			"user", msg.User, "group", msg.Group, "error", err)
+	}
+
 	// Audit (best-effort).
 	if err := s.store.RecordGroupEvent(
 		msg.Group, "join", msg.User, c.UserID, "", "", msg.Quiet, time.Now().Unix(),
@@ -289,7 +299,7 @@ func (s *Server) handleRemoveFromGroup(c *Client, raw json.RawMessage) {
 
 	// Route through the shared leave helper — it handles mutation, audit,
 	// last-member cleanup, broadcast, and target echo.
-	s.performGroupLeave(msg.Group, msg.User, "removed", c.UserID)
+	s.performGroupLeave(msg.Group, msg.User, "removed", c.UserID, c.UserID)
 
 	// Echo result to the calling admin (the target's own sessions get the
 	// group_left echo from inside performGroupLeave).
