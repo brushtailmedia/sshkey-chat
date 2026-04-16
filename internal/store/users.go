@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // UserRecord represents a user row from users.db.
@@ -156,6 +158,22 @@ func (s *Store) IsDisplayNameTaken(name, excludeUserID string) bool {
 		SELECT COUNT(*) FROM users WHERE LOWER(display_name) = LOWER(?) AND id != ?`,
 		name, excludeUserID).Scan(&count)
 	return count > 0
+}
+
+// GetUserFingerprint computes the SSH fingerprint for a user's stored
+// key. Returns empty string if the user doesn't exist or the key
+// can't be parsed. Phase 16 — used by cmdBlockFingerprint to check
+// whether a fingerprint belongs to an already-approved user.
+func (s *Store) GetUserFingerprint(userID string) string {
+	key := s.GetUserKey(userID)
+	if key == "" {
+		return ""
+	}
+	parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(key))
+	if err != nil {
+		return ""
+	}
+	return ssh.FingerprintSHA256(parsed)
 }
 
 // --- Writes ---

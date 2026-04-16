@@ -1233,8 +1233,14 @@ Clients receiving `server_shutdown` should:
 User and room data lives in SQLite databases (`users.db`, `rooms.db`). Changes via `sshkey-ctl` CLI take effect immediately — the server reads from DB on demand, no reload needed. Server watches `server.toml` via fsnotify for hot-reload of runtime settings.
 
 **Immediate (via `sshkey-ctl`, no restart):**
-- User management — `approve`, `bootstrap-admin`, `retire-user`, `promote`, `demote`
-- Room management — `add-room`, `add-to-room`, `remove-from-room`
+- User management — `approve`, `bootstrap-admin`, `retire-user`, `unretire-user`, `promote`, `demote`, `rename-user`
+- Room management — `add-room`, `add-to-room`, `remove-from-room`, `retire-room`, `update-topic`, `rename-room`, `set-default-room`, `unset-default-room`
+- Device management — `revoke-device`, `restore-device`, `prune-devices`
+- Security — `block-fingerprint`, `unblock-fingerprint`
+- Inspection — `show-user`, `show-room`, `list-admins`, `search-users`, `audit-log`, `audit-user`
+- Diagnostics — `check-integrity`, `room-stats`
+
+All state-changing commands (retire-user, promote, demote, rename-user, update-topic, rename-room, revoke-device, remove-from-room) propagate live to connected clients via the Phase 16 `pending_*` queue + polling processor pattern. The CLI writes to the DB and enqueues a broadcast row; the running server's processor drains the queue and fires the appropriate protocol event within ~5 seconds.
 
 **Hot-reloadable (server.toml, no restart):**
 - `[retention]`, `[files]`, `[rate_limits]`, `[messages]`, `[sync]`, `[devices]`, `[logging]`

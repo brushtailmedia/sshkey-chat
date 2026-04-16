@@ -1149,6 +1149,47 @@ The key and fingerprint are still delivered so clients can verify signatures on 
 
 **See `PROJECT.md` section "Account Retirement"** for the full design rationale, threat model (key compromise vs. device theft vs. rotation), username reuse handling, and the attacker-vs-victim race analysis.
 
+#### Account Unretirement (Phase 16)
+
+Escape hatch for mistaken retirements. The operator runs `sshkey-ctl unretire-user <name>`, which flips `users.retired` back to 0, clears `retired_at` / `retired_reason`, and strips the retirement display-name suffix.
+
+The server broadcasts `user_unretired` to all connected clients so they can flush the `[retired]` marker from their profile cache:
+
+```json
+// Server -> Client (broadcast to all connected clients)
+{"type":"user_unretired","user":"usr_alice","ts":1712999999}
+```
+
+Client handler: `delete(c.retired, user)` — the inverse of the `user_retired` handler. The user's historical messages stop showing the `[retired]` marker on the next render.
+
+**What unretirement does NOT do:** restore room/group/DM memberships. The retirement cascade removed the user from every shared context. Operators must re-add via `sshkey-ctl add-to-room` or in-group `/add`. 1:1 DMs resume automatically when the unretired user reconnects (subject to the per-user `left_at` ratchet).
+
+### Room Updates (Phase 16)
+
+When an admin changes a room's display name (`sshkey-ctl rename-room`) or topic (`sshkey-ctl update-topic`), the server broadcasts a `room_updated` event to every connected member of the affected room:
+
+```json
+// Server -> Client (narrow broadcast to room members only)
+{"type":"room_updated","room":"room_abc123","display_name":"engineering","topic":"New topic text"}
+```
+
+The event carries the FULL post-change room state (both fields populated, not a diff). The client upserts its local `rooms` table row from the payload — whichever field changed gets reflected on the next render; the unchanged field is overwritten with its current value (a no-op). One handler covers both `rename-room` and `update-topic`.
+
+Delivered only to current members of the affected room (narrow broadcast). Non-members and offline devices pick up the change via the standard `room_list` refresh on their next connect.
+
+### Live Profile Updates (Phase 16)
+
+When an admin runs `sshkey-ctl promote`, `sshkey-ctl demote`, or `sshkey-ctl rename-user`, the server broadcasts a fresh `profile` event (the same type used during the connect handshake) to all connected clients:
+
+```json
+// Server -> Client (wide broadcast to all connected clients)
+{"type":"profile","user":"usr_bob","display_name":"Bob","pubkey":"ssh-ed25519 ...","key_fingerprint":"SHA256:...","admin":true,"retired":false,"retired_at":""}
+```
+
+The client's existing `profile` handler upserts into `c.profiles[user]`, immediately refreshing the admin badge and display name in the info panel, sidebar, message headers, and members overlay. No new handler needed — the existing handler covers both initial-connect profiles and live updates.
+
+This is critical for the support story: users find admins via the admin badge in the members list and DM them directly for private concerns. Without live profile updates, a newly-promoted admin wouldn't show the badge until every connected client reconnected.
+
 ### Admin Notifications
 
 ```json

@@ -89,6 +89,14 @@ func run() error {
 		return cmdRevokeDevice(dataDir, cmdArgs)
 	case "restore-device":
 		return cmdRestoreDevice(dataDir, cmdArgs)
+	case "list-devices":
+		return cmdListDevices(dataDir, cmdArgs)
+	case "prune-devices":
+		return cmdPruneDevices(dataDir, cmdArgs)
+	case "room-stats":
+		return cmdRoomStats(dataDir)
+	case "check-integrity":
+		return cmdCheckIntegrity(dataDir, cmdArgs)
 	case "add-to-room":
 		return cmdAddToRoom(configDir, dataDir, cmdArgs)
 	case "remove-from-room":
@@ -113,6 +121,12 @@ func run() error {
 		return cmdListRetiredRooms(dataDir)
 	case "list-groups":
 		return cmdListGroups(dataDir)
+	case "block-fingerprint":
+		return cmdBlockFingerprint(dataDir, cmdArgs)
+	case "list-blocks":
+		return cmdListBlocks(dataDir)
+	case "unblock-fingerprint":
+		return cmdUnblockFingerprint(dataDir, cmdArgs)
 	case "status":
 		return cmdStatus(configDir, dataDir)
 	case "host-key":
@@ -143,8 +157,10 @@ Commands:
   search-users --fingerprint <fp>         Find user by SSH key fingerprint
   audit-log [--since DURATION] [--limit N]  Read recent audit log entries (newest first)
   audit-user USER [--since DURATION] [--limit N]  Audit entries for a specific user
-  retire-user NAME [--reason REASON]      Retire an account (permanent, for lost keys or compromise)
+  retire-user NAME [--reason REASON] [--yes]  Retire an account (permanent, for lost keys or compromise)
   unretire-user NAME                      Reverse a mistaken retirement (does NOT restore memberships)
+  promote USER_ID                         Grant admin status (live broadcast to all clients)
+  demote USER_ID                          Revoke admin status (live broadcast to all clients)
   rename-user NAME NEW_DISPLAY_NAME       Force a display name change (moderation tool)
   list-retired                            List retired accounts
   add-room --name NAME --topic TOPIC       Create a room
@@ -165,8 +181,15 @@ Commands:
                                           seconds via the polling bridge.
   list-retired-rooms                      List all retired rooms
   list-groups                             List all group DMs (and their members)
-  revoke-device --user USER --device DEV  Revoke a device
+  revoke-device --user USER --device DEV [--reason R]  Revoke a device
   restore-device --user USER --device DEV Restore a revoked device
+  list-devices --user USER                Show all devices for a user
+  prune-devices [--stale-for DURATION] [--dry-run]  Revoke stale devices (default 90d)
+  room-stats                              Per-room member counts + message counts
+  check-integrity [--db NAME] [--all]     Run PRAGMA integrity_check on databases
+  block-fingerprint <fp> [--reason TEXT]  Block a fingerprint from connecting
+  list-blocks                             Show all blocked fingerprints
+  unblock-fingerprint <fp>                Remove a fingerprint from the block list
   status                                  Show server overview (users, rooms, data)
   host-key                                Print server host key fingerprint
   purge --older-than DURATION [--dry-run]  Purge old messages and vacuum DBs`)
@@ -428,8 +451,9 @@ func cmdListUsers(dataDir string) error {
 
 func cmdRetireUser(dataDir string, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: retire-user NAME [--reason REASON]")
+		return fmt.Errorf("usage: retire-user NAME [--reason REASON] [--yes]")
 	}
+	args, force := hasForceFlag(args)
 	name := args[0]
 	reason := "admin"
 	for i := 1; i < len(args); i++ {
@@ -451,6 +475,23 @@ func cmdRetireUser(dataDir string, args []string) error {
 	}
 	if u.Retired {
 		return fmt.Errorf("user %q is already retired (at %s, reason: %s)", name, u.RetiredAt, u.RetiredReason)
+	}
+
+	// Phase 16: destructive-action confirmation. Retirement is
+	// permanent — the user is removed from all rooms/groups/DMs and
+	// their display name is suffixed so a new user can take it.
+	if !force {
+		rooms := st.GetUserRoomIDs(name)
+		summary := fmt.Sprintf("About to retire user %q (%s). This will:\n"+
+			"  - Remove from %d room(s)\n"+
+			"  - Exit all group DMs\n"+
+			"  - Set DM cutoffs on all 1:1 conversations\n"+
+			"  - Terminate active sessions\n"+
+			"  - Suffix the display name so it can be reused\n\n",
+			u.DisplayName, name, len(rooms))
+		if err := confirmAction(summary); err != nil {
+			return err
+		}
 	}
 
 	// Phase 16 Gap 1: flip the retired flag immediately so retirement
@@ -1069,6 +1110,7 @@ func cmdListRooms(dataDir string) error {
 //     writes and via the retired_rooms catchup on next reconnect.
 //     Admin can re-run the command to retry the queue insert.
 func cmdRetireRoom(dataDir string, args []string) error {
+	args, force := hasForceFlag(args)
 	var roomArg, reason string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -1118,6 +1160,25 @@ func cmdRetireRoom(dataDir string, args []string) error {
 	if room.Retired {
 		return fmt.Errorf("room %q is already retired (at %s, by %s, now %q)",
 			roomArg, room.RetiredAt, room.RetiredBy, room.DisplayName)
+	}
+
+	// Phase 16: destructive-action confirmation. Room retirement
+	// renames the display name (suffixed to free the original name
+	// for reuse) and connected members receive a room_retired event.
+	// A retired room cannot be unretired — the operator must create
+	// a new room with the same display name if they want to undo.
+	if !force {
+		members := st.GetRoomMemberIDsByRoomID(roomID)
+		summary := fmt.Sprintf("About to retire room %q (%s). This will:\n"+
+			"  - Suffix the display name so it can be reused\n"+
+			"  - Set the room to read-only (writes rejected)\n"+
+			"  - Broadcast room_retired to %d connected member(s)\n"+
+			"  - Clear the default-room flag (if set)\n"+
+			"  - This action is NOT reversible — no unretire-room command exists.\n\n",
+			room.DisplayName, roomID, len(members))
+		if err := confirmAction(summary); err != nil {
+			return err
+		}
 	}
 
 	// We need the caller's user ID for the retired_by column. The CLI

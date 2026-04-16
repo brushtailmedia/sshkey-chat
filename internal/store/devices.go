@@ -40,6 +40,28 @@ func (s *Store) UpdateDeviceSync(user, deviceID string) error {
 	return err
 }
 
+// GetAllDevices returns all devices across all users.
+// Phase 16 — used by cmdPruneDevices to find stale entries.
+func (s *Store) GetAllDevices() ([]Device, error) {
+	rows, err := s.dataDB.Query(`
+		SELECT user, device_id, COALESCE(last_synced, ''), created_at
+		FROM devices ORDER BY user, created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var devices []Device
+	for rows.Next() {
+		var d Device
+		if err := rows.Scan(&d.User, &d.DeviceID, &d.LastSynced, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		devices = append(devices, d)
+	}
+	return devices, rows.Err()
+}
+
 // GetDevices returns all devices for a user.
 func (s *Store) GetDevices(user string) ([]Device, error) {
 	rows, err := s.dataDB.Query(`

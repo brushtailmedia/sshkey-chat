@@ -550,6 +550,25 @@ func (s *Store) initDataDB() error {
 		-- would create a migration burden later. Phase 16 only
 		-- writes 'removed'; the column stores it as a free-form
 		-- string for forward compatibility.
+		-- blocked_fingerprints is the pre-approval defense against
+		-- fingerprint spam. Phase 16: when an admin runs sshkey-ctl
+		-- block-fingerprint, the fingerprint is inserted here.
+		-- During SSH authentication, the server checks this table
+		-- BEFORE writing to pending_keys; blocked fingerprints are
+		-- silently rejected so they never appear in the pending
+		-- queue and can't accumulate spam.
+		--
+		-- Different from revoked_devices (which applies to already-
+		-- approved users) and from reject (which clears a single
+		-- pending key). block-fingerprint is a preemptive blocklist
+		-- for keys that haven't been approved yet.
+		CREATE TABLE IF NOT EXISTS blocked_fingerprints (
+			fingerprint  TEXT PRIMARY KEY,
+			reason       TEXT NOT NULL DEFAULT '',
+			blocked_at   INTEGER NOT NULL,
+			blocked_by   TEXT NOT NULL
+		);
+
 		CREATE TABLE IF NOT EXISTS user_left_rooms (
 			id            INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id       TEXT NOT NULL,

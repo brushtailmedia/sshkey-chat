@@ -64,15 +64,16 @@ Only Ed25519 SSH keys are supported. The server rejects RSA, ECDSA, and other ke
 ### Docker (recommended)
 
 ```bash
-# 1. (Optional) Edit docker/config/users.toml and docker/config/rooms.toml
-#    to seed initial users and rooms on first start.
-#    cat ~/.ssh/id_ed25519.pub
+# 1. (Optional) Edit docker/config/rooms.toml to seed initial rooms on first start.
 
 # 2. Start the server
 docker compose up -d
 
-# 3. Connect with the terminal client (unknown keys go to the pending queue)
-sshkey-term --host localhost --key ~/.ssh/id_ed25519
+# 3. Create the first admin (generates an encrypted keypair on the server)
+docker exec sshkey-chat sshkey-ctl bootstrap-admin alice
+
+# 4. Copy the generated key to your client machine, then connect
+sshkey-term --host localhost --key ~/.ssh/alice_ed25519
 ```
 
 Manage the server:
@@ -252,22 +253,35 @@ sshkey-ctl reject --fingerprint FP                             # reject a pendin
 
 ```bash
 sshkey-ctl list-users                                          # list all users
+sshkey-ctl show-user alice                                     # full user details (key, rooms, devices)
 sshkey-ctl bootstrap-admin alice                               # generate admin keypair (server-side, encrypted)
 sshkey-ctl retire-user usr_abc123 --reason key_lost            # permanently retire an account
+sshkey-ctl unretire-user usr_abc123                            # reverse a mistaken retirement
 sshkey-ctl list-retired                                        # list retired accounts
-sshkey-ctl promote usr_abc123                                  # grant admin status
-sshkey-ctl demote usr_abc123                                   # revoke admin status
+sshkey-ctl promote usr_abc123                                  # grant admin status (live broadcast)
+sshkey-ctl demote usr_abc123                                   # revoke admin status (live broadcast)
+sshkey-ctl rename-user usr_abc123 "New Name"                   # force display name change (moderation)
+sshkey-ctl list-admins                                         # quick view of all admins
+sshkey-ctl search-users --name alice                           # fuzzy search by display name
+sshkey-ctl search-users --fingerprint SHA256:abc...            # find user by SSH key fingerprint
 ```
 
 **Rooms:**
 
 ```bash
 sshkey-ctl add-room --name engineering --topic "Engineering chat"  # create a new room
-sshkey-ctl list-rooms                                          # list all rooms
+sshkey-ctl list-rooms                                          # list all rooms (shows [default] marker)
+sshkey-ctl show-room engineering                               # full room details (members, topic, status)
+sshkey-ctl update-topic --room engineering --topic "New topic"  # change topic (live broadcast)
+sshkey-ctl rename-room --room engineering --new-name eng       # rename room (live broadcast)
+sshkey-ctl set-default-room general                            # auto-join new users + backfill existing
+sshkey-ctl unset-default-room general                          # stop auto-join (existing members stay)
+sshkey-ctl list-default-rooms                                  # show flagged default rooms
 sshkey-ctl add-to-room --user usr_abc123 --room engineering    # add user to a room
-sshkey-ctl remove-from-room --user usr_abc123 --room engineering  # remove user from a room
+sshkey-ctl remove-from-room --user usr_abc123 --room engineering  # remove user from a room (live broadcast)
 sshkey-ctl retire-room --room engineering --reason "project ended"  # archive a room server-wide
 sshkey-ctl list-retired-rooms                                  # list retired rooms
+sshkey-ctl room-stats                                          # per-room member + message counts
 ```
 
 **Groups:**
@@ -281,8 +295,29 @@ Group DMs are self-governed by in-group admins (Phase 14). The creator becomes t
 **Devices:**
 
 ```bash
-sshkey-ctl revoke-device --user usr_abc123 --device dev_x      # revoke a stolen device
+sshkey-ctl list-devices --user usr_abc123                      # show all devices for a user
+sshkey-ctl revoke-device --user usr_abc123 --device dev_x      # revoke a stolen device (live session kick)
 sshkey-ctl restore-device --user usr_abc123 --device dev_x     # re-authorize a device
+sshkey-ctl prune-devices --stale-for 90d                       # revoke devices inactive for >90 days
+sshkey-ctl prune-devices --stale-for 90d --dry-run             # preview what would be pruned
+```
+
+**Security:**
+
+```bash
+sshkey-ctl block-fingerprint SHA256:abc... --reason "spam"      # block a fingerprint from connecting
+sshkey-ctl list-blocks                                         # show all blocked fingerprints
+sshkey-ctl unblock-fingerprint SHA256:abc...                   # remove a fingerprint from the block list
+```
+
+**Audit + diagnostics:**
+
+```bash
+sshkey-ctl audit-log                                           # recent audit entries (newest first)
+sshkey-ctl audit-log --since 24h --limit 100                   # last 24 hours, up to 100 entries
+sshkey-ctl audit-user usr_abc123                               # entries for a specific user
+sshkey-ctl check-integrity                                     # PRAGMA integrity_check on all main DBs
+sshkey-ctl check-integrity --all                               # include per-room/group/DM databases
 ```
 
 **Server:**

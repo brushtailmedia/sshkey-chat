@@ -489,8 +489,22 @@ func (s *Server) authenticateKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh
 		}
 	}
 
-	// Unknown key -- log to pending
+	// Phase 16: check the fingerprint block list before writing to
+	// pending_keys. Blocked fingerprints are silently rejected with
+	// the same generic error ("key not authorized") as unknown keys,
+	// so a probing client cannot distinguish "blocked" from "not
+	// approved yet." This prevents the pending queue from
+	// accumulating spam from repeatedly-connecting attackers.
 	fingerprint := ssh.FingerprintSHA256(key)
+	if s.store != nil && s.store.IsFingerprintBlocked(fingerprint) {
+		s.logger.Info("blocked fingerprint rejected",
+			"fingerprint", fingerprint,
+			"remote", conn.RemoteAddr().String(),
+		)
+		return nil, fmt.Errorf("key not authorized")
+	}
+
+	// Unknown key -- log to pending
 	s.logger.Info("unknown key rejected",
 		"fingerprint", fingerprint,
 		"remote", conn.RemoteAddr().String(),
