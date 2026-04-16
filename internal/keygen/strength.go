@@ -66,6 +66,65 @@ func ValidateAdminPassphrase(pass string) error {
 	return ValidateAdminPassphraseWithContext(pass, nil)
 }
 
+// StrengthBar returns a 5-segment unicode bar + a short label for the
+// given passphrase, independent of accept/reject. Intended for the
+// bootstrap-admin CLI where an operator gets one line of feedback per
+// submit attempt regardless of whether it was accepted. No colors —
+// bootstrap-admin runs in whatever terminal the operator has (ssh
+// session, plain tty, etc.) and color support is unpredictable.
+//
+// Segment count = score+1 (so even score 0 shows one segment, giving
+// the bar a consistent length that the eye can read). Returns:
+//
+//	▰▱▱▱▱  score 0 (cracked in seconds)   — "very weak"
+//	▰▰▱▱▱  score 1 (cracked in minutes)   — "weak"
+//	▰▰▰▱▱  score 2 (cracked in hours)     — "borderline"
+//	▰▰▰▰▱  score 3 (cracked in days)      — "strong"
+//	▰▰▰▰▰  score 4 (cracked in years+)    — "very strong"
+//
+// For passphrases shorter than MinPassphraseLength, returns an empty
+// bar and the label "too short" rather than a misleading visualization.
+func StrengthBar(pass string, context []string) (bar string, label string) {
+	if len(pass) < MinPassphraseLength {
+		return "▱▱▱▱▱", "too short"
+	}
+	result := zxcvbn.PasswordStrength(pass, context)
+	return renderBar(result.Score), scoreLabel(result.Score)
+}
+
+// renderBar produces a 5-character unicode bar where the first
+// (score+1) cells are filled. Clamped to [1, 5] so no passphrase ever
+// produces an empty bar.
+func renderBar(score int) string {
+	filled := score + 1
+	if filled < 1 {
+		filled = 1
+	}
+	if filled > 5 {
+		filled = 5
+	}
+	return strings.Repeat("▰", filled) + strings.Repeat("▱", 5-filled)
+}
+
+// scoreLabel maps a zxcvbn score to a short human-readable word. Used
+// as the caption beside the strength bar.
+func scoreLabel(score int) string {
+	switch score {
+	case 0:
+		return "very weak"
+	case 1:
+		return "weak"
+	case 2:
+		return "borderline"
+	case 3:
+		return "strong"
+	case 4:
+		return "very strong"
+	default:
+		return "unknown"
+	}
+}
+
 // ValidateAdminPassphraseWithContext is like ValidateAdminPassphrase
 // but allows the caller to pass context strings (display name, server
 // hostname) that zxcvbn will penalize if they appear in the passphrase.

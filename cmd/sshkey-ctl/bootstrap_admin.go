@@ -311,6 +311,14 @@ func promptPassphrase(displayName string) (string, error) {
 			continue
 		}
 
+		// Show a strength bar for every attempt regardless of accept/
+		// reject so the operator sees how close they were on a block
+		// and how strong on an accept. No colors — bootstrap-admin
+		// runs in arbitrary terminals. See keygen.StrengthBar for the
+		// segment mapping.
+		bar, label := keygen.StrengthBar(string(first), []string{displayName})
+		fmt.Fprintf(os.Stderr, "Strength: %s  %s\n", bar, label)
+
 		// Validate strength with display-name context so zxcvbn
 		// penalizes "passphrase is my own name with digits" patterns.
 		if err := keygen.ValidateAdminPassphraseWithContext(string(first), []string{displayName}); err != nil {
