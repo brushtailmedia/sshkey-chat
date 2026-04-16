@@ -75,9 +75,13 @@ func (s *Server) sendSync(c *Client, lastSyncedAt string) {
 	})
 }
 
-// syncRoom sends a sync batch for a single room.
+// syncRoom sends a sync batch for a single room. Phase 20 extended
+// this to pack room_events (leave / join / topic / rename / retire)
+// alongside messages, mirroring syncGroup's event packing. Both use
+// the same first_seen gate so pre-join audit is never served.
 func (s *Server) syncRoom(c *Client, roomID string, sinceTS int64, limit int) {
 	// Apply first_seen filter — new users only see post-join messages
+	// AND post-join audit events (Phase 20). Same gate covers both.
 	firstSeen, firstEpoch, _ := s.store.GetUserRoom(c.UserID, roomID)
 	if firstSeen > 0 && firstSeen > sinceTS {
 		sinceTS = firstSeen
@@ -100,7 +104,17 @@ func (s *Server) syncRoom(c *Client, roomID string, sinceTS int64, limit int) {
 		msgs = filtered
 	}
 
-	if len(msgs) == 0 {
+	// Phase 20: fetch room_events for replay. Events are unencrypted
+	// metadata (server-authored audit — see encryption_boundaries
+	// memory note) so there's no first_epoch filter; the first_seen
+	// gate above is sufficient.
+	events, eventsErr := s.store.GetRoomEventsSince(roomID, sinceTS)
+	if eventsErr != nil {
+		s.logger.Error("sync room events failed", "room", roomID, "error", eventsErr)
+		events = nil
+	}
+
+	if len(msgs) == 0 && len(events) == 0 {
 		return
 	}
 
@@ -132,14 +146,47 @@ func (s *Server) syncRoom(c *Client, roomID string, sinceTS int64, limit int) {
 		}
 	}
 
+	// Phase 20: pack room_events into SyncBatch.Events so the client
+	// replays audit entries through the same dispatch path used for
+	// live room_event broadcasts.
+	var protoEvents []json.RawMessage
+	if len(events) > 0 {
+		protoEvents = roomEventsToRaw(events, roomID)
+	}
+
 	c.Encoder.Encode(protocol.SyncBatch{
 		Type:      "sync_batch",
 		Messages:  protoMsgs,
 		Reactions: protoReactions,
+		Events:    protoEvents,
 		EpochKeys: epochKeys,
 		Page:      1,
 		HasMore:   false,
 	})
+}
+
+// roomEventsToRaw converts per-room group_events rows to protocol
+// RoomEvent raw messages for inclusion in SyncBatch.Events. Mirror of
+// groupEventsToRaw for rooms. Phase 20.
+func roomEventsToRaw(events []store.GroupEventRow, roomID string) []json.RawMessage {
+	result := make([]json.RawMessage, 0, len(events))
+	for _, e := range events {
+		msg := protocol.RoomEvent{
+			Type:   "room_event",
+			Room:   roomID,
+			Event:  e.Event,
+			User:   e.User,
+			By:     e.By,
+			Reason: e.Reason,
+			Name:   e.Name,
+		}
+		data, err := json.Marshal(msg)
+		if err != nil {
+			continue
+		}
+		result = append(result, data)
+	}
+	return result
 }
 
 // syncGroup sends a sync batch for a single group DM. Phase 14 extended

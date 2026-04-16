@@ -101,12 +101,13 @@ type Server struct {
 
 	// removeFromRoomStop signals the remove-from-room processor to
 	// stop. Closed by Close() during shutdown. The processor drains
-	// unprocessed user_left_rooms rows and dispatches each through
-	// performRoomLeave (the existing leave-cascade helper that
-	// removes from members, broadcasts room_event{leave}, echoes
-	// room_left, and marks for epoch rotation). The same
-	// user_left_rooms table is the foundation for Phase 20's
-	// server-authoritative leave catchup. Phase 16 Gap 1.
+	// the pending_remove_from_room queue and dispatches each row
+	// through performRoomLeave (removes from members, writes the
+	// user_left_rooms history row, records the room_event audit,
+	// broadcasts room_event{leave}, echoes room_left, and marks for
+	// epoch rotation). Phase 20 (Option D) split this queue out from
+	// the previously dual-purpose user_left_rooms table — see
+	// refactor_plan.md.
 	removeFromRoomStop chan struct{}
 }
 
@@ -270,11 +271,10 @@ func (s *Server) ListenAndServe() error {
 	s.processPendingDeviceRevocations()
 	go s.runDeviceRevocationProcessor()
 
-	// Start the remove-from-room processor (Phase 16 Gap 1). Drains
-	// unprocessed user_left_rooms rows and dispatches each through
-	// performRoomLeave. Same user_left_rooms table is the foundation
-	// for Phase 20's server-authoritative leave catchup, which Phase
-	// 16 doesn't implement but the table is built compatibly.
+	// Start the remove-from-room processor (Phase 16 Gap 1, restructured
+	// in Phase 20). Drains the pending_remove_from_room queue and
+	// dispatches each row through performRoomLeave (which writes the
+	// user_left_rooms history row for Phase 20 catchup as a side effect).
 	s.processPendingRemoveFromRoom()
 	go s.runRemoveFromRoomProcessor()
 

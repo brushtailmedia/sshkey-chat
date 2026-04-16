@@ -870,29 +870,79 @@ Three separate list messages are delivered during the handshake, one per context
 
 `dm_list` entries may carry `left_at_for_caller > 0` to indicate the caller has previously `/delete`d this DM from another device. Clients should filter those entries out of their active DM list (the non-zero cutoff means the server has already frozen the caller's view past that timestamp).
 
-**Room membership events:**
+**Room membership events (Phase 20 vocabulary):**
 
 ```json
-// Server -> Client (rooms — broadcast to remaining members on join/leave)
-{"type":"room_event","room":"room_V1StGXR8_Z5jdHi6B","event":"join","user":"usr_carol"}
-{"type":"room_event","room":"room_V1StGXR8_Z5jdHi6B","event":"leave","user":"usr_carol","reason":""}
+// Server -> Client (rooms — broadcast to members on every room-level event)
+{"type":"room_event","room":"room_V1StGXR8_Z5jdHi6B","event":"join","user":"usr_carol","by":"usr_admin"}
+{"type":"room_event","room":"room_V1StGXR8_Z5jdHi6B","event":"leave","user":"usr_carol","reason":"removed","by":"usr_admin"}
+{"type":"room_event","room":"room_V1StGXR8_Z5jdHi6B","event":"topic","by":"usr_admin","name":"Q2 planning"}
+{"type":"room_event","room":"room_V1StGXR8_Z5jdHi6B","event":"rename","by":"usr_admin","name":"planning"}
+{"type":"room_event","room":"room_V1StGXR8_Z5jdHi6B","event":"retire","by":"usr_admin"}
 ```
 
-`reason` on `leave` distinguishes the trigger so clients can render distinct system messages:
-- `""` (empty) — self-leave via `/leave`
-- `"admin"` — admin removed via `sshkey-ctl remove-from-room`
-- `"user_retired"` — the leaving user's account was retired
+Phase 20 (bundled with the leave-catchup restructure) extended `room_event` to match the group-side audit model:
 
-(Room retirement — an admin retiring the room itself — does NOT use this `reason` field. It's a separate `room_retired` broadcast; see **Room Retirement** below.)
+- `event` values: `"join" | "leave" | "topic" | "rename" | "retire"`. Promotion/demotion is NOT a room event — server-wide admin status is user-level and propagates via `profile` broadcasts instead.
+- `by` — the acting admin/operator (populated on all event types when available).
+- `name` — the new topic (for `"topic"`) or new display name (for `"rename"`) at the moment of change. Captured at CLI enqueue time so fast-successive changes each record their own value.
+- `reason` (on `leave` only) — `""` (self-leave via `/leave`) / `"removed"` (admin removed via `sshkey-ctl remove-from-room`) / `"user_retired"` (leaving user's account was retired). The stale values `"admin"` and `"retirement"` from earlier drafts are not used — the protocol accepts them but no production code path emits them.
+
+Room audit events are persisted by the server in the per-room DB's `group_events` table (shared schema name with groups; rooms populate it starting Phase 20). `syncRoom` packs them into `SyncBatch.Events` alongside messages so offline clients replay audit history on reconnect. A pre-join gate (based on `room_members.joined_at`) ensures new members don't see pre-join events.
 
 **Group DM membership events:**
 
 ```json
-// Server -> Client (groups — broadcast to remaining members on leave)
+// Server -> Client (groups — broadcast to remaining members on every admin action)
 {"type":"group_event","group":"group_xK9mQ2pR","event":"leave","user":"usr_alice","reason":""}
+{"type":"group_event","group":"group_xK9mQ2pR","event":"join","user":"usr_bob","by":"usr_alice"}
+{"type":"group_event","group":"group_xK9mQ2pR","event":"promote","user":"usr_bob","by":"usr_alice"}
 ```
 
-`reason` values mirror `room_event`: `""` (self-leave), `"admin"` (CLI escape hatch), `"retirement"` (account retirement). Groups don't emit a `join` event because group membership is fixed at creation — there is no add path in the protocol.
+`reason` values for group `leave` events: `""` (self-leave), `"removed"` (Phase 14 in-group admin kick with `by=<admin>`), `"retirement"` (leaving user's account was retired). Groups use `"retirement"` where rooms use `"user_retired"` — the asymmetry is deliberate (established in Phase 11) and reflects the different governance models. Groups have `add_to_group` / `remove_from_group` verbs (Phase 14), so `join` and member-removal events flow through `group_event` naturally.
+
+**Multi-device leave catchup (Phase 20):**
+
+When a user is removed from a room or group DM while offline, the server records the leave in server-authoritative history tables (`user_left_rooms`, `user_left_groups` in `data.db`). On the next connect handshake, BEFORE `room_list` / `group_list`, the server sends:
+
+```json
+// Server -> Client
+{"type":"left_rooms","rooms":[
+  {"room":"room_V1StGXR8_Z5jdHi6B","reason":"removed","initiated_by":"usr_admin","left_at":1712345600},
+  {"room":"room_W2mR5hX7_Q2kTwB8G","reason":"user_retired","initiated_by":"system","left_at":1712340000}
+]}
+
+{"type":"left_groups","groups":[
+  {"group":"group_xK9mQ2pR","reason":"retirement","initiated_by":"system","left_at":1712345700}
+]}
+```
+
+`left_rooms` arrives before `room_list`; `left_groups` arrives before `group_list`. The handshake order is `sendDeletedRooms → sendRetiredRooms → sendLeftRooms → sendRoomList → sendDeletedGroups → sendLeftGroups → sendGroupList → ...`. Each entry carries the most recent leave per (user, context), deduped server-side.
+
+Clients persist the reason as the local `leave_reason` column and render distinct system messages ("you were removed from X by an admin" vs "you left X on another device" vs "your account was retired") instead of a generic `(left)`. The reason is also cleared by `MarkRoomRejoined` / `MarkGroupRejoined` when the server's `room_list` / `group_list` subsequently reports the context as active (i.e. an admin re-added the user).
+
+Phase 20 replaced the older client-side reconciliation walk (diff local active IDs against server's list, mark missing as left) — the server is now authoritative for the "why did this context go away" dimension.
+
+**Encryption boundary — what's end-to-end encrypted vs server-visible metadata:**
+
+The existing "blind relay" framing (see Encryption section above) is precise about message bodies and attachments but was implicit about the audit / state surface. Phase 20 added room audit events to the server-visible set, so this section enumerates all four categories explicitly:
+
+1. **E2E encrypted content** (server-opaque). Message bodies, attachments (file bytes on Channel 2/3), message edits (re-encrypted with current key material), reaction emoji (encrypted inside `payload`, same model as messages — not just metadata). Server has the envelope but never decrypts the payload.
+2. **Routing metadata** (server-visible envelope). Sender user ID, timestamps, target context (room / group / DM ID), message IDs, file IDs, signatures, `epoch` (rooms), `wrapped_keys` (groups and 1:1 DMs). The server uses these to route and store.
+3. **Server-authored state and audit** (server-visible, plaintext by design):
+   - `group_events` rows — per-room and per-group audit trail (fields: `event`, `user`, `by`, `reason`, `name`, `ts`). Phase 14 populates for groups; Phase 20 populates for rooms.
+   - `user_left_rooms` / `user_left_groups` rows — leave history in `data.db`, used for multi-device catchup.
+   - `room_members` / `group_members` tables — membership state, `joined_at`, `first_epoch` (rooms only), `is_admin` (groups only).
+   - `pins` table — `(message_id, pinned_by, ts)`. **No message content** — just a flag indicating which messages are pinned. The server knows *that* a message is pinned but cannot see *what it says* (the pinned message itself is in the encrypted `messages.payload`).
+   - `deleted_rooms` / `deleted_groups` / `retired_rooms` / `retired_users` lifecycle sidecars.
+4. **Public profile data** (server-authoritative by design). Display names, admin status, avatar images, status text. Not E2E encrypted because they're identity metadata used for rendering across clients.
+
+**Why audit events aren't encrypted** (even for rooms, where the server holds the epoch keys): the server AUTHORS them from admin actions it processes — `performRoomLeave`, `processPendingRoomUpdates`, `cmdAddToRoom`, `processPendingRoomRetirements`. Encrypting against a key the server just used to write the plaintext would be ceremony, not security. Groups/DMs can't encrypt events even in principle (server has no per-message keys); rooms don't for consistency with groups, alignment with industry practice (Signal / Matrix / WhatsApp keep membership events server-visible), and to preserve the operator audit path (`sshkey-ctl audit-log`).
+
+**Clarifications for common misreadings:**
+- Pins are metadata, not content. The pin references an encrypted message; the message itself stays E2E encrypted.
+- Reactions are encrypted uniformly across rooms / groups / DMs. The server sees only the routing envelope (who reacted to what message when), not the emoji.
+- Profile data is intentionally public metadata — this is a deliberate trade-off for display/rendering, not a gap.
 
 **Room member query (lazy):**
 

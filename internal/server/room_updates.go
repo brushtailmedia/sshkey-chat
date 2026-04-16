@@ -89,12 +89,14 @@ func (s *Server) processPendingRoomUpdates() {
 
 		// Audit credit. The action-to-verb mapping uses the CLI verb
 		// names so operators reading the log see what they typed.
-		var auditAction string
+		var auditAction, eventType string
 		switch p.Action {
 		case store.RoomUpdateActionUpdateTopic:
 			auditAction = "update-topic"
+			eventType = "topic"
 		case store.RoomUpdateActionRenameRoom:
 			auditAction = "rename-room"
+			eventType = "rename"
 		default:
 			s.logger.Warn("unknown room update action",
 				"action", string(p.Action))
@@ -103,6 +105,17 @@ func (s *Server) processPendingRoomUpdates() {
 		if s.audit != nil {
 			s.audit.Log(p.ChangedBy, auditAction,
 				"room="+p.RoomID+" display_name="+room.DisplayName+" topic="+room.Topic)
+		}
+
+		// Phase 20: record a room_event audit row so members see
+		// inline "alice changed the topic to 'foo'" / "alice renamed
+		// the room to 'bar'" on their next sync. Best-effort — audit
+		// failure doesn't block the live broadcast below.
+		if err := s.store.RecordRoomEvent(
+			p.RoomID, eventType, "", p.ChangedBy, "", p.NewValue, false, time.Now().Unix(),
+		); err != nil {
+			s.logger.Error("failed to record room event",
+				"room", p.RoomID, "event", eventType, "error", err)
 		}
 
 		// Build the broadcast event with the full post-change room

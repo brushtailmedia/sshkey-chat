@@ -188,7 +188,7 @@ func TestRecordAndConsumePendingRoomUpdate_UpdateTopic(t *testing.T) {
 	}
 	defer st.Close()
 
-	if err := st.RecordPendingRoomUpdate("rm_general", RoomUpdateActionUpdateTopic, "os:1000"); err != nil {
+	if err := st.RecordPendingRoomUpdate("rm_general", RoomUpdateActionUpdateTopic, "os:1000", "test_value"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
@@ -215,7 +215,7 @@ func TestRecordAndConsumePendingRoomUpdate_RenameRoom(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.RecordPendingRoomUpdate("rm_general", RoomUpdateActionRenameRoom, "os:1000")
+	st.RecordPendingRoomUpdate("rm_general", RoomUpdateActionRenameRoom, "os:1000", "test_value")
 	got, _ := st.ConsumePendingRoomUpdates()
 	if len(got) != 1 || got[0].Action != RoomUpdateActionRenameRoom {
 		t.Errorf("expected 1 rename-room row, got %+v", got)
@@ -230,8 +230,8 @@ func TestConsumePendingRoomUpdates_AtomicDelete(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.RecordPendingRoomUpdate("rm_a", RoomUpdateActionUpdateTopic, "os:1000")
-	st.RecordPendingRoomUpdate("rm_b", RoomUpdateActionRenameRoom, "os:1000")
+	st.RecordPendingRoomUpdate("rm_a", RoomUpdateActionUpdateTopic, "os:1000", "test_value")
+	st.RecordPendingRoomUpdate("rm_b", RoomUpdateActionRenameRoom, "os:1000", "test_value")
 
 	first, _ := st.ConsumePendingRoomUpdates()
 	if len(first) != 2 {
@@ -254,7 +254,7 @@ func TestRecordPendingRoomUpdate_PreservesOrder(t *testing.T) {
 
 	rooms := []string{"rm_alpha", "rm_beta", "rm_gamma", "rm_delta"}
 	for _, r := range rooms {
-		st.RecordPendingRoomUpdate(r, RoomUpdateActionUpdateTopic, "os:1000")
+		st.RecordPendingRoomUpdate(r, RoomUpdateActionUpdateTopic, "os:1000", "test_value")
 	}
 
 	got, _ := st.ConsumePendingRoomUpdates()
@@ -276,7 +276,7 @@ func TestRecordPendingRoomUpdate_RejectsUnknownAction(t *testing.T) {
 	}
 	defer st.Close()
 
-	err = st.RecordPendingRoomUpdate("rm_general", RoomUpdateAction("bogus"), "os:1000")
+	err = st.RecordPendingRoomUpdate("rm_general", RoomUpdateAction("bogus"), "os:1000", "test_value")
 	if err == nil {
 		t.Fatal("expected CHECK constraint to reject unknown action")
 	}

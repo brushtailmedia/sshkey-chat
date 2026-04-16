@@ -991,7 +991,7 @@ func cmdUpdateTopic(dataDir string, args []string) error {
 	// Phase 16 Gap 1: enqueue a room update so connected members
 	// see the new topic on their next render.
 	changedBy := fmt.Sprintf("os:%d", os.Getuid())
-	if err := st.RecordPendingRoomUpdate(room.ID, store.RoomUpdateActionUpdateTopic, changedBy); err != nil {
+	if err := st.RecordPendingRoomUpdate(room.ID, store.RoomUpdateActionUpdateTopic, changedBy, topic); err != nil {
 		return fmt.Errorf("update-topic: topic written but queue enqueue failed (topic is still effective in rooms.db, but live broadcasts to connected members will be skipped until the server next restarts): %w", err)
 	}
 
@@ -1056,7 +1056,7 @@ func cmdRenameRoom(dataDir string, args []string) error {
 	}
 
 	changedBy := fmt.Sprintf("os:%d", os.Getuid())
-	if err := st.RecordPendingRoomUpdate(room.ID, store.RoomUpdateActionRenameRoom, changedBy); err != nil {
+	if err := st.RecordPendingRoomUpdate(room.ID, store.RoomUpdateActionRenameRoom, changedBy, newName); err != nil {
 		return fmt.Errorf("rename-room: name written but queue enqueue failed (rename is still effective in rooms.db, but live broadcasts to connected members will be skipped until the server next restarts): %w", err)
 	}
 

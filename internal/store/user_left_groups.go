@@ -46,13 +46,15 @@ func (s *Store) RecordUserLeftGroup(userID, groupID, reason, initiatedBy string)
 // that slipped past DeleteUserLeftGroupRows don't surface in the
 // catchup). Ordered by left_at descending.
 func (s *Store) GetUserLeftGroupsCatchup(userID string) ([]UserLeftGroup, error) {
+	// Note: group_members.user (not user_id) — legacy column name
+	// that the other Phase 14 group helpers also use.
 	rows, err := s.dataDB.Query(`
 		SELECT ulg.id, ulg.user_id, ulg.group_id, ulg.reason, ulg.initiated_by, ulg.left_at
 		FROM user_left_groups ulg
 		LEFT JOIN group_members gm
-		  ON gm.group_id = ulg.group_id AND gm.user_id = ulg.user_id
+		  ON gm.group_id = ulg.group_id AND gm.user = ulg.user_id
 		WHERE ulg.user_id = ?
-		  AND gm.user_id IS NULL
+		  AND gm.user IS NULL
 		GROUP BY ulg.group_id
 		HAVING ulg.left_at = MAX(ulg.left_at)
 		ORDER BY ulg.left_at DESC`,

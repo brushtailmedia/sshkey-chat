@@ -33,7 +33,7 @@ func TestProcessPendingRoomUpdates_UpdateTopic(t *testing.T) {
 	if err := s.store.SetRoomTopic(generalID, "fresh topic"); err != nil {
 		t.Fatalf("set topic: %v", err)
 	}
-	if err := s.store.RecordPendingRoomUpdate(generalID, store.RoomUpdateActionUpdateTopic, "os:1000"); err != nil {
+	if err := s.store.RecordPendingRoomUpdate(generalID, store.RoomUpdateActionUpdateTopic, "os:1000", "fresh topic"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -77,7 +77,7 @@ func TestProcessPendingRoomUpdates_RenameRoom(t *testing.T) {
 	if err := s.store.SetRoomDisplayName(generalID, "main"); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
-	if err := s.store.RecordPendingRoomUpdate(generalID, store.RoomUpdateActionRenameRoom, "os:1000"); err != nil {
+	if err := s.store.RecordPendingRoomUpdate(generalID, store.RoomUpdateActionRenameRoom, "os:1000", "main"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -105,7 +105,7 @@ func TestProcessPendingRoomUpdates_RenameRoom(t *testing.T) {
 func TestProcessPendingRoomUpdates_SkipsMissingRoom(t *testing.T) {
 	s := newTestServer(t)
 
-	if err := s.store.RecordPendingRoomUpdate("rm_ghost", store.RoomUpdateActionUpdateTopic, "os:1000"); err != nil {
+	if err := s.store.RecordPendingRoomUpdate("rm_ghost", store.RoomUpdateActionUpdateTopic, "os:1000", "ignored"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -140,7 +140,7 @@ func TestProcessPendingRoomUpdates_NarrowBroadcastMembersOnly(t *testing.T) {
 	}
 
 	s.store.SetRoomTopic(generalID, "members-only test")
-	s.store.RecordPendingRoomUpdate(generalID, store.RoomUpdateActionUpdateTopic, "os:1000")
+	s.store.RecordPendingRoomUpdate(generalID, store.RoomUpdateActionUpdateTopic, "os:1000", "members-only test")
 
 	// alice IS in general; dave is NOT.
 	alice := testClientFor("alice", "dev_alice_1")
@@ -168,9 +168,9 @@ func TestProcessPendingRoomUpdates_AuditCreditsByAction(t *testing.T) {
 	engID := s.store.RoomDisplayNameToID("engineering")
 
 	s.store.SetRoomTopic(generalID, "topic A")
-	s.store.RecordPendingRoomUpdate(generalID, store.RoomUpdateActionUpdateTopic, "os:1000")
+	s.store.RecordPendingRoomUpdate(generalID, store.RoomUpdateActionUpdateTopic, "os:1000", "topic A")
 	s.store.SetRoomDisplayName(engID, "eng")
-	s.store.RecordPendingRoomUpdate(engID, store.RoomUpdateActionRenameRoom, "os:1000")
+	s.store.RecordPendingRoomUpdate(engID, store.RoomUpdateActionRenameRoom, "os:1000", "eng")
 
 	s.processPendingRoomUpdates()
 
@@ -200,9 +200,9 @@ func TestProcessPendingRoomUpdates_MultipleRowsInOneTick(t *testing.T) {
 	engID := s.store.RoomDisplayNameToID("engineering")
 
 	s.store.SetRoomTopic(generalID, "general topic")
-	s.store.RecordPendingRoomUpdate(generalID, store.RoomUpdateActionUpdateTopic, "os:1000")
+	s.store.RecordPendingRoomUpdate(generalID, store.RoomUpdateActionUpdateTopic, "os:1000", "general topic")
 	s.store.SetRoomTopic(engID, "eng topic")
-	s.store.RecordPendingRoomUpdate(engID, store.RoomUpdateActionUpdateTopic, "os:1000")
+	s.store.RecordPendingRoomUpdate(engID, store.RoomUpdateActionUpdateTopic, "os:1000", "eng topic")
 
 	// alice is a member of both rooms.
 	alice := testClientFor("alice", "dev_alice_1")

@@ -153,7 +153,9 @@ The server operator can see who talks to whom and when, but cannot read what the
 
 ### What the server sees (metadata only)
 
-The server handles routing and storage. It sees the envelope, not the content:
+The server handles routing and storage. It sees the envelope, not the content. Four categories of server-visible data, with the content plane kept opaque:
+
+**1. Routing metadata** (envelope for every message):
 - Who sends messages to which room/conversation and when (from, room/conversation, timestamp)
 - Message sizes and frequency (traffic analysis)
 - File IDs and file sizes (not filenames, not mime types, not content)
@@ -161,9 +163,24 @@ The server handles routing and storage. It sees the envelope, not the content:
 - Which devices each user has (device registry)
 - Typing indicators and read receipt positions (metadata)
 
-The server does **not** see: message text, attachment filenames/types, mentions, reply references, link previews, reaction emoji. All of these are inside the encrypted payload.
+**2. Server-authored state and audit** (plaintext by design — server IS the author):
+- `group_events` — per-room and per-group audit trail (join/leave/promote/demote/rename/topic/retire events with `user`, `by`, `reason`, `name`, `ts`). Phase 14 populates for groups; Phase 20 populates for rooms.
+- `user_left_rooms` / `user_left_groups` — Phase 20 leave-history tables used for multi-device catchup on reconnect (replaces the previous client-side inference from `room_list` / `group_list` diffs).
+- `room_members` / `group_members` — membership state, `joined_at`, room `first_epoch`, group `is_admin`.
+- `pins` — `(message_id, pinned_by, ts)`. The server knows *that* a message is pinned but cannot see *what it says* — the message itself stays in the encrypted `messages.payload`.
+- `deleted_rooms` / `deleted_groups` / `retired_rooms` / `retired_users` — lifecycle sidecars.
 
-The server **does** see profile data: display names, avatar images, status text. These are public metadata, not E2E encrypted.
+**3. Public profile data** (server-authoritative by design):
+- Display names, admin status, avatar images, status text. Not E2E encrypted because they're identity metadata used for rendering across clients.
+
+**4. E2E encrypted content** (server does NOT see):
+- Message text, attachment filenames and MIME types, mentions, reply references, link previews, reaction emoji. All inside the encrypted `payload` field.
+
+**Why audit events are plaintext** (even for rooms, where the server holds the epoch keys): the server AUTHORS them from admin actions it processes. Encrypting against a key the server just used to write the plaintext would be ceremony, not security. Groups/DMs can't encrypt events even in principle (server has no per-message keys); rooms don't for consistency with groups and alignment with industry practice (Signal / Matrix / WhatsApp keep membership events server-visible).
+
+**Common misreadings to avoid:**
+- Pins are metadata, not content. The pin references an encrypted message; the message itself stays E2E encrypted. A server that leaks its DB exposes *which* messages are pinned, not *what they say*.
+- Reactions are encrypted uniformly across rooms / groups / DMs. Server sees routing envelope (who reacted to what message when), not the emoji.
 
 This is inherent in any client-server architecture without onion routing. Same metadata exposure as Signal.
 

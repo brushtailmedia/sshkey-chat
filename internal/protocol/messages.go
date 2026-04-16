@@ -562,6 +562,56 @@ type DeletedRoomsList struct {
 	Rooms []string `json:"rooms"`
 }
 
+// Phase 20: server-authoritative multi-device /leave catchup.
+//
+// When a user is removed from a room or group DM while their
+// client is offline (self-leave on another device, admin removal,
+// or retirement cascade), the server records a row in the
+// user_left_rooms / user_left_groups history tables. On reconnect,
+// the server sends LeftRoomsList and LeftGroupsList BEFORE
+// RoomList / GroupList so the client has the full "left" picture
+// before populating its sidebar.
+//
+// Each entry carries the reason code and initiating user so the
+// client can render distinct system messages ("you were removed by
+// admin" vs "you left on another device" vs "your account was
+// retired") rather than a generic "(left)". Replaces the
+// client-side reconciliation walk (diff local active IDs against
+// server's list) with server-pushed state — the server is now
+// authoritative for the "why did this room go away" dimension.
+
+// LeftRoomEntry is one entry in a LeftRoomsList catchup message.
+type LeftRoomEntry struct {
+	Room        string `json:"room"`
+	Reason      string `json:"reason"`                 // "" | "removed" | "user_retired"
+	InitiatedBy string `json:"initiated_by,omitempty"` // admin user_id for "removed", "system" for retirement
+	LeftAt      int64  `json:"left_at"`
+}
+
+// LeftRoomsList is sent on the connect handshake with the most
+// recent leave per (user, room) that has not been superseded by a
+// re-join. Sent BEFORE RoomList so the client has reason codes in
+// hand before reconciling the sidebar.
+type LeftRoomsList struct {
+	Type  string          `json:"type"` // "left_rooms"
+	Rooms []LeftRoomEntry `json:"rooms"`
+}
+
+// LeftGroupEntry is one entry in a LeftGroupsList catchup message.
+type LeftGroupEntry struct {
+	Group       string `json:"group"`
+	Reason      string `json:"reason"`                 // "" | "removed" | "retirement"
+	InitiatedBy string `json:"initiated_by,omitempty"` // admin user_id for "removed", "system" for retirement
+	LeftAt      int64  `json:"left_at"`
+}
+
+// LeftGroupsList is the group DM analogue of LeftRoomsList. Sent
+// BEFORE GroupList on the connect handshake.
+type LeftGroupsList struct {
+	Type   string           `json:"type"` // "left_groups"
+	Groups []LeftGroupEntry `json:"groups"`
+}
+
 // 1:1 DM messages
 //
 // 1:1 DMs are fixed two-party conversations stored in the direct_messages

@@ -238,6 +238,11 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 	// that missed the live room_retired broadcast. Phase 12.
 	s.sendRetiredRooms(client)
 
+	// Phase 20: server-authoritative leave catchup for rooms. Sent
+	// BEFORE room_list so reason codes are available when the sidebar
+	// renders. Replaces the client-side reconciliation walk.
+	s.sendLeftRooms(client)
+
 	// Send room list
 	s.sendRoomList(client)
 
@@ -246,6 +251,11 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 	// before its sidebar is populated. Catches up offline devices that
 	// missed the live group_deleted echo.
 	s.sendDeletedGroups(client)
+
+	// Phase 20: server-authoritative leave catchup for group DMs.
+	// Sent BEFORE group_list so reason codes are available when the
+	// sidebar renders.
+	s.sendLeftGroups(client)
 
 	// Send group DM list
 	s.sendGroupList(client)
@@ -468,6 +478,86 @@ func (s *Server) sendDeletedRooms(c *Client) {
 	c.Encoder.Encode(protocol.DeletedRoomsList{
 		Type:  "deleted_rooms",
 		Rooms: rooms,
+	})
+}
+
+// sendLeftRooms emits a left_rooms message during the connect
+// handshake listing the most recent leave per room for this user
+// (Phase 20). Sent BEFORE sendRoomList so the client has reason
+// codes in hand before the sidebar is populated.
+//
+// Filters out rooms the user is currently a member of (defensive
+// against DeleteUserLeftRoomRows cleanup races from re-adds).
+//
+// No-op if the user has no leave history.
+func (s *Server) sendLeftRooms(c *Client) {
+	if s.store == nil {
+		return
+	}
+	history, err := s.store.GetUserLeftRoomsCatchup(c.UserID)
+	if err != nil {
+		s.logger.Error("failed to get left rooms catchup",
+			"user", c.UserID, "error", err)
+		return
+	}
+	// Go-side filter: the SQL catchup query can't JOIN across DBs
+	// (user_left_rooms in data.db, room_members in rooms.db), so
+	// we filter rejoined rooms here. Under normal operation
+	// DeleteUserLeftRoomRows clears stale rows on re-add, so this
+	// is defensive.
+	var entries []protocol.LeftRoomEntry
+	for _, h := range history {
+		if s.store.IsRoomMemberByID(h.RoomID, c.UserID) {
+			continue // user has been re-added, skip
+		}
+		entries = append(entries, protocol.LeftRoomEntry{
+			Room:        h.RoomID,
+			Reason:      h.Reason,
+			InitiatedBy: h.InitiatedBy,
+			LeftAt:      h.LeftAt,
+		})
+	}
+	if len(entries) == 0 {
+		return
+	}
+	c.Encoder.Encode(protocol.LeftRoomsList{
+		Type:  "left_rooms",
+		Rooms: entries,
+	})
+}
+
+// sendLeftGroups is the group DM analogue of sendLeftRooms. Sent
+// BEFORE sendGroupList (Phase 20).
+//
+// The catchup query already does a JOIN against group_members
+// (both tables live in data.db), so no Go-side filter is needed.
+//
+// No-op if the user has no leave history.
+func (s *Server) sendLeftGroups(c *Client) {
+	if s.store == nil {
+		return
+	}
+	history, err := s.store.GetUserLeftGroupsCatchup(c.UserID)
+	if err != nil {
+		s.logger.Error("failed to get left groups catchup",
+			"user", c.UserID, "error", err)
+		return
+	}
+	if len(history) == 0 {
+		return
+	}
+	entries := make([]protocol.LeftGroupEntry, 0, len(history))
+	for _, h := range history {
+		entries = append(entries, protocol.LeftGroupEntry{
+			Group:       h.GroupID,
+			Reason:      h.Reason,
+			InitiatedBy: h.InitiatedBy,
+			LeftAt:      h.LeftAt,
+		})
+	}
+	c.Encoder.Encode(protocol.LeftGroupsList{
+		Type:   "left_groups",
+		Groups: entries,
 	})
 }
 

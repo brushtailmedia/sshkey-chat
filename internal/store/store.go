@@ -484,6 +484,7 @@ func (s *Store) initDataDB() error {
 			room_id     TEXT NOT NULL,
 			action      TEXT NOT NULL CHECK (action IN ('update-topic', 'rename-room')),
 			changed_by  TEXT NOT NULL,
+			new_value   TEXT NOT NULL DEFAULT '',
 			queued_at   INTEGER NOT NULL
 		);
 

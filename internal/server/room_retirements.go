@@ -134,5 +134,18 @@ func (s *Server) processPendingRoomRetirements() {
 			s.audit.Log(p.RetiredBy, "retire-room",
 				"room="+p.RoomID+" reason="+p.Reason)
 		}
+
+		// Phase 20: record a room_event audit row so members see
+		// "this room was retired by an admin" inline in the
+		// transcript. Best-effort — failure doesn't block the
+		// broadcast above. Note: we use the original (pre-suffix)
+		// context naturally since the event lives in the per-room
+		// DB keyed by roomID, which doesn't change on retirement.
+		if err := s.store.RecordRoomEvent(
+			p.RoomID, "retire", "", p.RetiredBy, p.Reason, "", false, time.Now().Unix(),
+		); err != nil {
+			s.logger.Error("failed to record room event",
+				"room", p.RoomID, "event", "retire", "error", err)
+		}
 	}
 }
