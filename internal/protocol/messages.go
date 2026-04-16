@@ -497,6 +497,28 @@ type RetiredRoomsList struct {
 	Rooms []RoomRetired `json:"rooms"`
 }
 
+// RoomUpdated is broadcast to connected members of a room when an
+// admin updates its display name or topic via the CLI. Phase 16 Gap 1
+// — backs both `sshkey-ctl update-topic` and `sshkey-ctl rename-room`
+// via a shared protocol event.
+//
+// Carries the FULL post-change room state, not a diff: clients apply
+// the event by upserting their local rooms-table row from the payload
+// fields. Whichever field actually changed gets reflected on the next
+// render; the unchanged field is overwritten with its current value
+// (a no-op). One handler covers both verbs.
+//
+// Sent by the server's runRoomUpdatesProcessor polling goroutine
+// after consuming a pending_room_updates queue row. Delivered ONLY
+// to current members of the affected room (narrow broadcast — same
+// pattern as room_retired).
+type RoomUpdated struct {
+	Type        string `json:"type"`         // "room_updated"
+	Room        string `json:"room"`         // room nanoid
+	DisplayName string `json:"display_name"` // post-change display name
+	Topic       string `json:"topic"`        // post-change topic
+}
+
 // DeleteRoom is the client-initiated request to remove a room from the
 // user's own view. The server runs the leave flow (remove from
 // room_members, broadcast room_event{leave} to remaining members,
@@ -1105,6 +1127,24 @@ type RetireMe struct {
 // render 1:1 DMs as read-only, add [retired] marker to historical messages).
 type UserRetired struct {
 	Type string `json:"type"` // "user_retired"
+	User string `json:"user"`
+	Ts   int64  `json:"ts"`   // unix seconds
+}
+
+// UserUnretired is the inverse of UserRetired — broadcast when an
+// admin runs `sshkey-ctl unretire-user` to reverse a mistaken
+// retirement. Connected clients should DELETE the user from their
+// retired cache so the [retired] marker is flushed from sidebar
+// labels, info panels, and message headers. Phase 16 Gap 1.
+//
+// What this does NOT signal: that the user has been re-added to any
+// rooms or groups. The retirement cascade removed the user from
+// every shared context, and unretirement is intentionally minimal —
+// it only flips the flag. Operators must manually re-add the user
+// via add-to-room or in-group /add. The broadcast simply tells
+// clients to stop rendering the [retired] decoration.
+type UserUnretired struct {
+	Type string `json:"type"` // "user_unretired"
 	User string `json:"user"`
 	Ts   int64  `json:"ts"`   // unix seconds
 }

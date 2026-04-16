@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,75 +21,79 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/server"
+	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
 
-// Test fixture keys generated once per TestMain run. Written to /tmp for
-// backwards compatibility with pre-existing test code that expects them
-// there, and mirrored into a per-run testConfigDir with matching users.toml.
+// Test fixture keys generated once per TestMain run. Written to /tmp
+// for backwards compatibility with pre-existing test code that expects
+// them there. Phase 16 Gap 4 removed users.toml support, so the
+// fixture code no longer writes a users.toml file — instead, the user
+// metadata is stored in testFixtureUsers and seeded into users.db
+// directly via store.InsertUser inside newTestEnv after the server is
+// created.
+type testFixtureUser struct {
+	UserID      string // nanoid-style internal ID
+	DisplayName string
+	KeyPath     string // private key file path on disk (for client connect)
+	PubKey      string // public key in authorized_keys format (with comment)
+	Rooms       []string
+}
+
 var (
 	testFixtureOnce   sync.Once
-	testFixtureDir    string // temp config dir with generated users.toml
+	testFixtureDir    string             // temp config dir (server.toml + rooms.toml only)
+	testFixtureUsers  []testFixtureUser  // user metadata for store seeding
 	testFixtureErr    error
 )
 
-// setupFixtures creates three Ed25519 test keys (alice/bob/carol), writes
-// their private keys to /tmp/sshkey-test-key[-bob|-carol], and produces a
-// matching users.toml + rooms.toml + server.toml in a temp config dir.
-// Called lazily on first test that needs the fixtures.
-func setupFixtures() (string, error) {
+// setupFixtures creates three Ed25519 test keys (alice/bob/carol),
+// writes their private keys to /tmp/sshkey-test-key[-bob|-carol], and
+// builds a temp config dir containing rooms.toml + server.toml. The
+// generated user metadata is stashed in testFixtureUsers for later
+// seeding into users.db via store.InsertUser. Called lazily on first
+// test that needs the fixtures.
+func setupFixtures() (string, []testFixtureUser, error) {
 	testFixtureOnce.Do(func() {
-		testFixtureDir, testFixtureErr = generateTestFixtures()
+		testFixtureDir, testFixtureUsers, testFixtureErr = generateTestFixtures()
 	})
-	return testFixtureDir, testFixtureErr
+	return testFixtureDir, testFixtureUsers, testFixtureErr
 }
 
-func generateTestFixtures() (string, error) {
+func generateTestFixtures() (string, []testFixtureUser, error) {
 	// Generate the three test keys + pub keys
-	users := []struct {
-		username    string // internal nanoid-style ID
-		displayName string
-		keyPath     string
-		rooms       string
-	}{
-		{"usr_alice_test", "alice", "/tmp/sshkey-test-key", `["general", "engineering"]`},
-		{"usr_bob_test", "bob", "/tmp/sshkey-test-key-bob", `["general"]`},
-		{"usr_carol_test", "carol", "/tmp/sshkey-test-key-carol", `["general"]`},
+	users := []testFixtureUser{
+		{UserID: "usr_alice_test", DisplayName: "alice", KeyPath: "/tmp/sshkey-test-key", Rooms: []string{"general", "engineering"}},
+		{UserID: "usr_bob_test", DisplayName: "bob", KeyPath: "/tmp/sshkey-test-key-bob", Rooms: []string{"general"}},
+		{UserID: "usr_carol_test", DisplayName: "carol", KeyPath: "/tmp/sshkey-test-key-carol", Rooms: []string{"general"}},
 	}
 
 	tmpConfigDir, err := os.MkdirTemp("", "sshkey-test-config-")
 	if err != nil {
-		return "", fmt.Errorf("tempdir: %w", err)
+		return "", nil, fmt.Errorf("tempdir: %w", err)
 	}
 
-	var usersToml string
-	for _, u := range users {
+	for i := range users {
+		u := &users[i]
 		// Generate a fresh key (overwrite any stale fixture)
 		pub, priv, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		block, err := ssh.MarshalPrivateKey(priv, "")
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
-		if err := os.WriteFile(u.keyPath, pem.EncodeToMemory(block), 0600); err != nil {
-			return "", fmt.Errorf("write %s: %w", u.keyPath, err)
+		if err := os.WriteFile(u.KeyPath, pem.EncodeToMemory(block), 0600); err != nil {
+			return "", nil, fmt.Errorf("write %s: %w", u.KeyPath, err)
 		}
 
 		sshPub, err := ssh.NewPublicKey(pub)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		pubLine := string(ssh.MarshalAuthorizedKey(sshPub))
 		// Trim trailing newline; add a comment
-		pubLine = pubLine[:len(pubLine)-1] + " " + u.displayName + "@test"
-
-		usersToml += fmt.Sprintf("[%s]\nkey = %q\ndisplay_name = %q\nrooms = %s\n\n",
-			u.username, pubLine, u.displayName, u.rooms)
-	}
-
-	if err := os.WriteFile(filepath.Join(tmpConfigDir, "users.toml"), []byte(usersToml), 0644); err != nil {
-		return "", err
+		u.PubKey = pubLine[:len(pubLine)-1] + " " + u.DisplayName + "@test"
 	}
 
 	// Copy rooms.toml + server.toml from committed testdata
@@ -96,14 +101,14 @@ func generateTestFixtures() (string, error) {
 		src := filepath.Join("..", "..", "testdata", "config", f)
 		data, err := os.ReadFile(src)
 		if err != nil {
-			return "", fmt.Errorf("read %s: %w", src, err)
+			return "", nil, fmt.Errorf("read %s: %w", src, err)
 		}
 		if err := os.WriteFile(filepath.Join(tmpConfigDir, f), data, 0644); err != nil {
-			return "", err
+			return "", nil, err
 		}
 	}
 
-	return tmpConfigDir, nil
+	return tmpConfigDir, users, nil
 }
 
 // testEnv holds a running server and its config for tests.
@@ -134,7 +139,7 @@ func (e *testEnv) roomID(displayName string) string {
 
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
-	testConfigDir, err := setupFixtures()
+	testConfigDir, fixtureUsers, err := setupFixtures()
 	if err != nil {
 		t.Fatalf("setup fixtures: %v", err)
 	}
@@ -161,6 +166,40 @@ func newTestEnv(t *testing.T) *testEnv {
 	if err != nil {
 		t.Fatalf("create server: %v", err)
 	}
+
+	// Phase 16 Gap 4: users.toml seeding was removed. Insert the test
+	// fixture users directly into users.db / room_members via the
+	// public store API, after server.New has initialized the store
+	// schema and seeded rooms.db from rooms.toml. Pass testDataDir
+	// (not testDataDir+"/data") because store.Open creates the "data"
+	// subdirectory itself — passing the joined path would create
+	// data/data which the server can't see.
+	st, err := store.Open(testDataDir)
+	if err != nil {
+		t.Fatalf("open store for fixture seeding: %v", err)
+	}
+	for _, u := range fixtureUsers {
+		// Strip the comment from the key for storage parity with
+		// cmdApprove.
+		parts := strings.Fields(u.PubKey)
+		keyForStorage := u.PubKey
+		if len(parts) >= 2 {
+			keyForStorage = parts[0] + " " + parts[1]
+		}
+		if err := st.InsertUser(u.UserID, keyForStorage, u.DisplayName); err != nil {
+			t.Fatalf("seed user %s: %v", u.UserID, err)
+		}
+		for _, roomName := range u.Rooms {
+			roomID := st.RoomDisplayNameToID(roomName)
+			if roomID == "" {
+				t.Fatalf("seed user %s: room %s not in rooms.db", u.UserID, roomName)
+			}
+			if err := st.AddRoomMember(roomID, u.UserID, 0); err != nil {
+				t.Fatalf("add %s to %s: %v", u.UserID, roomName, err)
+			}
+		}
+	}
+	st.Close()
 
 	go srv.ListenAndServe()
 	t.Cleanup(func() { srv.Close() })

@@ -252,7 +252,7 @@ sshkey-ctl reject --fingerprint FP                             # reject a pendin
 
 ```bash
 sshkey-ctl list-users                                          # list all users
-sshkey-ctl remove-user usr_abc123                              # remove a user
+sshkey-ctl bootstrap-admin alice                               # generate admin keypair (server-side, encrypted)
 sshkey-ctl retire-user usr_abc123 --reason key_lost            # permanently retire an account
 sshkey-ctl list-retired                                        # list retired accounts
 sshkey-ctl promote usr_abc123                                  # grant admin status

@@ -32,7 +32,8 @@ func (s *Store) initRoomsDB() error {
 			retired      INTEGER NOT NULL DEFAULT 0,
 			retired_at   TEXT NOT NULL DEFAULT '',
 			retired_by   TEXT NOT NULL DEFAULT '',
-			created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+			created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+			is_default   INTEGER NOT NULL DEFAULT 0
 		);
 
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_rooms_display_name_lower
@@ -49,7 +50,20 @@ func (s *Store) initRoomsDB() error {
 		CREATE INDEX IF NOT EXISTS idx_room_members_user
 			ON room_members(user_id);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Phase 16 default rooms: add is_default to existing rooms.db
+	// files that pre-date the column. SQLite ALTER TABLE returns a
+	// "duplicate column name" error if the column already exists,
+	// which is exactly what we want to ignore — the CREATE TABLE
+	// above already adds it for fresh DBs, and this ALTER catches
+	// pre-Phase-16 rooms.db files. The ignore-error pattern is the
+	// standard SQLite idiom for additive schema migrations.
+	s.roomsDB.Exec(`ALTER TABLE rooms ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0`)
+
+	return nil
 }
 
 // RoomsDBEmpty returns true if the rooms table has no rows.
@@ -100,48 +114,11 @@ func (s *Store) RoomMembersEmpty() bool {
 	return count == 0
 }
 
-// SeedRoomMembers populates room_members from a parsed users.toml map.
-// Resolves room display names to nanoid IDs via RoomDisplayNameToID.
-// Skips unknown rooms (room not in rooms.db). Uses first_epoch = 0
-// (fresh install, user has access from the beginning).
-// Must be called after SeedRooms. Skips if room_members already has data.
-func (s *Store) SeedRoomMembers(users map[string]config.User) (int, error) {
-	if !s.RoomMembersEmpty() {
-		return 0, nil
-	}
-
-	tx, err := s.roomsDB.Begin()
-	if err != nil {
-		return 0, fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback()
-
-	count := 0
-	for userID, user := range users {
-		if user.Retired {
-			continue
-		}
-		for _, roomName := range user.Rooms {
-			roomID := s.RoomDisplayNameToID(roomName)
-			if roomID == "" {
-				continue // room not in rooms.db, skip
-			}
-			_, err := tx.Exec(
-				`INSERT OR IGNORE INTO room_members (room_id, user_id, first_epoch) VALUES (?, ?, 0)`,
-				roomID, userID,
-			)
-			if err != nil {
-				return 0, fmt.Errorf("insert member %s in room %s: %w", userID, roomName, err)
-			}
-			count++
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit: %w", err)
-	}
-	return count, nil
-}
+// Phase 16 Gap 4: SeedRoomMembers was removed alongside SeedUsers
+// when users.toml support was deleted. Room memberships for new users
+// are now established via `sshkey-ctl add-to-room` after approval, or
+// via the default-rooms feature (see Phase 16 default rooms scope).
+// Existing deployments that have data in room_members are unaffected.
 
 // AddRoomMember adds a user to a room. Idempotent (INSERT OR IGNORE).
 func (s *Store) AddRoomMember(roomID, userID string, firstEpoch int64) error {
@@ -215,17 +192,81 @@ func (s *Store) IsRoomMemberByID(roomID, userID string) bool {
 	return count > 0
 }
 
+// SetRoomTopic updates a room's topic. Phase 16 Gap 1 — backs the
+// `sshkey-ctl update-topic` CLI command. Errors if the room doesn't
+// exist or is retired (retired rooms are read-only at the data
+// layer; updating their topic would be confusing and serves no
+// purpose).
+//
+// Does NOT enqueue the broadcast — callers (cmdUpdateTopic) must
+// also call RecordPendingRoomUpdate to notify the running server.
+func (s *Store) SetRoomTopic(roomID, topic string) error {
+	row, err := s.GetRoomByID(roomID)
+	if err != nil {
+		return err
+	}
+	if row == nil {
+		return fmt.Errorf("room %q does not exist", roomID)
+	}
+	if row.Retired {
+		return fmt.Errorf("room %q is retired — cannot update topic", roomID)
+	}
+	_, err = s.roomsDB.Exec(
+		`UPDATE rooms SET topic = ? WHERE id = ? AND retired = 0`,
+		topic, roomID,
+	)
+	return err
+}
+
+// SetRoomDisplayName updates a room's display name. Phase 16 Gap 1 —
+// backs the `sshkey-ctl rename-room` CLI command. Errors on:
+//   - missing room
+//   - retired room (read-only)
+//   - duplicate display name (case-insensitive uniqueness violation
+//     against the existing idx_rooms_display_name_lower index, which
+//     SQLite raises as a UNIQUE constraint error)
+//
+// Does NOT enqueue the broadcast — callers (cmdRenameRoom) must
+// also call RecordPendingRoomUpdate.
+func (s *Store) SetRoomDisplayName(roomID, newName string) error {
+	row, err := s.GetRoomByID(roomID)
+	if err != nil {
+		return err
+	}
+	if row == nil {
+		return fmt.Errorf("room %q does not exist", roomID)
+	}
+	if row.Retired {
+		return fmt.Errorf("room %q is retired — cannot rename", roomID)
+	}
+
+	// Pre-check uniqueness so the error message is clear; the
+	// schema's UNIQUE INDEX would also catch this at the UPDATE
+	// layer, but with a less helpful "constraint failed" message.
+	existing, _ := s.GetRoomByDisplayName(newName)
+	if existing != nil && existing.ID != roomID {
+		return fmt.Errorf("display name %q is already in use by room %s", newName, existing.ID)
+	}
+
+	_, err = s.roomsDB.Exec(
+		`UPDATE rooms SET display_name = ? WHERE id = ? AND retired = 0`,
+		newName, roomID,
+	)
+	return err
+}
+
 // GetRoomByID returns a room by its nanoid. Returns nil if not found.
 func (s *Store) GetRoomByID(id string) (*RoomRecord, error) {
 	var r RoomRecord
-	var retired int
+	var retired, isDefault int
 	err := s.roomsDB.QueryRow(
-		`SELECT id, display_name, topic, retired, retired_at, retired_by, created_at FROM rooms WHERE id = ?`,
-		id).Scan(&r.ID, &r.DisplayName, &r.Topic, &retired, &r.RetiredAt, &r.RetiredBy, &r.CreatedAt)
+		`SELECT id, display_name, topic, retired, retired_at, retired_by, created_at, is_default FROM rooms WHERE id = ?`,
+		id).Scan(&r.ID, &r.DisplayName, &r.Topic, &retired, &r.RetiredAt, &r.RetiredBy, &r.CreatedAt, &isDefault)
 	if err != nil {
 		return nil, nil // not found
 	}
 	r.Retired = retired != 0
+	r.IsDefault = isDefault != 0
 	return &r, nil
 }
 
@@ -233,14 +274,15 @@ func (s *Store) GetRoomByID(id string) (*RoomRecord, error) {
 // Returns nil if not found.
 func (s *Store) GetRoomByDisplayName(name string) (*RoomRecord, error) {
 	var r RoomRecord
-	var retired int
+	var retired, isDefault int
 	err := s.roomsDB.QueryRow(
-		`SELECT id, display_name, topic, retired, retired_at, retired_by, created_at FROM rooms WHERE LOWER(display_name) = LOWER(?)`,
-		name).Scan(&r.ID, &r.DisplayName, &r.Topic, &retired, &r.RetiredAt, &r.RetiredBy, &r.CreatedAt)
+		`SELECT id, display_name, topic, retired, retired_at, retired_by, created_at, is_default FROM rooms WHERE LOWER(display_name) = LOWER(?)`,
+		name).Scan(&r.ID, &r.DisplayName, &r.Topic, &retired, &r.RetiredAt, &r.RetiredBy, &r.CreatedAt, &isDefault)
 	if err != nil {
 		return nil, nil // not found
 	}
 	r.Retired = retired != 0
+	r.IsDefault = isDefault != 0
 	return &r, nil
 }
 
@@ -259,7 +301,7 @@ func (s *Store) RoomDisplayNameToID(name string) string {
 // GetAllRooms returns all rooms from rooms.db.
 func (s *Store) GetAllRooms() ([]RoomRecord, error) {
 	rows, err := s.roomsDB.Query(
-		`SELECT id, display_name, topic, retired, retired_at, retired_by, created_at FROM rooms ORDER BY created_at`)
+		`SELECT id, display_name, topic, retired, retired_at, retired_by, created_at, is_default FROM rooms ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -268,14 +310,71 @@ func (s *Store) GetAllRooms() ([]RoomRecord, error) {
 	var rooms []RoomRecord
 	for rows.Next() {
 		var r RoomRecord
-		var retired int
-		if err := rows.Scan(&r.ID, &r.DisplayName, &r.Topic, &retired, &r.RetiredAt, &r.RetiredBy, &r.CreatedAt); err != nil {
+		var retired, isDefault int
+		if err := rows.Scan(&r.ID, &r.DisplayName, &r.Topic, &retired, &r.RetiredAt, &r.RetiredBy, &r.CreatedAt, &isDefault); err != nil {
 			return nil, err
 		}
 		r.Retired = retired != 0
+		r.IsDefault = isDefault != 0
 		rooms = append(rooms, r)
 	}
 	return rooms, rows.Err()
+}
+
+// GetDefaultRooms returns all non-retired rooms flagged as default.
+// Phase 16 — used by cmdApprove and cmdBootstrapAdmin to auto-add
+// new users to flagged rooms, and by cmdListDefaultRooms.
+func (s *Store) GetDefaultRooms() ([]RoomRecord, error) {
+	rows, err := s.roomsDB.Query(
+		`SELECT id, display_name, topic, retired, retired_at, retired_by, created_at, is_default FROM rooms WHERE is_default = 1 AND retired = 0 ORDER BY display_name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rooms []RoomRecord
+	for rows.Next() {
+		var r RoomRecord
+		var retired, isDefault int
+		if err := rows.Scan(&r.ID, &r.DisplayName, &r.Topic, &retired, &r.RetiredAt, &r.RetiredBy, &r.CreatedAt, &isDefault); err != nil {
+			return nil, err
+		}
+		r.Retired = retired != 0
+		r.IsDefault = isDefault != 0
+		rooms = append(rooms, r)
+	}
+	return rooms, rows.Err()
+}
+
+// SetRoomIsDefault flips the is_default flag on a room. Phase 16 —
+// used by cmdSetDefaultRoom and cmdUnsetDefaultRoom. Errors on
+// retired rooms (a retired room cannot be flagged as default — that
+// would silently auto-join new users to a read-only room).
+//
+// Does NOT touch room_members. Backfill (adding existing users to a
+// newly-flagged room) and the absence of teardown (existing members
+// stay when a room is unflagged) are handled by the CLI command,
+// not the store helper.
+func (s *Store) SetRoomIsDefault(roomID string, isDefault bool) error {
+	row, err := s.GetRoomByID(roomID)
+	if err != nil {
+		return err
+	}
+	if row == nil {
+		return fmt.Errorf("room %q does not exist", roomID)
+	}
+	if row.Retired && isDefault {
+		return fmt.Errorf("room %q is retired — cannot flag as default", roomID)
+	}
+	val := 0
+	if isDefault {
+		val = 1
+	}
+	_, err = s.roomsDB.Exec(
+		`UPDATE rooms SET is_default = ? WHERE id = ?`,
+		val, roomID,
+	)
+	return err
 }
 
 // RoomRecord represents a room from rooms.db.
@@ -287,6 +386,7 @@ type RoomRecord struct {
 	RetiredAt   string
 	RetiredBy   string
 	CreatedAt   string
+	IsDefault   bool // Phase 16: rooms flagged via sshkey-ctl set-default-room
 }
 
 // IsRoomRetired returns true if the room exists and has retired = 1 set
@@ -354,12 +454,17 @@ func (s *Store) SetRoomRetired(roomID, retiredBy, _reason string) error {
 	for attempt := 0; attempt < setRoomRetiredMaxAttempts; attempt++ {
 		suffix := "_" + generateRetiredSuffix(retiredRoomSuffixLen)
 
+		// Phase 16: also clear is_default on retirement. A retired
+		// room should never appear in cmdApprove's auto-add loop or
+		// in cmdListDefaultRooms, even if an operator forgets to
+		// unset-default-room before retiring.
 		res, err := s.roomsDB.Exec(`
 			UPDATE rooms SET
 				retired = 1,
 				retired_at = ?,
 				retired_by = ?,
-				display_name = display_name || ?
+				display_name = display_name || ?,
+				is_default = 0
 			WHERE id = ? AND retired = 0`,
 			now, retiredBy, suffix, roomID,
 		)
@@ -395,7 +500,7 @@ func (s *Store) SetRoomRetired(roomID, retiredBy, _reason string) error {
 // needing a time-based cutoff.
 func (s *Store) GetRetiredRoomsForUser(userID string) ([]RoomRecord, error) {
 	rows, err := s.roomsDB.Query(`
-		SELECT r.id, r.display_name, r.topic, r.retired, r.retired_at, r.retired_by, r.created_at
+		SELECT r.id, r.display_name, r.topic, r.retired, r.retired_at, r.retired_by, r.created_at, r.is_default
 		FROM rooms r
 		JOIN room_members rm ON rm.room_id = r.id
 		WHERE rm.user_id = ? AND r.retired = 1
@@ -409,11 +514,12 @@ func (s *Store) GetRetiredRoomsForUser(userID string) ([]RoomRecord, error) {
 	var out []RoomRecord
 	for rows.Next() {
 		var r RoomRecord
-		var retired int
-		if err := rows.Scan(&r.ID, &r.DisplayName, &r.Topic, &retired, &r.RetiredAt, &r.RetiredBy, &r.CreatedAt); err != nil {
+		var retired, isDefault int
+		if err := rows.Scan(&r.ID, &r.DisplayName, &r.Topic, &retired, &r.RetiredAt, &r.RetiredBy, &r.CreatedAt, &isDefault); err != nil {
 			return nil, fmt.Errorf("scan retired room: %w", err)
 		}
 		r.Retired = retired != 0
+		r.IsDefault = isDefault != 0
 		out = append(out, r)
 	}
 	return out, rows.Err()

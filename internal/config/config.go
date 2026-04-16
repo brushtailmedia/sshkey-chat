@@ -1,4 +1,10 @@
-// Package config handles parsing of server.toml, users.toml, and rooms.toml.
+// Package config handles parsing of server.toml and rooms.toml.
+//
+// Phase 16 Gap 4 removed users.toml support entirely. Users are now
+// created exclusively via `sshkey-ctl approve` (for users who SSH in
+// with their own key) or `sshkey-ctl bootstrap-admin` (for admin
+// keypair generation on the server side). The TOML file no longer
+// exists in any role.
 package config
 
 import (
@@ -162,23 +168,6 @@ type FCMConfig struct {
 	ProjectID       string `toml:"project_id"`
 }
 
-// User represents a single user entry from users.toml.
-//
-// Retirement: When Retired is true, the account is permanently ended. The key
-// no longer authenticates, the user is removed from all rooms and DMs, and
-// other users see their messages in history marked [retired]. Retirement is
-// monotonic and irreversible at the protocol level — a retired account can
-// only be succeeded by a new account (same or different username) added by
-// an admin. See PROJECT.md "Account Retirement" for the full model.
-type User struct {
-	Key            string   `toml:"key"`
-	DisplayName    string   `toml:"display_name"`
-	Rooms          []string `toml:"rooms"`
-	Retired        bool     `toml:"retired,omitempty"`
-	RetiredAt      string   `toml:"retired_at,omitempty"`      // RFC3339 timestamp
-	RetiredReason  string   `toml:"retired_reason,omitempty"`  // self_compromise | admin | key_lost
-}
-
 // Room represents a single room entry from rooms.toml.
 type Room struct {
 	DisplayName string `toml:"display_name,omitempty"` // human-visible name (populated from TOML section key on seed)
@@ -251,15 +240,6 @@ func LoadServerConfig(path string) (ServerConfig, error) {
 	return cfg, nil
 }
 
-// LoadUsers reads and parses users.toml. Returns a map of userID -> User.
-func LoadUsers(path string) (map[string]User, error) {
-	var raw map[string]User
-	if _, err := toml.DecodeFile(path, &raw); err != nil {
-		return nil, fmt.Errorf("load users.toml: %w", err)
-	}
-	return raw, nil
-}
-
 // LoadRooms reads and parses rooms.toml. Returns a map of room name -> Room.
 func LoadRooms(path string) (map[string]Room, error) {
 	var raw map[string]Room
@@ -270,26 +250,29 @@ func LoadRooms(path string) (map[string]Room, error) {
 }
 
 // Config holds all loaded configuration. Safe for concurrent reads via RLock/RUnlock.
+//
+// Phase 16 Gap 4 removed the `Users map[string]User` field — users.toml
+// is no longer supported. Operators must use `sshkey-ctl bootstrap-admin`
+// to create the first admin on a fresh deployment, and the normal approve
+// flow for everyone else.
 type Config struct {
 	sync.RWMutex
 	Server ServerConfig
-	Users  map[string]User
 	Rooms  map[string]Room
 	Dir    string // config directory path
 }
 
 // Load reads all config files from the given directory.
+//
+// Phase 16 Gap 4: users.toml support has been removed entirely. Only
+// server.toml and rooms.toml are loaded here. The first admin on a
+// fresh server is created via `sshkey-ctl bootstrap-admin`, NOT by
+// editing a TOML file.
 func Load(dir string) (*Config, error) {
 	serverPath := filepath.Join(dir, "server.toml")
-	usersPath := filepath.Join(dir, "users.toml")
 	roomsPath := filepath.Join(dir, "rooms.toml")
 
 	server, err := LoadServerConfig(serverPath)
-	if err != nil {
-		return nil, err
-	}
-
-	users, err := LoadUsers(usersPath)
 	if err != nil {
 		return nil, err
 	}
@@ -299,40 +282,8 @@ func Load(dir string) (*Config, error) {
 		return nil, err
 	}
 
-	// Validate: all user room assignments reference existing rooms.
-	// Retired users' room lists are ignored (should be empty; stale entries
-	// are tolerated so admin mis-edits don't block server startup).
-	for username, user := range users {
-		if user.Retired {
-			continue
-		}
-		for _, room := range user.Rooms {
-			if _, ok := rooms[room]; !ok {
-				return nil, fmt.Errorf("user %q references unknown room %q", username, room)
-			}
-		}
-	}
-
-
-
-	// Validate: all user keys are Ed25519 and parseable
-	// (retired users are still required to have a valid key — it's preserved
-	// for historical attribution and auditability; it just doesn't authenticate)
-	for username, user := range users {
-		if len(user.Key) == 0 {
-			return nil, fmt.Errorf("user %q has no key", username)
-		}
-		if !isEd25519Key(user.Key) {
-			return nil, fmt.Errorf("user %q: only Ed25519 keys are supported (got %q)", username, keyType(user.Key))
-		}
-		if err := validateSSHKey(user.Key); err != nil {
-			return nil, fmt.Errorf("user %q: invalid SSH key: %w", username, err)
-		}
-	}
-
 	return &Config{
 		Server: server,
-		Users:  users,
 		Rooms:  rooms,
 		Dir:    dir,
 	}, nil

@@ -154,17 +154,34 @@ func (s *Server) handleRevokeDevice(c *Client, raw json.RawMessage) {
 		Success:  true,
 	})
 
-	// If the revoked device is connected, notify + disconnect it
+	// If the revoked device is connected, notify + disconnect it.
+	s.kickRevokedDeviceSession(c.UserID, msg.DeviceID, "self_revoke")
+}
+
+// kickRevokedDeviceSession finds any connected client whose UserID +
+// DeviceID match the revoked device, sends them a device_revoked
+// event so the TUI can show a notice before disconnect, and closes
+// the SSH channel to terminate the session.
+//
+// Idempotent: if no matching client is connected, this is a no-op.
+//
+// Phase 16 Gap 1 extracted this loop from handleRevokeDevice so the
+// CLI-side processor (processPendingDeviceRevocations) could reuse
+// it. Both the protocol-path handler (user-initiated self-revoke)
+// and the queue-path processor (admin-initiated revoke via
+// sshkey-ctl) should produce identical session-termination effects;
+// sharing the helper enforces that by construction.
+func (s *Server) kickRevokedDeviceSession(userID, deviceID, reason string) {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for _, client := range s.clients {
-		if client.UserID == c.UserID && client.DeviceID == msg.DeviceID {
+		if client.UserID == userID && client.DeviceID == deviceID {
 			client.Encoder.Encode(protocol.DeviceRevoked{
 				Type:     "device_revoked",
-				DeviceID: msg.DeviceID,
-				Reason:   "self_revoke",
+				DeviceID: deviceID,
+				Reason:   reason,
 			})
 			client.Channel.Close()
 		}
 	}
-	s.mu.RUnlock()
 }

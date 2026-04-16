@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
@@ -30,23 +31,13 @@ bind = "127.0.0.1"
 admins = ["alice"]
 `), 0644)
 
-	os.WriteFile(filepath.Join(configDir, "users.toml"), []byte(`
-[alice]
-key = "`+testKeyAlice+`"
-display_name = "Alice"
-rooms = ["general", "engineering"]
-
-[bob]
-key = "`+testKeyBob+`"
-display_name = "Bob"
-rooms = ["general"]
-
-[carol]
-key = "`+testKeyCarol+`"
-display_name = "Carol"
-rooms = ["general"]
-`), 0644)
-
+	// Phase 16 Gap 4: users.toml is no longer supported. The test
+	// fixture writes only rooms.toml (which is still seeded into
+	// rooms.db on first boot) and then directly inserts alice / bob /
+	// carol via the store API after server.New runs. Same end state
+	// as before the Gap 4 cleanup, just goes through the public
+	// InsertUser path that operators now use via cmdApprove and
+	// cmdBootstrapAdmin.
 	os.WriteFile(filepath.Join(configDir, "rooms.toml"), []byte(`
 [general]
 topic = "General"
@@ -70,7 +61,46 @@ topic = "Engineering"
 			s.store.Close()
 		}
 	})
+
+	// Seed alice / bob / carol directly via the store API. Strip the
+	// SSH key comment for parity with cmdApprove's normalization.
+	seedTestUser(t, s, "alice", testKeyAlice, "Alice", true, []string{"general", "engineering"})
+	seedTestUser(t, s, "bob", testKeyBob, "Bob", false, []string{"general"})
+	seedTestUser(t, s, "carol", testKeyCarol, "Carol", false, []string{"general"})
+
 	return s
+}
+
+// seedTestUser inserts a user row + sets admin flag + adds room
+// memberships via the public store API. Replaces the users.toml
+// seeding path that Phase 16 Gap 4 deleted.
+func seedTestUser(t *testing.T, s *Server, userID, sshKey, displayName string, admin bool, rooms []string) {
+	t.Helper()
+
+	// Strip the comment from the SSH key for storage parity.
+	parts := strings.Fields(sshKey)
+	keyForStorage := sshKey
+	if len(parts) >= 2 {
+		keyForStorage = parts[0] + " " + parts[1]
+	}
+
+	if err := s.store.InsertUser(userID, keyForStorage, displayName); err != nil {
+		t.Fatalf("seed user %s: %v", userID, err)
+	}
+	if admin {
+		if err := s.store.SetAdmin(userID, true); err != nil {
+			t.Fatalf("set admin %s: %v", userID, err)
+		}
+	}
+	for _, roomName := range rooms {
+		roomID := s.store.RoomDisplayNameToID(roomName)
+		if roomID == "" {
+			t.Fatalf("seed user %s: room %s not in rooms.db", userID, roomName)
+		}
+		if err := s.store.AddRoomMember(roomID, userID, 0); err != nil {
+			t.Fatalf("add %s to %s: %v", userID, roomName, err)
+		}
+	}
 }
 
 func TestRetireUser_SetsFields(t *testing.T) {

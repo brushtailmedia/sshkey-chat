@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/brushtailmedia/sshkey-chat/internal/config"
 )
 
 // UserRecord represents a user row from users.db.
@@ -44,41 +42,11 @@ func (s *Store) UsersDBEmpty() bool {
 	return count == 0
 }
 
-// SeedUsers populates users.db from a parsed users.toml map.
-// Section keys in the TOML are the nanoid user IDs.
-// Skips if users.db already has data.
-func (s *Store) SeedUsers(users map[string]config.User) (int, error) {
-	if !s.UsersDBEmpty() {
-		return 0, nil
-	}
-
-	count := 0
-	for userID, user := range users {
-		// Strip the comment from the SSH key (everything after the key type + data)
-		key := user.Key
-		parts := strings.Fields(key)
-		if len(parts) >= 2 {
-			key = parts[0] + " " + parts[1] // type + key data, no comment
-		}
-
-		admin := 0
-		retired := 0
-		if user.Retired {
-			retired = 1
-		}
-
-		_, err := s.usersDB.Exec(`
-			INSERT OR IGNORE INTO users (id, key, display_name, admin, retired, retired_at, retired_reason)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			userID, key, user.DisplayName, admin, retired, user.RetiredAt, user.RetiredReason,
-		)
-		if err != nil {
-			return count, fmt.Errorf("seed user %s: %w", userID, err)
-		}
-		count++
-	}
-	return count, nil
-}
+// Phase 16 Gap 4: SeedUsers (and the matching users.toml seeding path
+// in server.go) was removed. Users are now exclusively created via
+// `sshkey-ctl approve` (for users who SSH in with their own key) or
+// `sshkey-ctl bootstrap-admin` (for admin keypair generation on the
+// server side). The TOML file no longer exists in any role.
 
 // --- Reads ---
 
@@ -226,6 +194,59 @@ func (s *Store) SetUserRetired(userID, reason string) error {
 			display_name = display_name || ?
 		WHERE id = ? AND retired = 0`,
 		now, reason, suffix, userID,
+	)
+	return err
+}
+
+// SetUserUnretired reverses a retirement by flipping retired back to 0,
+// clearing retired_at / retired_reason, and stripping the suffix that
+// SetUserRetired added to the display name. Phase 16 Gap 1 escape hatch
+// for mistaken retirements.
+//
+// The display-name un-suffix is best-effort: SetUserRetired adds
+// "_<userID[4:8]>" to the end of the display name (when the userID is
+// longer than 8 characters). SetUserUnretired strips the same suffix
+// IF the current display name ends with it. If the display name
+// doesn't end with the expected suffix (e.g. the operator manually
+// edited it via a future rename-user verb), the name is left
+// unchanged — the operator can always rename explicitly afterwards.
+//
+// What this does NOT do: restore room/group/DM memberships. The
+// retirement cascade in handleRetirement removed the user from every
+// shared context, and SetUserUnretired only touches the users table.
+// Operators must manually re-add via `sshkey-ctl add-to-room` (or
+// in-group /add for group DMs). This matches the Phase 16 plan's
+// documented behavior — `unretire-user` is intentionally minimal.
+//
+// Returns an error if the user doesn't exist or is not currently
+// retired (the CLI side surfaces these as user-facing errors).
+func (s *Store) SetUserUnretired(userID string) error {
+	user := s.GetUserByID(userID)
+	if user == nil {
+		return fmt.Errorf("user %q does not exist", userID)
+	}
+	if !user.Retired {
+		return fmt.Errorf("user %q is not retired", userID)
+	}
+
+	// Compute the un-suffixed display name. The suffix logic is the
+	// inverse of SetUserRetired's: same userID slice, same separator.
+	newName := user.DisplayName
+	if len(userID) > 8 {
+		suffix := "_" + userID[4:8]
+		if strings.HasSuffix(newName, suffix) {
+			newName = strings.TrimSuffix(newName, suffix)
+		}
+	}
+
+	_, err := s.usersDB.Exec(`
+		UPDATE users SET
+			retired = 0,
+			retired_at = '',
+			retired_reason = '',
+			display_name = ?
+		WHERE id = ? AND retired = 1`,
+		newName, userID,
 	)
 	return err
 }

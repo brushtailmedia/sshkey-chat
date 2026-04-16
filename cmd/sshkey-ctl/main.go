@@ -55,20 +55,36 @@ func run() error {
 		return cmdPending(dataDir)
 	case "approve":
 		return cmdApprove(configDir, dataDir, cmdArgs)
+	case "bootstrap-admin":
+		return cmdBootstrapAdmin(dataDir, cmdArgs)
 	case "reject":
 		return cmdReject(dataDir, cmdArgs)
 	case "list-users":
 		return cmdListUsers(dataDir)
-	case "remove-user":
-		return cmdRemoveUser(dataDir, cmdArgs)
+	case "show-user":
+		return cmdShowUser(dataDir, cmdArgs)
+	case "show-room":
+		return cmdShowRoom(dataDir, cmdArgs)
+	case "list-admins":
+		return cmdListAdmins(dataDir)
+	case "search-users":
+		return cmdSearchUsers(dataDir, cmdArgs)
+	case "audit-log":
+		return cmdAuditLog(dataDir, cmdArgs)
+	case "audit-user":
+		return cmdAuditUser(dataDir, cmdArgs)
 	case "retire-user":
 		return cmdRetireUser(dataDir, cmdArgs)
+	case "unretire-user":
+		return cmdUnretireUser(dataDir, cmdArgs)
 	case "list-retired":
 		return cmdListRetired(dataDir)
 	case "promote":
 		return cmdPromote(dataDir, cmdArgs)
 	case "demote":
 		return cmdDemote(dataDir, cmdArgs)
+	case "rename-user":
+		return cmdRenameUser(dataDir, cmdArgs)
 	case "revoke-device":
 		return cmdRevokeDevice(dataDir, cmdArgs)
 	case "restore-device":
@@ -79,6 +95,16 @@ func run() error {
 		return cmdRemoveFromRoom(configDir, dataDir, cmdArgs)
 	case "add-room":
 		return cmdAddRoom(dataDir, cmdArgs)
+	case "update-topic":
+		return cmdUpdateTopic(dataDir, cmdArgs)
+	case "rename-room":
+		return cmdRenameRoom(dataDir, cmdArgs)
+	case "set-default-room":
+		return cmdSetDefaultRoom(dataDir, cmdArgs)
+	case "unset-default-room":
+		return cmdUnsetDefaultRoom(dataDir, cmdArgs)
+	case "list-default-rooms":
+		return cmdListDefaultRooms(dataDir)
 	case "list-rooms":
 		return cmdListRooms(dataDir)
 	case "retire-room":
@@ -107,12 +133,26 @@ Commands:
   pending                                 View pending key requests
   approve --key "ssh-ed25519 AAAA... name" --rooms ROOMS  Approve (display name from key comment)
   approve --key "ssh-ed25519 AAAA..." --name NAME --rooms ROOMS  Approve (override display name)
+  bootstrap-admin DISPLAY_NAME            Generate admin keypair (server-side keygen, encrypted, prompts for passphrase)
   reject --fingerprint FP                 Reject/clear a pending key
   list-users                              List all users
-  remove-user NAME                        Remove a user
+  show-user <id|display_name>             Full user details (key, rooms, devices)
+  show-room <display_name|id>             Full room details (members, topic, status)
+  list-admins                             Quick view of all admin users
+  search-users --name <query>             Fuzzy search by display name
+  search-users --fingerprint <fp>         Find user by SSH key fingerprint
+  audit-log [--since DURATION] [--limit N]  Read recent audit log entries (newest first)
+  audit-user USER [--since DURATION] [--limit N]  Audit entries for a specific user
   retire-user NAME [--reason REASON]      Retire an account (permanent, for lost keys or compromise)
+  unretire-user NAME                      Reverse a mistaken retirement (does NOT restore memberships)
+  rename-user NAME NEW_DISPLAY_NAME       Force a display name change (moderation tool)
   list-retired                            List retired accounts
   add-room --name NAME --topic TOPIC       Create a room
+  update-topic --room NAME --topic TEXT   Change a room's topic (live broadcast)
+  rename-room --room NAME --new-name NEW  Rename a room (live broadcast)
+  set-default-room NAME                   Flag a room as default (auto-join + backfill existing users)
+  unset-default-room NAME                 Clear default flag (existing members stay)
+  list-default-rooms                      Show flagged default rooms
   list-rooms                              List all rooms
   add-to-room --user USER --room ROOM     Add user to a room
   remove-from-room --user USER --room ROOM  Remove user from a room
@@ -256,13 +296,31 @@ func cmdApprove(configDir, dataDir string, args []string) error {
 		}
 	}
 
+	// Phase 16 default rooms: auto-add the new user to every flagged
+	// room. AddRoomMember is idempotent so this is a no-op for any
+	// rooms the operator already passed via --rooms (rare but
+	// possible). The number added is reported in the success output
+	// so operators can verify the auto-join fired.
+	defaultRoomsAdded := addUserToDefaultRooms(st, username)
+
 	fmt.Printf("Approved %s\n", displayName)
 	fmt.Printf("  Username:    %s\n", username)
 	fmt.Printf("  Fingerprint: %s\n", ssh.FingerprintSHA256(parsed))
 	if rooms != "" {
 		fmt.Printf("  Rooms:       %s\n", rooms)
 	}
-	fmt.Println("\nThe server will detect the change and apply it automatically.")
+	if defaultRoomsAdded > 0 {
+		fmt.Printf("  Default rooms auto-joined: %d\n", defaultRoomsAdded)
+	}
+	// The printed message below used to say "the server will detect the
+	// change and apply it automatically" — a Phase 9 artifact from when
+	// users lived in users.toml and the file watcher picked up changes
+	// on reload. After the users.db migration (Phase 9), the file
+	// watcher no longer covers user data. But for approve this is fine:
+	// a newly-approved user has zero active sessions, so there's nothing
+	// to notify. Next time they SSH in, the server reads their key from
+	// users.db and authenticates them. No broadcast needed.
+	fmt.Println("\nThe user can now connect.")
 	return nil
 }
 
@@ -338,36 +396,35 @@ func cmdListUsers(dataDir string) error {
 	return nil
 }
 
-func cmdRemoveUser(dataDir string, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: remove-user NAME")
-	}
-	name := args[0]
-
-	st, err := store.Open(dataDir)
-	if err != nil {
-		return fmt.Errorf("open store: %w", err)
-	}
-	defer st.Close()
-
-	u := st.GetUserByID(name)
-	if u == nil {
-		return fmt.Errorf("user %q not found", name)
-	}
-
-	if u.Retired {
-		fmt.Fprintf(os.Stderr, "Warning: %q is a retired account. Removing it will lose the retirement record.\n", name)
-		fmt.Fprintf(os.Stderr, "Use retire-user instead if you want to preserve the record.\n")
-	}
-
-	if err := st.DeleteUser(name); err != nil {
-		return fmt.Errorf("delete user: %w", err)
-	}
-	st.RemoveAllRoomMembers(name)
-
-	fmt.Printf("Removed %s (%s).\n", u.DisplayName, name)
-	return nil
-}
+// Phase 16 Gap 3: cmdRemoveUser was deleted. It was a pre-Phase-9
+// holdover from when users lived in users.toml and the only way to
+// "get rid of" an account was to delete the TOML entry. Phase 12
+// added retirement (tombstone + cascade) which is the correct
+// invariant-preserving path, and Phase 14 locked in the "user rows
+// are permanent" invariant that the groups admin model depends on
+// (every group_members / room_members / message authorship /
+// reaction / delivery receipt row FKs back to users.id). Hard-deleting
+// a user row breaks every one of those invariants.
+//
+// Use cases that previously called for remove-user, and what to use
+// instead:
+//
+//   - "Undo a mistaken approve" → use `reject` (pre-approval) or
+//     `retire-user --reason admin_mistake` (post-approval). Both
+//     safer, both preserve audit trail.
+//   - "Stop a retired user showing up" → retirement cascade already
+//     removes them from all member lists. Historical messages still
+//     show their `[retired]` marker (correct behavior).
+//   - "GDPR right-to-erasure" → would need a dedicated `purge-user`
+//     with full cascade delete of messages/reactions/receipts/DMs.
+//     Not Phase 16 scope; separate design discussion if/when real
+//     compliance is required.
+//   - "Clean up test accounts during development" → drop the data
+//     dir entirely.
+//
+// The store.DeleteUser helper is still kept for bootstrap-admin's
+// cleanup-on-error path (insert user → SetAdmin fails → delete the
+// orphan row). It's not exposed via the CLI anymore.
 
 func cmdRetireUser(dataDir string, args []string) error {
 	if len(args) == 0 {
@@ -396,13 +453,107 @@ func cmdRetireUser(dataDir string, args []string) error {
 		return fmt.Errorf("user %q is already retired (at %s, reason: %s)", name, u.RetiredAt, u.RetiredReason)
 	}
 
+	// Phase 16 Gap 1: flip the retired flag immediately so retirement
+	// takes effect at the data layer regardless of whether the
+	// running server processes the queue row, then enqueue a
+	// pending_user_retirements row so the running server can fire
+	// the downstream cascade (per-room leave events with reason
+	// "user_retired", group exits with last-admin succession,
+	// per-user DM cutoffs, user_retired broadcast to connected
+	// clients, and active session termination for the retired user).
+	//
+	// If the server is down when this runs, the retirement is still
+	// effective in users.db. The queue row sits there until the
+	// server next starts; on startup it runs one immediate consume
+	// pass before entering the ticker loop, so the cascade happens
+	// as soon as the server comes back online.
 	if err := st.SetUserRetired(name, reason); err != nil {
 		return fmt.Errorf("retire user: %w", err)
 	}
+	retiredBy := fmt.Sprintf("os:%d", os.Getuid())
+	if err := st.RecordPendingUserRetirement(name, retiredBy, reason); err != nil {
+		// The flag flip already succeeded — log the queue failure
+		// loudly but don't roll back the retirement. The operator
+		// can manually re-enqueue if needed, or the user just gets
+		// the cascade on the next server restart (which is the
+		// fallback path the queue exists to optimize, not the
+		// primary path).
+		return fmt.Errorf("retire-user: flag set but queue enqueue failed (retirement is still effective in users.db, but live broadcasts to connected sessions will be skipped until the server next restarts): %w", err)
+	}
 
 	fmt.Printf("User %q retired (reason: %s).\n", name, reason)
-	fmt.Println("The running server (if any) will detect the change via config watch")
-	fmt.Println("and fire leave events + epoch rotations automatically.")
+	fmt.Println("Retirement is queued — the running server will fire leave events,")
+	fmt.Println("group exits, DM cutoffs, and active session termination shortly.")
+	fmt.Println("(If the server is offline, the cascade runs on its next startup.)")
+	return nil
+}
+
+// cmdUnretireUser is the Phase 16 Gap 1 escape hatch for mistaken
+// retirements. It reverses retire-user by flipping users.retired
+// back to 0, clearing retired_at / retired_reason, stripping the
+// retirement display-name suffix, and broadcasting user_unretired
+// so connected clients flush the [retired] marker.
+//
+// It does NOT restore room/group/DM memberships. The retirement
+// cascade removed the user from every shared context, and unretire
+// is intentionally minimal — operators must manually re-add via
+// add-to-room, in-group /add, etc. See the Phase 16 plan section
+// "What unretire-user does NOT do" for the full design rationale.
+func cmdUnretireUser(dataDir string, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: unretire-user USER_ID\n\n" +
+			"Reverses a mistaken retirement. Flips the retired flag\n" +
+			"back to 0 and broadcasts user_unretired to connected\n" +
+			"clients so they flush the [retired] marker. Does NOT\n" +
+			"restore room/group/DM memberships — those were cleared\n" +
+			"on retirement and must be re-established manually via\n" +
+			"add-to-room or in-group /add.")
+	}
+	name := args[0]
+
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	u := st.GetUserByID(name)
+	if u == nil {
+		return fmt.Errorf("user %q not found", name)
+	}
+	if !u.Retired {
+		return fmt.Errorf("user %q is not currently retired — nothing to unretire", name)
+	}
+
+	// Phase 16 Gap 1: flip the retired flag immediately so the
+	// unretirement takes effect at the data layer regardless of
+	// whether the running server processes the queue row, then
+	// enqueue a row so the running server can broadcast
+	// user_unretired to connected clients.
+	if err := st.SetUserUnretired(name); err != nil {
+		return fmt.Errorf("unretire user: %w", err)
+	}
+	unretiredBy := fmt.Sprintf("os:%d", os.Getuid())
+	if err := st.RecordPendingUserUnretirement(name, unretiredBy); err != nil {
+		return fmt.Errorf("unretire-user: flag cleared but queue enqueue failed (unretirement is still effective in users.db, but live broadcasts to connected sessions will be skipped until the server next restarts): %w", err)
+	}
+
+	// Re-fetch the user to get the post-unretirement display name
+	// (with the retirement suffix stripped) so the operator sees the
+	// restored name in the success output.
+	uAfter := st.GetUserByID(name)
+	displayName := name
+	if uAfter != nil {
+		displayName = uAfter.DisplayName
+	}
+
+	fmt.Printf("User %q unretired (display name: %q).\n", name, displayName)
+	fmt.Println("Connected clients will flush the [retired] marker shortly.")
+	fmt.Println()
+	fmt.Println("Note: room/group/DM memberships were NOT restored. To restore them:")
+	fmt.Printf("  - Re-add to rooms: sshkey-ctl add-to-room --user %s --room <name>\n", name)
+	fmt.Println("  - Re-add to group DMs: ask a remaining group admin to /add the user")
+	fmt.Println("  - 1:1 DMs: resume automatically when the user reconnects (subject to per-user left_at cutoff)")
 	return nil
 }
 
@@ -445,7 +596,20 @@ func cmdPromote(dataDir string, args []string) error {
 	if err := st.SetAdmin(args[0], true); err != nil {
 		return fmt.Errorf("promote: %w", err)
 	}
+
+	// Phase 16 Gap 1: enqueue a state change so the running server
+	// broadcasts a fresh profile event to all connected clients.
+	// Critical for the support story — users find admins via the
+	// admin badge in the members list, and that badge needs to
+	// propagate live so newly-promoted admins appear immediately
+	// rather than on next reconnect.
+	changedBy := fmt.Sprintf("os:%d", os.Getuid())
+	if err := st.RecordPendingAdminStateChange(args[0], store.AdminStateChangePromote, changedBy); err != nil {
+		return fmt.Errorf("promote: flag set but queue enqueue failed (admin status is still effective in users.db, but live broadcasts to connected sessions will be skipped until the server next restarts): %w", err)
+	}
+
 	fmt.Printf("Promoted %s (%s) to admin.\n", u.DisplayName, args[0])
+	fmt.Println("Connected clients will see the admin badge on their next render.")
 	return nil
 }
 
@@ -469,7 +633,100 @@ func cmdDemote(dataDir string, args []string) error {
 	if err := st.SetAdmin(args[0], false); err != nil {
 		return fmt.Errorf("demote: %w", err)
 	}
+
+	// Phase 16 Gap 1: enqueue a state change. Same broadcast
+	// mechanism as promote — connected clients flush the admin
+	// badge from the demoted user immediately.
+	changedBy := fmt.Sprintf("os:%d", os.Getuid())
+	if err := st.RecordPendingAdminStateChange(args[0], store.AdminStateChangeDemote, changedBy); err != nil {
+		return fmt.Errorf("demote: flag set but queue enqueue failed (admin status is still effective in users.db, but live broadcasts to connected sessions will be skipped until the server next restarts): %w", err)
+	}
+
 	fmt.Printf("Demoted %s (%s) from admin.\n", u.DisplayName, args[0])
+	fmt.Println("Connected clients will flush the admin badge on their next render.")
+	return nil
+}
+
+// cmdRenameUser is a Phase 16 Gap 1 moderation tool: it forces a
+// display name change server-side, bypassing the client-initiated
+// /settings flow. Use cases:
+//   - Impersonation (user chose "admin" or a name confusingly
+//     similar to an existing user)
+//   - Offensive names (ToS violations requiring immediate
+//     intervention)
+//   - Squatting (user holding a name they're not actively using)
+//
+// The new display name is validated for format and uniqueness, then
+// written via SetUserDisplayName. A pending_admin_state_changes row
+// is enqueued so connected clients receive a fresh Profile event
+// and update their sidebar labels, info panels, message headers,
+// members overlay, and mention resolution immediately.
+//
+// Note: the operator-imposed name is NOT locked — if the user
+// later runs /settings to change their display name again, it
+// overwrites the admin-imposed name. Operators needing a hard lock
+// should retire-user instead.
+func cmdRenameUser(dataDir string, args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: rename-user USER_ID NEW_DISPLAY_NAME\n\n" +
+			"Forces a display name change server-side (moderation tool).\n" +
+			"The new name is validated for format and uniqueness.\n" +
+			"Connected clients receive a live profile update.")
+	}
+	userID := args[0]
+	newName := args[1]
+
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	u := st.GetUserByID(userID)
+	if u == nil {
+		return fmt.Errorf("user %q not found", userID)
+	}
+
+	// Validate display name format (length, printable chars, etc.).
+	validated, err := config.ValidateDisplayName(newName)
+	if err != nil {
+		return fmt.Errorf("invalid display name %q: %w", newName, err)
+	}
+
+	// No-op if the new name matches the current name. We treat this
+	// as an error (not a silent no-op) so the operator notices they
+	// fat-fingered the same name.
+	if strings.EqualFold(validated, u.DisplayName) {
+		return fmt.Errorf("user %q already has display name %q — no change to make", userID, validated)
+	}
+
+	// Uniqueness check across all users (active and retired). Same
+	// logic as cmdApprove and cmdBootstrapAdmin.
+	allUsers := st.GetAllUsersIncludingRetired()
+	for _, other := range allUsers {
+		if other.ID == userID {
+			continue
+		}
+		if strings.EqualFold(other.DisplayName, validated) {
+			return fmt.Errorf("display name %q is already in use by %s", validated, other.ID)
+		}
+		if strings.EqualFold(other.ID, validated) {
+			return fmt.Errorf("display name %q conflicts with an existing user ID", validated)
+		}
+	}
+
+	if err := st.SetUserDisplayName(userID, validated); err != nil {
+		return fmt.Errorf("rename: %w", err)
+	}
+
+	// Enqueue the broadcast.
+	changedBy := fmt.Sprintf("os:%d", os.Getuid())
+	if err := st.RecordPendingAdminStateChange(userID, store.AdminStateChangeRename, changedBy); err != nil {
+		return fmt.Errorf("rename-user: name updated but queue enqueue failed (rename is still effective in users.db, but live broadcasts to connected sessions will be skipped until the server next restarts): %w", err)
+	}
+
+	fmt.Printf("Renamed %s: %q → %q.\n", userID, u.DisplayName, validated)
+	fmt.Println("Connected clients will see the new display name on their next render.")
 	return nil
 }
 
@@ -556,11 +813,29 @@ func cmdRemoveFromRoom(configDir, dataDir string, args []string) error {
 		return fmt.Errorf("user %q is not in room %q", user, room)
 	}
 
-	if err := st.RemoveRoomMember(roomRecord.ID, user); err != nil {
-		return fmt.Errorf("remove member: %w", err)
+	// Phase 16 Gap 1: enqueue a row in user_left_rooms instead of
+	// removing the member directly. The server's
+	// runRemoveFromRoomProcessor drains the queue and calls
+	// performRoomLeave, which:
+	//   - removes the user from room_members
+	//   - broadcasts room_event{leave, reason='removed'} to remaining
+	//     members so client UIs render "alice was removed by an admin"
+	//   - echoes room_left to the kicked user's connected sessions
+	//     so their TUI flips the room to read-only immediately
+	//   - marks the room for epoch rotation (forward secrecy: the
+	//     kicked user can't decrypt messages sent after this point)
+	//
+	// The user_left_rooms row is also the foundation for Phase 20's
+	// server-authoritative leave catchup. Phase 16 only writes
+	// reason='removed' here; Phase 20 will extend the writers to
+	// cover self-leave and retirement-cascade paths too.
+	initiatedBy := fmt.Sprintf("os:%d", os.Getuid())
+	if _, err := st.RecordUserLeftRoom(user, roomRecord.ID, "removed", initiatedBy); err != nil {
+		return fmt.Errorf("enqueue remove-from-room: %w", err)
 	}
 
-	fmt.Printf("Removed %s (%s) from room %q.\n", u.DisplayName, user, room)
+	fmt.Printf("Removal of %s (%s) from room %q queued.\n", u.DisplayName, user, room)
+	fmt.Println("The server will run the leave cascade and broadcast within a few seconds.")
 	return nil
 }
 
@@ -602,6 +877,135 @@ func cmdAddRoom(dataDir string, args []string) error {
 	return nil
 }
 
+// cmdUpdateTopic is the Phase 16 Gap 1 implementation of room topic
+// updates. Closes Phase 18's deferred write path: Phase 18 shipped
+// the display-only side (rooms render their topic in the messages
+// header and info panel), and this command finally lets operators
+// CHANGE topics post-creation with live propagation to connected
+// members.
+//
+// The room is identified by display name (the same way `add-room`
+// and `retire-room` accept it). Errors on missing or retired rooms.
+func cmdUpdateTopic(dataDir string, args []string) error {
+	var roomName, topic string
+	topicSet := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--room":
+			if i+1 < len(args) {
+				roomName = args[i+1]
+				i++
+			}
+		case "--topic":
+			if i+1 < len(args) {
+				topic = args[i+1]
+				topicSet = true
+				i++
+			}
+		}
+	}
+	if roomName == "" || !topicSet {
+		return fmt.Errorf("usage: update-topic --room NAME --topic TEXT")
+	}
+
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	room, _ := st.GetRoomByDisplayName(roomName)
+	if room == nil {
+		return fmt.Errorf("room %q not found", roomName)
+	}
+	if room.Retired {
+		return fmt.Errorf("room %q is retired — cannot update topic", roomName)
+	}
+	if room.Topic == topic {
+		return fmt.Errorf("room %q already has topic %q — no change to make", roomName, topic)
+	}
+
+	if err := st.SetRoomTopic(room.ID, topic); err != nil {
+		return fmt.Errorf("update topic: %w", err)
+	}
+
+	// Phase 16 Gap 1: enqueue a room update so connected members
+	// see the new topic on their next render.
+	changedBy := fmt.Sprintf("os:%d", os.Getuid())
+	if err := st.RecordPendingRoomUpdate(room.ID, store.RoomUpdateActionUpdateTopic, changedBy); err != nil {
+		return fmt.Errorf("update-topic: topic written but queue enqueue failed (topic is still effective in rooms.db, but live broadcasts to connected members will be skipped until the server next restarts): %w", err)
+	}
+
+	fmt.Printf("Updated topic for room %q.\n", roomName)
+	fmt.Println("Connected members will see the new topic on their next render.")
+	return nil
+}
+
+// cmdRenameRoom is the Phase 16 Gap 1 implementation of room renaming.
+// The room is identified by its CURRENT display name, and the new
+// name must pass the case-insensitive uniqueness check enforced by
+// the existing idx_rooms_display_name_lower index.
+//
+// Errors on missing room, retired room, duplicate new name, or
+// no-change rename (same name as current).
+func cmdRenameRoom(dataDir string, args []string) error {
+	var roomName, newName string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--room":
+			if i+1 < len(args) {
+				roomName = args[i+1]
+				i++
+			}
+		case "--new-name":
+			if i+1 < len(args) {
+				newName = args[i+1]
+				i++
+			}
+		}
+	}
+	if roomName == "" || newName == "" {
+		return fmt.Errorf("usage: rename-room --room CURRENT_NAME --new-name NEW_NAME")
+	}
+
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	room, _ := st.GetRoomByDisplayName(roomName)
+	if room == nil {
+		return fmt.Errorf("room %q not found", roomName)
+	}
+	if room.Retired {
+		return fmt.Errorf("room %q is retired — cannot rename", roomName)
+	}
+	if strings.EqualFold(room.DisplayName, newName) {
+		return fmt.Errorf("room %q already has display name %q — no change to make", roomName, newName)
+	}
+
+	// Uniqueness check (also enforced at the schema layer, but
+	// pre-checking gives a clearer error message).
+	existing, _ := st.GetRoomByDisplayName(newName)
+	if existing != nil && existing.ID != room.ID {
+		return fmt.Errorf("display name %q is already in use by room %s", newName, existing.ID)
+	}
+
+	if err := st.SetRoomDisplayName(room.ID, newName); err != nil {
+		return fmt.Errorf("rename room: %w", err)
+	}
+
+	changedBy := fmt.Sprintf("os:%d", os.Getuid())
+	if err := st.RecordPendingRoomUpdate(room.ID, store.RoomUpdateActionRenameRoom, changedBy); err != nil {
+		return fmt.Errorf("rename-room: name written but queue enqueue failed (rename is still effective in rooms.db, but live broadcasts to connected members will be skipped until the server next restarts): %w", err)
+	}
+
+	fmt.Printf("Renamed room %q → %q.\n", roomName, newName)
+	fmt.Println("Connected members will see the new name on their next render.")
+	return nil
+}
+
 func cmdListRooms(dataDir string) error {
 	st, err := store.Open(dataDir)
 	if err != nil {
@@ -621,9 +1025,17 @@ func cmdListRooms(dataDir string) error {
 
 	for _, r := range rooms {
 		members := st.GetRoomMemberIDsByRoomID(r.ID)
+		// Phase 16 default rooms: append a [default] marker for
+		// flagged rooms. Operators see at a glance which rooms
+		// every new user auto-joins. Retired rooms always have
+		// is_default=0 (cleared in SetRoomRetired) so the two
+		// markers never appear together.
 		status := ""
+		if r.IsDefault {
+			status = " [default]"
+		}
 		if r.Retired {
-			status = " (retired)"
+			status += " (retired)"
 		}
 		fmt.Printf("%-30s members=%d  topic=%q%s\n", r.DisplayName, len(members), r.Topic, status)
 	}
@@ -830,20 +1242,25 @@ func cmdListGroups(dataDir string) error {
 }
 
 func cmdRevokeDevice(dataDir string, args []string) error {
-	var user, device string
+	var user, device, reason string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--user":
 			if i+1 < len(args) { user = args[i+1]; i++ }
 		case "--device":
 			if i+1 < len(args) { device = args[i+1]; i++ }
+		case "--reason":
+			if i+1 < len(args) { reason = args[i+1]; i++ }
 		}
 	}
 	if user == "" || device == "" {
-		return fmt.Errorf("usage: revoke-device --user USER --device DEVICE")
+		return fmt.Errorf("usage: revoke-device --user USER --device DEVICE [--reason REASON]")
 	}
 	if !strings.HasPrefix(device, "dev_") {
 		return fmt.Errorf("invalid device ID %q (expected dev_ prefix)", device)
+	}
+	if reason == "" {
+		reason = "admin_action"
 	}
 
 	st, err := store.Open(dataDir)
@@ -852,10 +1269,24 @@ func cmdRevokeDevice(dataDir string, args []string) error {
 	}
 	defer st.Close()
 
-	if err := st.RevokeDevice(user, device, "admin_action"); err != nil {
+	if err := st.RevokeDevice(user, device, reason); err != nil {
 		return fmt.Errorf("revoke device: %w", err)
 	}
+
+	// Phase 16 Gap 1: enqueue a row so the running server can
+	// terminate any active SSH session for this device. The
+	// data-layer revocation above is sufficient to block FUTURE
+	// authentication attempts (the revoked_devices entry will
+	// reject the next connect), but it doesn't kick the device
+	// off its currently-open channel — that's what the queue
+	// processor does.
+	revokedBy := fmt.Sprintf("os:%d", os.Getuid())
+	if err := st.RecordPendingDeviceRevocation(user, device, reason, revokedBy); err != nil {
+		return fmt.Errorf("revoke-device: data-layer revocation succeeded but queue enqueue failed (the device is blocked from future logins, but if it has an active session right now that session will only close on its own — restart the server to force-kick it): %w", err)
+	}
+
 	fmt.Printf("Device %s for user %s revoked.\n", device, user)
+	fmt.Println("If the device has an active session, it will be kicked within a few seconds.")
 	return nil
 }
 

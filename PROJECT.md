@@ -1177,8 +1177,8 @@ sshkey-ctl purge --older-than 5y
 # List users
 sshkey-ctl list-users
 
-# Remove a user
-sshkey-ctl remove-user carol
+# Retire a user (permanent, preserves audit trail and historical message attribution)
+sshkey-ctl retire-user carol --reason admin_mistake
 
 # Revoke a specific device (stolen laptop, etc.)
 sshkey-ctl revoke-device --user alice --device dev_macbook_abc
@@ -1233,7 +1233,7 @@ Clients receiving `server_shutdown` should:
 User and room data lives in SQLite databases (`users.db`, `rooms.db`). Changes via `sshkey-ctl` CLI take effect immediately — the server reads from DB on demand, no reload needed. Server watches `server.toml` via fsnotify for hot-reload of runtime settings.
 
 **Immediate (via `sshkey-ctl`, no restart):**
-- User management — `approve`, `retire-user`, `remove-user`, `promote`, `demote`
+- User management — `approve`, `bootstrap-admin`, `retire-user`, `promote`, `demote`
 - Room management — `add-room`, `add-to-room`, `remove-from-room`
 
 **Hot-reloadable (server.toml, no restart):**

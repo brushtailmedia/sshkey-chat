@@ -39,9 +39,27 @@ func genTestKey(t *testing.T, comment string) (string, string) {
 	return authKey, ssh.FingerprintSHA256(sshPub)
 }
 
-// setupDataDir creates a temp data dir with rooms.db and users.db seeded.
-// Returns the data dir path. Call after setupConfig if you need both.
-func setupDataDir(t *testing.T, rooms map[string]config.Room, users ...map[string]config.User) string {
+// testUser is a local stand-in for the deleted config.User struct.
+// Phase 16 Gap 4 removed users.toml support, so the tests can no
+// longer load users from a TOML file. Instead they use this struct
+// to describe a user, and setupDataDir seeds users.db / rooms.db
+// directly via the public store API (InsertUser, SetUserRetired,
+// AddRoomMember). Same field shape as the old config.User so the
+// existing test bodies barely change.
+type testUser struct {
+	Key           string
+	DisplayName   string
+	Rooms         []string
+	Retired       bool
+	RetiredAt     string
+	RetiredReason string
+}
+
+// setupDataDir creates a temp data dir with rooms.db and users.db seeded
+// directly via the store API. Phase 16 Gap 4 removed the SeedUsers /
+// SeedRoomMembers helpers, so this helper now uses InsertUser +
+// SetUserRetired + AddRoomMember instead.
+func setupDataDir(t *testing.T, rooms map[string]config.Room, users ...map[string]testUser) string {
 	t.Helper()
 	dir := t.TempDir()
 	st, err := store.Open(dir)
@@ -52,47 +70,49 @@ func setupDataDir(t *testing.T, rooms map[string]config.Room, users ...map[strin
 		st.SeedRooms(rooms)
 	}
 	if len(users) > 0 && users[0] != nil {
-		st.SeedUsers(users[0])
-		st.SeedRoomMembers(users[0])
+		for userID, u := range users[0] {
+			// Insert the user row. Strip the SSH key comment for parity
+			// with how cmdApprove normalizes keys.
+			parts := strings.Fields(u.Key)
+			keyForStorage := u.Key
+			if len(parts) >= 2 {
+				keyForStorage = parts[0] + " " + parts[1]
+			}
+			if err := st.InsertUser(userID, keyForStorage, u.DisplayName); err != nil {
+				t.Fatalf("seed user %s: %v", userID, err)
+			}
+			if u.Retired {
+				if err := st.SetUserRetired(userID, u.RetiredReason); err != nil {
+					t.Fatalf("retire user %s: %v", userID, err)
+				}
+			}
+			// Room memberships — skip retired users for parity with
+			// the old SeedRoomMembers behavior.
+			if !u.Retired {
+				for _, roomName := range u.Rooms {
+					roomID := st.RoomDisplayNameToID(roomName)
+					if roomID == "" {
+						continue
+					}
+					if err := st.AddRoomMember(roomID, userID, 0); err != nil {
+						t.Fatalf("add %s to %s: %v", userID, roomName, err)
+					}
+				}
+			}
+		}
 	}
 	st.Close()
 	return dir
 }
 
-// setupConfig creates a temp config dir with users.toml and rooms.toml.
-func setupConfig(t *testing.T, users map[string]config.User, rooms map[string]config.Room) string {
+// setupConfig creates a temp config dir with rooms.toml only.
+// Phase 16 Gap 4: users.toml was removed, so the users argument is
+// kept for backwards source compatibility with the test bodies but
+// is no longer written anywhere — users go into the data dir via
+// setupDataDir instead.
+func setupConfig(t *testing.T, _ map[string]testUser, rooms map[string]config.Room) string {
 	t.Helper()
 	dir := t.TempDir()
-
-	if users != nil {
-		var buf strings.Builder
-		for name, u := range users {
-			buf.WriteString("[" + name + "]\n")
-			buf.WriteString("key = \"" + u.Key + "\"\n")
-			buf.WriteString("display_name = \"" + u.DisplayName + "\"\n")
-			if len(u.Rooms) > 0 {
-				buf.WriteString("rooms = [")
-				for i, r := range u.Rooms {
-					if i > 0 {
-						buf.WriteString(", ")
-					}
-					buf.WriteString("\"" + r + "\"")
-				}
-				buf.WriteString("]\n")
-			}
-			if u.Retired {
-				buf.WriteString("retired = true\n")
-			}
-			if u.RetiredAt != "" {
-				buf.WriteString("retired_at = \"" + u.RetiredAt + "\"\n")
-			}
-			if u.RetiredReason != "" {
-				buf.WriteString("retired_reason = \"" + u.RetiredReason + "\"\n")
-			}
-			buf.WriteString("\n")
-		}
-		os.WriteFile(filepath.Join(dir, "users.toml"), []byte(buf.String()), 0644)
-	}
 
 	if rooms != nil {
 		f, err := os.Create(filepath.Join(dir, "rooms.toml"))
@@ -119,7 +139,7 @@ func TestApprove_DuplicateKeyRejected(t *testing.T) {
 	parts := strings.SplitN(key, " ", 3)
 	keyLine := parts[0] + " " + parts[1]
 
-	users := map[string]config.User{
+	users := map[string]testUser{
 		"usr_existing": {Key: keyLine, DisplayName: "Alice", Rooms: []string{"general"}},
 	}
 	configDir := setupConfig(t, users, nil)
@@ -139,7 +159,7 @@ func TestApprove_DuplicateDisplayNameRejected(t *testing.T) {
 	parts := strings.SplitN(existKey, " ", 3)
 	keyLine := parts[0] + " " + parts[1]
 
-	users := map[string]config.User{
+	users := map[string]testUser{
 		"usr_existing": {Key: keyLine, DisplayName: "Alice", Rooms: []string{"general"}},
 	}
 	configDir := setupConfig(t, users, nil)
@@ -264,7 +284,7 @@ func TestApprove_DisplayNameMatchesUsername(t *testing.T) {
 	parts := strings.SplitN(existKey, " ", 3)
 	keyLine := parts[0] + " " + parts[1]
 
-	users := map[string]config.User{
+	users := map[string]testUser{
 		"usr_alice123": {Key: keyLine, DisplayName: "Alice", Rooms: []string{"general"}},
 	}
 	configDir := setupConfig(t, users, nil)
@@ -306,7 +326,7 @@ func TestAddToRoom_Success(t *testing.T) {
 	parts := strings.SplitN(key, " ", 3)
 	keyLine := parts[0] + " " + parts[1]
 
-	users := map[string]config.User{"usr_alice": {Key: keyLine, DisplayName: "Alice"}}
+	users := map[string]testUser{"usr_alice": {Key: keyLine, DisplayName: "Alice"}}
 	configDir := setupConfig(t, users, nil)
 	dataDir := setupDataDir(t, map[string]config.Room{
 		"general":     {Topic: "General"},
@@ -335,7 +355,7 @@ func TestAddToRoom_AlreadyMember(t *testing.T) {
 	parts := strings.SplitN(key, " ", 3)
 	keyLine := parts[0] + " " + parts[1]
 
-	users := map[string]config.User{"usr_alice": {Key: keyLine, DisplayName: "Alice", Rooms: []string{"general"}}}
+	users := map[string]testUser{"usr_alice": {Key: keyLine, DisplayName: "Alice", Rooms: []string{"general"}}}
 	configDir := setupConfig(t, users, nil)
 	dataDir := setupDataDir(t, map[string]config.Room{"general": {}}, users)
 
@@ -353,7 +373,7 @@ func TestAddToRoom_NonexistentRoom(t *testing.T) {
 	parts := strings.SplitN(key, " ", 3)
 	keyLine := parts[0] + " " + parts[1]
 
-	users := map[string]config.User{"usr_alice": {Key: keyLine, DisplayName: "Alice"}}
+	users := map[string]testUser{"usr_alice": {Key: keyLine, DisplayName: "Alice"}}
 	configDir := setupConfig(t, users, nil)
 	dataDir := setupDataDir(t, map[string]config.Room{"general": {}}, users)
 
@@ -371,7 +391,7 @@ func TestAddToRoom_RetiredUser(t *testing.T) {
 	parts := strings.SplitN(key, " ", 3)
 	keyLine := parts[0] + " " + parts[1]
 
-	users := map[string]config.User{
+	users := map[string]testUser{
 		"usr_alice": {Key: keyLine, DisplayName: "Alice", Retired: true, RetiredAt: "2026-01-01T00:00:00Z"},
 	}
 	configDir := setupConfig(t, users, nil)
@@ -386,12 +406,18 @@ func TestAddToRoom_RetiredUser(t *testing.T) {
 	}
 }
 
-func TestRemoveFromRoom_Success(t *testing.T) {
+// TestRemoveFromRoom_EnqueuesPendingRow verifies the Phase 16 Gap 1
+// behavior of cmdRemoveFromRoom: the CLI enqueues a row in
+// user_left_rooms (so the running server can run the leave cascade
+// + broadcast) instead of removing the member directly. Pre-Phase-16
+// this command did the direct row delete, but that meant connected
+// members never saw the leave event until the next reconnect.
+func TestRemoveFromRoom_EnqueuesPendingRow(t *testing.T) {
 	key, _ := genTestKey(t, "Alice")
 	parts := strings.SplitN(key, " ", 3)
 	keyLine := parts[0] + " " + parts[1]
 
-	users := map[string]config.User{"usr_alice": {Key: keyLine, DisplayName: "Alice", Rooms: []string{"general", "engineering"}}}
+	users := map[string]testUser{"usr_alice": {Key: keyLine, DisplayName: "Alice", Rooms: []string{"general", "engineering"}}}
 	configDir := setupConfig(t, users, nil)
 	dataDir := setupDataDir(t, map[string]config.Room{
 		"general":     {Topic: "General"},
@@ -405,13 +431,37 @@ func TestRemoveFromRoom_Success(t *testing.T) {
 
 	st, _ := store.Open(dataDir)
 	defer st.Close()
+
+	// Phase 16 Gap 1: alice should STILL be in engineering at this
+	// point — cmdRemoveFromRoom no longer touches room_members
+	// directly. The actual removal happens when the server's
+	// runRemoveFromRoomProcessor consumes the queue and calls
+	// performRoomLeave.
 	engRoom, _ := st.GetRoomByDisplayName("engineering")
-	genRoom, _ := st.GetRoomByDisplayName("general")
-	if st.IsRoomMemberByID(engRoom.ID, "usr_alice") {
-		t.Error("alice should no longer be in engineering")
+	if !st.IsRoomMemberByID(engRoom.ID, "usr_alice") {
+		t.Error("alice should still be in engineering until the processor runs (CLI only enqueues)")
 	}
-	if !st.IsRoomMemberByID(genRoom.ID, "usr_alice") {
-		t.Error("alice should still be in general")
+
+	// Verify the queue row exists with the expected fields.
+	pending, err := st.ConsumePendingUserLeftRooms()
+	if err != nil {
+		t.Fatalf("consume pending: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 queue row, got %d", len(pending))
+	}
+	row := pending[0]
+	if row.UserID != "usr_alice" {
+		t.Errorf("UserID = %q, want usr_alice", row.UserID)
+	}
+	if row.RoomID != engRoom.ID {
+		t.Errorf("RoomID = %q, want %q", row.RoomID, engRoom.ID)
+	}
+	if row.Reason != "removed" {
+		t.Errorf("Reason = %q, want removed", row.Reason)
+	}
+	if !strings.HasPrefix(row.InitiatedBy, "os:") {
+		t.Errorf("InitiatedBy = %q, want os: prefix", row.InitiatedBy)
 	}
 }
 
@@ -420,7 +470,7 @@ func TestRemoveFromRoom_NotAMember(t *testing.T) {
 	parts := strings.SplitN(key, " ", 3)
 	keyLine := parts[0] + " " + parts[1]
 
-	users := map[string]config.User{"usr_alice": {Key: keyLine, DisplayName: "Alice"}}
+	users := map[string]testUser{"usr_alice": {Key: keyLine, DisplayName: "Alice"}}
 	configDir := setupConfig(t, users, nil)
 	dataDir := setupDataDir(t, map[string]config.Room{"general": {}, "engineering": {}}, users)
 
@@ -434,7 +484,7 @@ func TestRemoveFromRoom_NotAMember(t *testing.T) {
 }
 
 func TestRemoveFromRoom_NonexistentUser(t *testing.T) {
-	configDir := setupConfig(t, map[string]config.User{}, nil)
+	configDir := setupConfig(t, map[string]testUser{}, nil)
 	dataDir := setupDataDir(t, nil)
 	err := cmdRemoveFromRoom(configDir, dataDir, []string{"--user", "usr_nobody", "--room", "general"})
 	if err == nil {
@@ -541,53 +591,495 @@ func TestReject_MissingFlag(t *testing.T) {
 	}
 }
 
-// --- Remove-user tests ---
+// Phase 16 Gap 3: TestRemoveUser_* and the cmdRemoveUser command they
+// exercised were deleted entirely. See cmdRemoveUser's deletion
+// comment in main.go for the rationale (TOML-era holdover, breaks
+// invariants, no valid use case post-retirement).
+//
+// The store.DeleteUser helper is still kept because bootstrap-admin
+// uses it as a cleanup-on-error path (insert user → SetAdmin fails →
+// delete the orphan). DeleteUser is no longer reachable via any CLI
+// verb.
 
-func TestRemoveUser_Success(t *testing.T) {
+// --- rename-user tests (Phase 16 Gap 1) ---
+
+func TestRenameUser_Success(t *testing.T) {
 	aliceKey, _ := genTestKey(t, "Alice")
-	aliceParts := strings.SplitN(aliceKey, " ", 3)
-	aliceKeyLine := aliceParts[0] + " " + aliceParts[1]
-
-	bobKey, _ := genTestKey(t, "Bob")
-	bobParts := strings.SplitN(bobKey, " ", 3)
-	bobKeyLine := bobParts[0] + " " + bobParts[1]
-
-	users := map[string]config.User{
-		"usr_alice": {Key: aliceKeyLine, DisplayName: "Alice", Rooms: []string{"general"}},
-		"usr_bob":   {Key: bobKeyLine, DisplayName: "Bob"},
+	users := map[string]testUser{
+		"usr_alice": {Key: aliceKey, DisplayName: "Alice"},
 	}
 	dataDir := setupDataDir(t, nil, users)
 
-	err := cmdRemoveUser(dataDir, []string{"usr_alice"})
+	err := cmdRenameUser(dataDir, []string{"usr_alice", "Alicia"})
 	if err != nil {
-		t.Fatalf("remove: %v", err)
+		t.Fatalf("rename: %v", err)
 	}
 
 	st, _ := store.Open(dataDir)
 	defer st.Close()
-	if st.GetUserByID("usr_alice") != nil {
-		t.Error("alice should be removed")
+	u := st.GetUserByID("usr_alice")
+	if u == nil {
+		t.Fatal("user should exist after rename")
 	}
-	if st.GetUserByID("usr_bob") == nil {
-		t.Error("bob should still exist")
+	if u.DisplayName != "Alicia" {
+		t.Errorf("display name = %q, want Alicia", u.DisplayName)
+	}
+
+	// Queue should contain the rename row for the running server
+	// to broadcast.
+	pending, _ := st.ConsumePendingAdminStateChanges()
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 queue row, got %d", len(pending))
+	}
+	if pending[0].Action != store.AdminStateChangeRename {
+		t.Errorf("queue action = %q, want rename", pending[0].Action)
+	}
+	if pending[0].UserID != "usr_alice" {
+		t.Errorf("queue user = %q, want usr_alice", pending[0].UserID)
 	}
 }
 
-func TestRemoveUser_NotFound(t *testing.T) {
+func TestRenameUser_NonexistentUser(t *testing.T) {
 	dataDir := setupDataDir(t, nil)
-	err := cmdRemoveUser(dataDir, []string{"usr_nobody"})
+	err := cmdRenameUser(dataDir, []string{"usr_ghost", "Ghosty"})
 	if err == nil {
-		t.Fatal("should error")
+		t.Fatal("should reject — user not found")
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("wrong error: %v", err)
 	}
 }
 
-func TestRemoveUser_NoArgs(t *testing.T) {
-	err := cmdRemoveUser(t.TempDir(), nil)
+func TestRenameUser_NoArgs(t *testing.T) {
+	err := cmdRenameUser(t.TempDir(), nil)
 	if err == nil {
 		t.Fatal("should error without args")
+	}
+}
+
+func TestRenameUser_OneArg(t *testing.T) {
+	err := cmdRenameUser(t.TempDir(), []string{"usr_alice"})
+	if err == nil {
+		t.Fatal("should error with only user ID (missing new name)")
+	}
+}
+
+func TestRenameUser_DuplicateRejected(t *testing.T) {
+	aliceKey, _ := genTestKey(t, "Alice")
+	bobKey, _ := genTestKey(t, "Bob")
+	users := map[string]testUser{
+		"usr_alice": {Key: aliceKey, DisplayName: "Alice"},
+		"usr_bob":   {Key: bobKey, DisplayName: "Bob"},
+	}
+	dataDir := setupDataDir(t, nil, users)
+
+	// Try to rename alice to "Bob" — should reject.
+	err := cmdRenameUser(dataDir, []string{"usr_alice", "Bob"})
+	if err == nil {
+		t.Fatal("should reject duplicate display name")
+	}
+	if !strings.Contains(err.Error(), "already in use") {
+		t.Errorf("wrong error: %v", err)
+	}
+
+	// alice's name should be unchanged.
+	st, _ := store.Open(dataDir)
+	defer st.Close()
+	u := st.GetUserByID("usr_alice")
+	if u.DisplayName != "Alice" {
+		t.Errorf("display name should be unchanged, got %q", u.DisplayName)
+	}
+}
+
+func TestRenameUser_DuplicateCaseInsensitive(t *testing.T) {
+	aliceKey, _ := genTestKey(t, "Alice")
+	bobKey, _ := genTestKey(t, "Bob")
+	users := map[string]testUser{
+		"usr_alice": {Key: aliceKey, DisplayName: "Alice"},
+		"usr_bob":   {Key: bobKey, DisplayName: "Bob"},
+	}
+	dataDir := setupDataDir(t, nil, users)
+
+	// Try to rename alice to "BOB" — should reject (case-insensitive
+	// match against existing "Bob").
+	err := cmdRenameUser(dataDir, []string{"usr_alice", "BOB"})
+	if err == nil {
+		t.Fatal("should reject case-insensitive duplicate")
+	}
+}
+
+func TestRenameUser_SameNameRejected(t *testing.T) {
+	aliceKey, _ := genTestKey(t, "Alice")
+	users := map[string]testUser{
+		"usr_alice": {Key: aliceKey, DisplayName: "Alice"},
+	}
+	dataDir := setupDataDir(t, nil, users)
+
+	// Renaming to the same name should be rejected (not a silent
+	// no-op) so the operator notices they typed the wrong thing.
+	err := cmdRenameUser(dataDir, []string{"usr_alice", "Alice"})
+	if err == nil {
+		t.Fatal("should reject same-name rename")
+	}
+	if !strings.Contains(err.Error(), "no change") {
+		t.Errorf("wrong error: %v", err)
+	}
+}
+
+func TestRenameUser_RetiredUserAllowed(t *testing.T) {
+	aliceKey, _ := genTestKey(t, "Alice")
+	users := map[string]testUser{
+		"usr_alice12345": {Key: aliceKey, DisplayName: "Alice"},
+	}
+	dataDir := setupDataDir(t, nil, users)
+
+	// Retire alice.
+	st, _ := store.Open(dataDir)
+	st.SetUserRetired("usr_alice12345", "test")
+	st.Close()
+
+	// Rename should still work on retired users (operators may
+	// want to scrub offensive names even after retirement). The
+	// expected display name after retirement is "Alice_alic"
+	// (suffix added by SetUserRetired).
+	err := cmdRenameUser(dataDir, []string{"usr_alice12345", "former-alice"})
+	if err != nil {
+		t.Fatalf("rename of retired user should succeed: %v", err)
+	}
+
+	st2, _ := store.Open(dataDir)
+	defer st2.Close()
+	u := st2.GetUserByID("usr_alice12345")
+	if u.DisplayName != "former-alice" {
+		t.Errorf("display name = %q, want former-alice", u.DisplayName)
+	}
+}
+
+// --- promote/demote queue wiring tests (Phase 16 Gap 1) ---
+
+func TestPromote_EnqueuesStateChange(t *testing.T) {
+	aliceKey, _ := genTestKey(t, "Alice")
+	users := map[string]testUser{
+		"usr_alice": {Key: aliceKey, DisplayName: "Alice"},
+	}
+	dataDir := setupDataDir(t, nil, users)
+
+	if err := cmdPromote(dataDir, []string{"usr_alice"}); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+
+	st, _ := store.Open(dataDir)
+	defer st.Close()
+
+	// Verify the flag was flipped.
+	u := st.GetUserByID("usr_alice")
+	if !u.Admin {
+		t.Error("admin flag should be set after promote")
+	}
+
+	// Verify the queue row was enqueued.
+	pending, _ := st.ConsumePendingAdminStateChanges()
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 queue row, got %d", len(pending))
+	}
+	if pending[0].Action != store.AdminStateChangePromote {
+		t.Errorf("action = %q, want promote", pending[0].Action)
+	}
+}
+
+func TestDemote_EnqueuesStateChange(t *testing.T) {
+	aliceKey, _ := genTestKey(t, "Alice")
+	users := map[string]testUser{
+		"usr_alice": {Key: aliceKey, DisplayName: "Alice"},
+	}
+	dataDir := setupDataDir(t, nil, users)
+
+	// Make alice admin first.
+	st0, _ := store.Open(dataDir)
+	st0.SetAdmin("usr_alice", true)
+	st0.Close()
+
+	if err := cmdDemote(dataDir, []string{"usr_alice"}); err != nil {
+		t.Fatalf("demote: %v", err)
+	}
+
+	st, _ := store.Open(dataDir)
+	defer st.Close()
+
+	u := st.GetUserByID("usr_alice")
+	if u.Admin {
+		t.Error("admin flag should be cleared after demote")
+	}
+
+	pending, _ := st.ConsumePendingAdminStateChanges()
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 queue row, got %d", len(pending))
+	}
+	if pending[0].Action != store.AdminStateChangeDemote {
+		t.Errorf("action = %q, want demote", pending[0].Action)
+	}
+}
+
+// --- update-topic / rename-room tests (Phase 16 Gap 1) ---
+
+func TestUpdateTopic_Success(t *testing.T) {
+	dataDir := setupDataDir(t, map[string]config.Room{
+		"general": {Topic: "old topic"},
+	})
+
+	err := cmdUpdateTopic(dataDir, []string{"--room", "general", "--topic", "new topic"})
+	if err != nil {
+		t.Fatalf("update-topic: %v", err)
+	}
+
+	st, _ := store.Open(dataDir)
+	defer st.Close()
+	room, _ := st.GetRoomByDisplayName("general")
+	if room.Topic != "new topic" {
+		t.Errorf("topic = %q, want new topic", room.Topic)
+	}
+
+	pending, _ := st.ConsumePendingRoomUpdates()
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 queue row, got %d", len(pending))
+	}
+	if pending[0].Action != store.RoomUpdateActionUpdateTopic {
+		t.Errorf("action = %q, want update-topic", pending[0].Action)
+	}
+}
+
+func TestUpdateTopic_MissingRoom(t *testing.T) {
+	dataDir := setupDataDir(t, nil)
+	err := cmdUpdateTopic(dataDir, []string{"--room", "ghost", "--topic", "new"})
+	if err == nil {
+		t.Fatal("should error for missing room")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("wrong error: %v", err)
+	}
+}
+
+func TestUpdateTopic_RetiredRoom(t *testing.T) {
+	dataDir := setupDataDir(t, map[string]config.Room{
+		"general": {Topic: "topic"},
+	})
+
+	st0, _ := store.Open(dataDir)
+	id := st0.RoomDisplayNameToID("general")
+	st0.SetRoomRetired(id, "alice", "test")
+	st0.Close()
+
+	// A retired room's display name was suffixed by SetRoomRetired,
+	// so we look up the post-retirement name to feed the CLI.
+	st1, _ := store.Open(dataDir)
+	retiredRoom, _ := st1.GetRoomByID(id)
+	st1.Close()
+
+	err := cmdUpdateTopic(dataDir, []string{"--room", retiredRoom.DisplayName, "--topic", "new"})
+	if err == nil {
+		t.Fatal("should error for retired room")
+	}
+}
+
+func TestUpdateTopic_NoChangeRejected(t *testing.T) {
+	dataDir := setupDataDir(t, map[string]config.Room{
+		"general": {Topic: "same"},
+	})
+
+	err := cmdUpdateTopic(dataDir, []string{"--room", "general", "--topic", "same"})
+	if err == nil {
+		t.Fatal("should reject same-topic update")
+	}
+	if !strings.Contains(err.Error(), "no change") {
+		t.Errorf("wrong error: %v", err)
+	}
+}
+
+func TestUpdateTopic_MissingArgs(t *testing.T) {
+	err := cmdUpdateTopic(t.TempDir(), nil)
+	if err == nil {
+		t.Fatal("should error without args")
+	}
+	err = cmdUpdateTopic(t.TempDir(), []string{"--room", "general"})
+	if err == nil {
+		t.Fatal("should error without --topic")
+	}
+}
+
+func TestRenameRoom_Success(t *testing.T) {
+	dataDir := setupDataDir(t, map[string]config.Room{
+		"general": {Topic: "topic"},
+	})
+
+	err := cmdRenameRoom(dataDir, []string{"--room", "general", "--new-name", "main"})
+	if err != nil {
+		t.Fatalf("rename-room: %v", err)
+	}
+
+	st, _ := store.Open(dataDir)
+	defer st.Close()
+	room, _ := st.GetRoomByDisplayName("main")
+	if room == nil {
+		t.Fatal("room should exist under new name")
+	}
+	if room.DisplayName != "main" {
+		t.Errorf("display_name = %q, want main", room.DisplayName)
+	}
+
+	pending, _ := st.ConsumePendingRoomUpdates()
+	if len(pending) != 1 || pending[0].Action != store.RoomUpdateActionRenameRoom {
+		t.Errorf("expected 1 rename-room queue row, got %+v", pending)
+	}
+}
+
+func TestRenameRoom_DuplicateRejected(t *testing.T) {
+	dataDir := setupDataDir(t, map[string]config.Room{
+		"general":     {Topic: ""},
+		"engineering": {Topic: ""},
+	})
+
+	err := cmdRenameRoom(dataDir, []string{"--room", "general", "--new-name", "engineering"})
+	if err == nil {
+		t.Fatal("should reject duplicate name")
+	}
+	if !strings.Contains(err.Error(), "already in use") {
+		t.Errorf("wrong error: %v", err)
+	}
+}
+
+func TestRenameRoom_DuplicateCaseInsensitive(t *testing.T) {
+	dataDir := setupDataDir(t, map[string]config.Room{
+		"general":     {Topic: ""},
+		"engineering": {Topic: ""},
+	})
+
+	err := cmdRenameRoom(dataDir, []string{"--room", "general", "--new-name", "ENGINEERING"})
+	if err == nil {
+		t.Fatal("should reject case-insensitive duplicate")
+	}
+}
+
+func TestRenameRoom_NoChangeRejected(t *testing.T) {
+	dataDir := setupDataDir(t, map[string]config.Room{
+		"general": {},
+	})
+
+	err := cmdRenameRoom(dataDir, []string{"--room", "general", "--new-name", "general"})
+	if err == nil {
+		t.Fatal("should reject no-change rename")
+	}
+	if !strings.Contains(err.Error(), "no change") {
+		t.Errorf("wrong error: %v", err)
+	}
+}
+
+func TestRenameRoom_MissingRoom(t *testing.T) {
+	dataDir := setupDataDir(t, nil)
+	err := cmdRenameRoom(dataDir, []string{"--room", "ghost", "--new-name", "new"})
+	if err == nil {
+		t.Fatal("should error for missing room")
+	}
+}
+
+func TestRenameRoom_MissingArgs(t *testing.T) {
+	err := cmdRenameRoom(t.TempDir(), nil)
+	if err == nil {
+		t.Fatal("should error without args")
+	}
+	err = cmdRenameRoom(t.TempDir(), []string{"--room", "general"})
+	if err == nil {
+		t.Fatal("should error without --new-name")
+	}
+}
+
+// --- revoke-device queue wiring tests (Phase 16 Gap 1) ---
+
+func TestRevokeDevice_EnqueuesPendingRow(t *testing.T) {
+	dataDir := setupDataDir(t, nil)
+
+	st0, _ := store.Open(dataDir)
+	st0.UpsertDevice("usr_alice", "dev_laptop")
+	st0.Close()
+
+	err := cmdRevokeDevice(dataDir, []string{"--user", "usr_alice", "--device", "dev_laptop", "--reason", "stolen"})
+	if err != nil {
+		t.Fatalf("revoke-device: %v", err)
+	}
+
+	st, _ := store.Open(dataDir)
+	defer st.Close()
+
+	// Verify revocation was written to revoked_devices.
+	revoked, err := st.IsDeviceRevoked("usr_alice", "dev_laptop")
+	if err != nil {
+		t.Fatalf("IsDeviceRevoked: %v", err)
+	}
+	if !revoked {
+		t.Error("device should be in revoked_devices")
+	}
+
+	// Verify the queue row was enqueued.
+	pending, _ := st.ConsumePendingDeviceRevocations()
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 queue row, got %d", len(pending))
+	}
+	row := pending[0]
+	if row.UserID != "usr_alice" {
+		t.Errorf("UserID = %q, want usr_alice", row.UserID)
+	}
+	if row.DeviceID != "dev_laptop" {
+		t.Errorf("DeviceID = %q, want dev_laptop", row.DeviceID)
+	}
+	if row.Reason != "stolen" {
+		t.Errorf("Reason = %q, want stolen", row.Reason)
+	}
+	if !strings.HasPrefix(row.RevokedBy, "os:") {
+		t.Errorf("RevokedBy = %q, want os: prefix", row.RevokedBy)
+	}
+}
+
+func TestRevokeDevice_DefaultsReason(t *testing.T) {
+	dataDir := setupDataDir(t, nil)
+
+	st0, _ := store.Open(dataDir)
+	st0.UpsertDevice("usr_alice", "dev_laptop")
+	st0.Close()
+
+	err := cmdRevokeDevice(dataDir, []string{"--user", "usr_alice", "--device", "dev_laptop"})
+	if err != nil {
+		t.Fatalf("revoke-device: %v", err)
+	}
+
+	st, _ := store.Open(dataDir)
+	defer st.Close()
+	pending, _ := st.ConsumePendingDeviceRevocations()
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 queue row, got %d", len(pending))
+	}
+	if pending[0].Reason != "admin_action" {
+		t.Errorf("default reason = %q, want admin_action", pending[0].Reason)
+	}
+}
+
+func TestRevokeDevice_RejectsInvalidDeviceID(t *testing.T) {
+	dataDir := setupDataDir(t, nil)
+	err := cmdRevokeDevice(dataDir, []string{"--user", "usr_alice", "--device", "laptop"})
+	if err == nil {
+		t.Fatal("should reject device ID without dev_ prefix")
+	}
+	if !strings.Contains(err.Error(), "dev_ prefix") {
+		t.Errorf("wrong error: %v", err)
+	}
+}
+
+func TestRevokeDevice_MissingArgs(t *testing.T) {
+	err := cmdRevokeDevice(t.TempDir(), nil)
+	if err == nil {
+		t.Fatal("should error without args")
+	}
+	err = cmdRevokeDevice(t.TempDir(), []string{"--user", "usr_alice"})
+	if err == nil {
+		t.Fatal("should error without --device")
 	}
 }
 
@@ -606,7 +1098,7 @@ func TestStatus_ShowsCounts(t *testing.T) {
 	oldParts := strings.SplitN(oldKey, " ", 3)
 	oldKeyLine := oldParts[0] + " " + oldParts[1]
 
-	users := map[string]config.User{
+	users := map[string]testUser{
 		"usr_alice": {Key: aliceKeyLine, DisplayName: "Alice"},
 		"usr_bob":   {Key: bobKeyLine, DisplayName: "Bob"},
 		"usr_old":   {Key: oldKeyLine, DisplayName: "Old", Retired: true, RetiredAt: "2026-01-01T00:00:00Z"},
@@ -780,7 +1272,7 @@ func TestListGroups_WithGroups(t *testing.T) {
 	parts := strings.SplitN(key, " ", 3)
 	keyLine := parts[0] + " " + parts[1]
 
-	users := map[string]config.User{
+	users := map[string]testUser{
 		"usr_alice": {Key: keyLine, DisplayName: "Alice"},
 	}
 	dataDir := setupDataDir(t, nil, users)

@@ -287,114 +287,11 @@ func TestRoomDisplayNameToID(t *testing.T) {
 
 
 
-func TestSeedRoomMembers_PopulatesDB(t *testing.T) {
-	dir := t.TempDir()
-	st, err := Open(dir)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer st.Close()
-
-	// Seed rooms first
-	st.SeedRooms(map[string]config.Room{
-		"general": {Topic: "General"},
-		"support": {Topic: "Help"},
-	})
-
-	// Seed members
-	users := map[string]config.User{
-		"usr_alice": {DisplayName: "Alice", Rooms: []string{"general", "support"}},
-		"usr_bob":   {DisplayName: "Bob", Rooms: []string{"general"}},
-	}
-	count, err := st.SeedRoomMembers(users)
-	if err != nil {
-		t.Fatalf("seed members: %v", err)
-	}
-	if count != 3 { // alice in 2 rooms + bob in 1
-		t.Errorf("seeded %d memberships, want 3", count)
-	}
-
-	// Verify via direct query
-	generalID := st.RoomDisplayNameToID("general")
-	supportID := st.RoomDisplayNameToID("support")
-
-	var generalCount, supportCount int
-	st.roomsDB.QueryRow(`SELECT COUNT(*) FROM room_members WHERE room_id = ?`, generalID).Scan(&generalCount)
-	st.roomsDB.QueryRow(`SELECT COUNT(*) FROM room_members WHERE room_id = ?`, supportID).Scan(&supportCount)
-
-	if generalCount != 2 {
-		t.Errorf("general should have 2 members, got %d", generalCount)
-	}
-	if supportCount != 1 {
-		t.Errorf("support should have 1 member, got %d", supportCount)
-	}
-}
-
-func TestSeedRoomMembers_SkipsRetiredUsers(t *testing.T) {
-	dir := t.TempDir()
-	st, err := Open(dir)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer st.Close()
-
-	st.SeedRooms(map[string]config.Room{"general": {Topic: "Chat"}})
-
-	users := map[string]config.User{
-		"usr_alice": {DisplayName: "Alice", Rooms: []string{"general"}},
-		"usr_old":   {DisplayName: "Old", Rooms: []string{"general"}, Retired: true},
-	}
-	count, _ := st.SeedRoomMembers(users)
-	if count != 1 {
-		t.Errorf("should skip retired, got %d memberships", count)
-	}
-}
-
-func TestSeedRoomMembers_SkipsUnknownRooms(t *testing.T) {
-	dir := t.TempDir()
-	st, err := Open(dir)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer st.Close()
-
-	st.SeedRooms(map[string]config.Room{"general": {Topic: "Chat"}})
-
-	users := map[string]config.User{
-		"usr_alice": {DisplayName: "Alice", Rooms: []string{"general", "nonexistent"}},
-	}
-	count, err := st.SeedRoomMembers(users)
-	if err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if count != 1 { // only general, nonexistent skipped
-		t.Errorf("should skip unknown room, got %d", count)
-	}
-}
-
-func TestSeedRoomMembers_SkipsIfNotEmpty(t *testing.T) {
-	dir := t.TempDir()
-	st, err := Open(dir)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer st.Close()
-
-	st.SeedRooms(map[string]config.Room{"general": {Topic: "Chat"}})
-
-	users := map[string]config.User{
-		"usr_alice": {DisplayName: "Alice", Rooms: []string{"general"}},
-	}
-	st.SeedRoomMembers(users)
-
-	// Second seed should skip
-	count, _ := st.SeedRoomMembers(map[string]config.User{
-		"usr_bob": {DisplayName: "Bob", Rooms: []string{"general"}},
-	})
-	if count != 0 {
-		t.Errorf("second seed should skip, got %d", count)
-	}
-}
+// Phase 16 Gap 4: TestSeedRoomMembers_* and the SeedRoomMembers
+// helper they exercised were removed when users.toml support was
+// deleted. Room memberships for new users are now established via
+// `sshkey-ctl add-to-room` after approval, and that path is covered
+// by TestAddRoomMember below.
 
 func TestRoomMembersEmpty(t *testing.T) {
 	dir := t.TempDir()
@@ -409,12 +306,13 @@ func TestRoomMembersEmpty(t *testing.T) {
 	}
 
 	st.SeedRooms(map[string]config.Room{"general": {Topic: "Chat"}})
-	st.SeedRoomMembers(map[string]config.User{
-		"usr_alice": {DisplayName: "Alice", Rooms: []string{"general"}},
-	})
+	generalID := st.RoomDisplayNameToID("general")
+	if err := st.AddRoomMember(generalID, "usr_alice", 0); err != nil {
+		t.Fatalf("add member: %v", err)
+	}
 
 	if st.RoomMembersEmpty() {
-		t.Error("should not be empty after seed")
+		t.Error("should not be empty after AddRoomMember")
 	}
 }
 

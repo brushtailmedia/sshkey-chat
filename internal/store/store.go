@@ -372,6 +372,198 @@ func (s *Store) initDataDB() error {
 			queued_at  INTEGER NOT NULL
 		);
 
+		-- pending_user_retirements is the user-level analog of
+		-- pending_room_retirements. Phase 16 Gap 1: when the CLI runs
+		-- sshkey-ctl retire-user, it flips users.retired (so retirement
+		-- takes effect at the data layer regardless of whether the
+		-- server is running) and then enqueues a row here. The running
+		-- server's runUserRetirementProcessor goroutine drains this
+		-- queue on a periodic ticker and calls handleRetirement, which
+		-- fires per-room leave events, group exits with last-admin
+		-- succession, DM cutoffs, broadcasts user_retired to connected
+		-- clients, and terminates active sessions.
+		--
+		-- Same architectural rationale as the room retirement queue:
+		-- the CLI is a separate process whose only IPC with the running
+		-- server is shared SQLite tables. The queue + polling pattern
+		-- is the canonical bridge for CLI-initiated state changes that
+		-- need live broadcasts. See Phase 12 (rooms) for the precedent.
+		CREATE TABLE IF NOT EXISTS pending_user_retirements (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id    TEXT NOT NULL,
+			retired_by TEXT NOT NULL,
+			reason     TEXT NOT NULL DEFAULT '',
+			queued_at  INTEGER NOT NULL
+		);
+
+		-- pending_user_unretirements is the inverse of
+		-- pending_user_retirements. Phase 16 Gap 1: when the CLI runs
+		-- sshkey-ctl unretire-user (escape hatch for mistaken
+		-- retirements), it flips users.retired back to 0 and clears
+		-- retired_at / retired_reason, then enqueues a row here. The
+		-- running server's runUserUnretirementProcessor goroutine
+		-- drains the queue and broadcasts user_unretired to all
+		-- connected clients so they can flush the [retired] marker
+		-- from their profile cache.
+		--
+		-- Paired with the retirement queue rather than folded into a
+		-- single table because the direction is one-way per row and
+		-- keeping them separate matches the per-command-queue
+		-- pattern the rest of Phase 16 uses. Same architectural
+		-- rationale as pending_user_retirements above.
+		--
+		-- Note: unretirement does NOT restore room/group/DM
+		-- memberships. The retirement cascade removed the user from
+		-- every shared context; unretire-user only flips the flag.
+		-- Operators must manually re-add via add-to-room or in-group
+		-- /add. This matches the documented behavior in the Phase 16
+		-- plan ("unretire-user does NOT restore memberships").
+		CREATE TABLE IF NOT EXISTS pending_user_unretirements (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id       TEXT NOT NULL,
+			unretired_by  TEXT NOT NULL,
+			queued_at     INTEGER NOT NULL
+		);
+
+		-- pending_admin_state_changes is the shared queue for promote,
+		-- demote, and rename-user. Phase 16 Gap 1: each of these CLI
+		-- verbs flips the corresponding column in users.db, then
+		-- enqueues a row here so the running server can broadcast a
+		-- fresh profile event to all connected clients. The clients'
+		-- existing handleInternal "profile" case upserts into their
+		-- in-memory profile cache, refreshing the admin badge or
+		-- display name immediately.
+		--
+		-- Why one shared queue (3 actions) instead of three separate
+		-- queues:
+		--   - All three actions produce the same wire effect: a fresh
+		--     protocol.Profile broadcast for the affected user
+		--   - All three are operator-initiated state changes on a
+		--     single users.db row (admin flag or display_name)
+		--   - The processor's only branching is the audit action
+		--     string (promote / demote / rename-user); the broadcast
+		--     payload is uniformly built from the post-change user
+		--     row
+		-- A single processor with one CHECK-constrained action enum
+		-- is simpler than three near-duplicate processors.
+		--
+		-- The action column is constrained to the three valid values
+		-- so a malformed CLI insert fails at the schema layer rather
+		-- than reaching the processor.
+		CREATE TABLE IF NOT EXISTS pending_admin_state_changes (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id     TEXT NOT NULL,
+			action      TEXT NOT NULL CHECK (action IN ('promote', 'demote', 'rename')),
+			changed_by  TEXT NOT NULL,
+			queued_at   INTEGER NOT NULL
+		);
+
+		-- pending_room_updates is the shared queue for update-topic
+		-- and rename-room. Phase 16 Gap 1: each of these CLI verbs
+		-- mutates a column on the rooms.db row (topic or display_name)
+		-- and enqueues a row here so the running server can broadcast
+		-- a fresh room_updated event to connected members. The event
+		-- carries the full post-change room state {Room, DisplayName,
+		-- Topic} so a single client handler covers both verbs — the
+		-- client just upserts its rooms table row from the event
+		-- payload.
+		--
+		-- Why one shared queue (2 actions): same reasoning as
+		-- pending_admin_state_changes. Both actions produce one
+		-- room_updated broadcast per affected room; the action enum
+		-- only drives the audit log entry; the wire payload is
+		-- uniformly built from the post-change row.
+		--
+		-- Note on broadcast scope: unlike user profile updates
+		-- (which broadcast wide), room updates are delivered ONLY
+		-- to members of the affected room. A user who isn't in the
+		-- room doesn't need to know about its topic/name changes,
+		-- and the room_members lookup is cheap.
+		CREATE TABLE IF NOT EXISTS pending_room_updates (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			room_id     TEXT NOT NULL,
+			action      TEXT NOT NULL CHECK (action IN ('update-topic', 'rename-room')),
+			changed_by  TEXT NOT NULL,
+			queued_at   INTEGER NOT NULL
+		);
+
+		-- pending_device_revocations is the queue for sshkey-ctl
+		-- revoke-device. Phase 16 Gap 1: when an admin revokes a
+		-- device via the CLI, the CLI calls store.RevokeDevice (which
+		-- marks the device as revoked in revoked_devices, blocking
+		-- future authentication attempts) and then enqueues a row
+		-- here. The running server's processor drains the queue,
+		-- looks up any active SSH session for the (user, device)
+		-- pair, sends a device_revoked event so the client can
+		-- display a notice before disconnect, and closes the SSH
+		-- channel to terminate the session.
+		--
+		-- Different shape from the other Phase 16 Gap 1 queues:
+		-- this one operates on session state (live SSH connections),
+		-- not just persisted state. The data-layer effect (revoked
+		-- entry in revoked_devices) is already done by the time the
+		-- queue row exists; the processor's job is purely about
+		-- terminating the live session, not propagating a state
+		-- change to other clients. There is no "broadcast to all
+		-- members" because the only party that needs to know is the
+		-- revoked device itself.
+		--
+		-- The reason field carries the admin-supplied reason (or
+		-- "admin_action" by default) so the device_revoked event
+		-- can include it in the message shown to the disconnecting
+		-- client.
+		CREATE TABLE IF NOT EXISTS pending_device_revocations (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id     TEXT NOT NULL,
+			device_id   TEXT NOT NULL,
+			reason      TEXT NOT NULL DEFAULT 'admin_action',
+			revoked_by  TEXT NOT NULL,
+			queued_at   INTEGER NOT NULL
+		);
+
+		-- user_left_rooms is the dual-purpose sidecar table for
+		-- Phase 16 Gap 1's remove-from-room AND Phase 20's
+		-- server-authoritative leave catchup.
+		--
+		-- Phase 16 use: when an admin runs sshkey-ctl remove-from-room,
+		-- the CLI inserts a row here with reason='removed' and
+		-- processed=0. The server's runRemoveFromRoomProcessor drains
+		-- unprocessed rows, calls performRoomLeave (which removes the
+		-- user from room_members, broadcasts the leave event with the
+		-- reason, echoes room_left to the leaver's connected sessions,
+		-- and marks the room for epoch rotation), and flips processed
+		-- to 1. Rows are kept after processing rather than deleted so
+		-- Phase 20 can read them as a leave-history catchup signal.
+		--
+		-- Phase 20 use (NOT IMPLEMENTED YET — Phase 16 just builds
+		-- the table for Phase 20 to read later): on client connect,
+		-- the server queries this table to build a "rooms you were
+		-- removed from while offline" catchup list, replacing the
+		-- current client-side reconciliation walk. Phase 20 will
+		-- also extend the writers — self-leave / retirement
+		-- cascade / etc. will all start writing rows here, not just
+		-- the CLI remove-from-room path.
+		--
+		-- The reason enum is loosely constrained at the column level
+		-- (no CHECK constraint) because Phase 20 will introduce
+		-- additional reason values and locking the enum down now
+		-- would create a migration burden later. Phase 16 only
+		-- writes 'removed'; the column stores it as a free-form
+		-- string for forward compatibility.
+		CREATE TABLE IF NOT EXISTS user_left_rooms (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id       TEXT NOT NULL,
+			room_id       TEXT NOT NULL,
+			reason        TEXT NOT NULL,
+			initiated_by  TEXT NOT NULL,
+			left_at       INTEGER NOT NULL,
+			processed     INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE INDEX IF NOT EXISTS idx_user_left_rooms_user_left_at
+			ON user_left_rooms(user_id, left_at);
+		CREATE INDEX IF NOT EXISTS idx_user_left_rooms_processed
+			ON user_left_rooms(processed) WHERE processed = 0;
+
 		-- 1:1 DMs — fixed two-party conversations with per-user history
 		-- cutoffs. The user pair is canonicalized alphabetically so dedup
 		-- is schema-enforced via UNIQUE(user_a, user_b). The *_left_at

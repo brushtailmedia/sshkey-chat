@@ -58,6 +58,56 @@ type Server struct {
 	// running server, so CLI → server coordination happens via shared
 	// SQLite tables. Phase 12.
 	roomRetirementStop chan struct{}
+
+	// userRetirementStop is the user-level analog of roomRetirementStop.
+	// Closed by Close() during shutdown. The processor polls
+	// pending_user_retirements every userRetirementPollInterval and
+	// runs handleRetirement for each queued row (per-room leaves,
+	// group exits with last-admin succession, DM cutoffs, the
+	// user_retired broadcast, and active session termination). Same
+	// queue + polling pattern as room retirement. Phase 16 Gap 1.
+	userRetirementStop chan struct{}
+
+	// userUnretirementStop is the inverse of userRetirementStop —
+	// signals the unretirement processor to stop. Closed by Close()
+	// during shutdown. The processor polls pending_user_unretirements
+	// and broadcasts user_unretired so connected clients flush the
+	// [retired] marker from their profile cache. Phase 16 Gap 1.
+	userUnretirementStop chan struct{}
+
+	// adminStateChangeStop signals the shared promote/demote/rename-user
+	// processor to stop. Closed by Close() during shutdown. The
+	// processor polls pending_admin_state_changes and broadcasts a
+	// fresh protocol.Profile event for each row so connected clients
+	// pick up admin badge changes and display name renames live.
+	// Phase 16 Gap 1.
+	adminStateChangeStop chan struct{}
+
+	// roomUpdateStop signals the shared update-topic/rename-room
+	// processor to stop. Closed by Close() during shutdown. The
+	// processor polls pending_room_updates and broadcasts a fresh
+	// room_updated event to members of the affected room so they
+	// pick up topic and display name changes live. Phase 16 Gap 1.
+	roomUpdateStop chan struct{}
+
+	// deviceRevocationStop signals the revoke-device processor to
+	// stop. Closed by Close() during shutdown. The processor polls
+	// pending_device_revocations and terminates any active SSH
+	// session matching (user, device) — different shape from the
+	// other Phase 16 Gap 1 processors because it operates on live
+	// session state rather than broadcasting a state change.
+	// Phase 16 Gap 1.
+	deviceRevocationStop chan struct{}
+
+	// removeFromRoomStop signals the remove-from-room processor to
+	// stop. Closed by Close() during shutdown. The processor drains
+	// unprocessed user_left_rooms rows and dispatches each through
+	// performRoomLeave (the existing leave-cascade helper that
+	// removes from members, broadcasts room_event{leave}, echoes
+	// room_left, and marks for epoch rotation). The same
+	// user_left_rooms table is the foundation for Phase 20's
+	// server-authoritative leave catchup. Phase 16 Gap 1.
+	removeFromRoomStop chan struct{}
 }
 
 // roomRetirementPollInterval is how often the room retirement
@@ -76,13 +126,19 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 	}
 
 	s := &Server{
-		cfg:                cfg,
-		logger:             logger,
-		epochs:             newEpochManager(),
-		limiter:            newRateLimiter(),
-		clients:            make(map[string]*Client),
-		dataDir:            dir,
-		roomRetirementStop: make(chan struct{}),
+		cfg:                  cfg,
+		logger:               logger,
+		epochs:               newEpochManager(),
+		limiter:              newRateLimiter(),
+		clients:              make(map[string]*Client),
+		dataDir:              dir,
+		roomRetirementStop:   make(chan struct{}),
+		userRetirementStop:   make(chan struct{}),
+		userUnretirementStop: make(chan struct{}),
+		adminStateChangeStop: make(chan struct{}),
+		roomUpdateStop:       make(chan struct{}),
+		deviceRevocationStop: make(chan struct{}),
+		removeFromRoomStop:   make(chan struct{}),
 	}
 
 	// Open storage if data directory provided
@@ -106,27 +162,14 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 			}
 		}
 
-		// Seed room_members from users.toml on first run (after rooms are seeded)
-		if st.RoomMembersEmpty() && cfg.Users != nil {
-			count, err := st.SeedRoomMembers(cfg.Users)
-			if err != nil {
-				return nil, fmt.Errorf("seed room members: %w", err)
-			}
-			if count > 0 {
-				logger.Info("seeded room_members from users.toml", "memberships", count)
-			}
-		}
-
-		// Seed users.db from users.toml on first run
-		if st.UsersDBEmpty() && cfg.Users != nil {
-			count, err := st.SeedUsers(cfg.Users)
-			if err != nil {
-				return nil, fmt.Errorf("seed users: %w", err)
-			}
-			if count > 0 {
-				logger.Info("seeded users.db from users.toml", "users", count)
-			}
-		}
+		// Phase 16 Gap 4: users.toml seeding has been removed entirely.
+		// Operators create the first admin via `sshkey-ctl bootstrap-admin`
+		// on a fresh deployment, then add other users via `sshkey-ctl
+		// approve` after they SSH in with their own key. Room memberships
+		// are established via `sshkey-ctl add-to-room` or via the default
+		// rooms feature. Existing deployments with data in users.db are
+		// unaffected — `users.db` was already the source of truth post
+		// Phase 9, the TOML file was only first-boot seed convenience.
 
 		// Remove orphan files from crashed uploads (files on disk with
 		// no hash record in the DB — they never completed successfully)
@@ -176,6 +219,64 @@ func (s *Server) ListenAndServe() error {
 	// queued while the server was down.
 	s.processPendingRoomRetirements()
 	go s.runRoomRetirementProcessor()
+
+	// Start the user retirement processor (Phase 16 Gap 1). Polls
+	// pending_user_retirements every userRetirementPollInterval and
+	// runs handleRetirement (per-room leaves, group exits, DM cutoffs,
+	// user_retired broadcast, active session termination) for each
+	// queued row. Same architectural pattern as the room retirement
+	// processor above, applied to user retirements queued via
+	// sshkey-ctl retire-user. Immediate consume pass on startup
+	// catches any rows queued while the server was down.
+	s.processPendingUserRetirements()
+	go s.runUserRetirementProcessor()
+
+	// Start the user unretirement processor (Phase 16 Gap 1).
+	// Inverse of the retirement processor — drains
+	// pending_user_unretirements and broadcasts user_unretired so
+	// connected clients flush the [retired] marker from their
+	// profile cache. Immediate consume pass + ticker loop, same
+	// shape as every other Phase 16 Gap 1 processor.
+	s.processPendingUserUnretirements()
+	go s.runUserUnretirementProcessor()
+
+	// Start the admin state change processor (Phase 16 Gap 1).
+	// Shared by promote, demote, and rename-user — drains
+	// pending_admin_state_changes and broadcasts a fresh
+	// protocol.Profile event for each row so connected clients
+	// pick up admin badge changes and display name renames live.
+	// Critical for the support story that relies on members-list
+	// admin badges being current.
+	s.processPendingAdminStateChanges()
+	go s.runAdminStateChangeProcessor()
+
+	// Start the room updates processor (Phase 16 Gap 1). Shared by
+	// update-topic and rename-room — drains pending_room_updates
+	// and broadcasts a fresh room_updated event to members of the
+	// affected room. Closes Phase 18's deferred topic-write path:
+	// topic changes via CLI now propagate to connected clients
+	// immediately instead of only on next reconnect.
+	s.processPendingRoomUpdates()
+	go s.runRoomUpdatesProcessor()
+
+	// Start the device revocation processor (Phase 16 Gap 1).
+	// Drains pending_device_revocations and terminates any active
+	// SSH session matching the (user, device) pair. Different shape
+	// from the broadcast processors above: this one operates on
+	// live session state (open SSH channels), not on persisted
+	// protocol state. The data-layer revocation already happened
+	// before enqueue; the processor's job is to kick the live
+	// session.
+	s.processPendingDeviceRevocations()
+	go s.runDeviceRevocationProcessor()
+
+	// Start the remove-from-room processor (Phase 16 Gap 1). Drains
+	// unprocessed user_left_rooms rows and dispatches each through
+	// performRoomLeave. Same user_left_rooms table is the foundation
+	// for Phase 20's server-authoritative leave catchup, which Phase
+	// 16 doesn't implement but the table is built compatibly.
+	s.processPendingRemoveFromRoom()
+	go s.runRemoveFromRoomProcessor()
 
 	for {
 		conn, err := ln.Accept()
@@ -240,6 +341,66 @@ func (s *Server) Close() error {
 			// already closed
 		default:
 			close(s.roomRetirementStop)
+		}
+	}
+
+	// Stop the user retirement processor goroutine (Phase 16 Gap 1)
+	if s.userRetirementStop != nil {
+		select {
+		case <-s.userRetirementStop:
+			// already closed
+		default:
+			close(s.userRetirementStop)
+		}
+	}
+
+	// Stop the user unretirement processor goroutine (Phase 16 Gap 1)
+	if s.userUnretirementStop != nil {
+		select {
+		case <-s.userUnretirementStop:
+			// already closed
+		default:
+			close(s.userUnretirementStop)
+		}
+	}
+
+	// Stop the admin state change processor goroutine (Phase 16 Gap 1)
+	if s.adminStateChangeStop != nil {
+		select {
+		case <-s.adminStateChangeStop:
+			// already closed
+		default:
+			close(s.adminStateChangeStop)
+		}
+	}
+
+	// Stop the room updates processor goroutine (Phase 16 Gap 1)
+	if s.roomUpdateStop != nil {
+		select {
+		case <-s.roomUpdateStop:
+			// already closed
+		default:
+			close(s.roomUpdateStop)
+		}
+	}
+
+	// Stop the device revocation processor goroutine (Phase 16 Gap 1)
+	if s.deviceRevocationStop != nil {
+		select {
+		case <-s.deviceRevocationStop:
+			// already closed
+		default:
+			close(s.deviceRevocationStop)
+		}
+	}
+
+	// Stop the remove-from-room processor goroutine (Phase 16 Gap 1)
+	if s.removeFromRoomStop != nil {
+		select {
+		case <-s.removeFromRoomStop:
+			// already closed
+		default:
+			close(s.removeFromRoomStop)
 		}
 	}
 
