@@ -53,28 +53,8 @@ func TestRoomsDB_UniqueDisplayNameIndex(t *testing.T) {
 	}
 }
 
-func TestGenerateRoomID(t *testing.T) {
-	id := GenerateRoomID()
-	if !strings.HasPrefix(id, "room_") {
-		t.Errorf("room ID should start with room_, got %q", id)
-	}
-	if len(id) != 26 { // "room_" (5) + 21 chars
-		t.Errorf("room ID length = %d, want 26", len(id))
-	}
-
-	// Should be unique
-	id2 := GenerateRoomID()
-	if id == id2 {
-		t.Error("two generated IDs should not be equal")
-	}
-}
-
-func TestGenerateID_Prefix(t *testing.T) {
-	id := GenerateID("test_")
-	if !strings.HasPrefix(id, "test_") {
-		t.Errorf("should start with test_, got %q", id)
-	}
-}
+// TestGenerateRoomID and TestGenerateID_Prefix moved to nanoid_test.go
+// in Phase 17 Step 1 — co-located with the code they exercise.
 
 func TestSeedRooms_PopulatesDB(t *testing.T) {
 	dir := t.TempDir()

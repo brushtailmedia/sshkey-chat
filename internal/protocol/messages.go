@@ -1223,10 +1223,11 @@ type RetiredUser struct {
 // Errors
 
 type Error struct {
-	Type    string `json:"type"`            // "error"
-	Code    string `json:"code"`            // machine-readable error code
-	Message string `json:"message"`         // human-readable description
-	Ref     string `json:"ref,omitempty"`   // message ID that caused the error
+	Type         string `json:"type"`                      // "error"
+	Code         string `json:"code"`                      // machine-readable error code
+	Message      string `json:"message"`                   // human-readable description
+	Ref          string `json:"ref,omitempty"`             // message ID that caused the error
+	RetryAfterMs int64  `json:"retry_after_ms,omitempty"`  // Phase 17: populated on rate-limit rejections; client backoff hint
 }
 
 // Error codes
@@ -1264,6 +1265,75 @@ const (
 	ErrEditWindowExpired  = "edit_window_expired"  // surfaced
 	ErrEditDeletedMessage = "edit_deleted_message" // internal only — wire response is ErrUnknownX
 )
+
+// Phase 17 Step 2 wire codes — stable protocol tokens for the Phase 17c
+// centralized error helper + constructors below. These are deliberately a
+// separate vocabulary from the internal `counters.Signal*` names, which are
+// observability identifiers and may evolve independently. A caller building
+// a protocol.Error picks from this Code* set; counters package picks from
+// its Signal* set. The two never share symbol identities.
+//
+// Adding a new wire code means: add the constant here, document in
+// PROTOCOL.md if client-facing, and use in handler rejection sites.
+const (
+	CodeDenied      = "denied"            // Phase 14 privacy-opaque rejection
+	CodeRateLimit   = "rate_limited"      // rate-limit rejection (carries RetryAfterMs)
+	CodeMalformed   = "malformed"         // client-facing validation failure with public field name
+	CodeInvalidID   = "invalid_id"        // shape rejection (malformed nanoid etc.)
+	CodeTooLarge    = "payload_too_large" // oversized-input rejection
+	CodeUnknownVerb = "unknown_verb"      // unrecognized type (reserved; currently silent)
+	CodeInternal    = "internal_error"    // server-internal failure (client handles as Category A retry)
+)
+
+// OpaqueReject returns a byte-identical opaque rejection suitable for
+// Category D (privacy-identical) rejections: non-member sends, unknown-room
+// lookups, deleted-row access. The response shape is fixed by the Phase 14
+// privacy invariant — do not customize per callsite, or probing clients can
+// distinguish "not a member" from "room doesn't exist."
+//
+// Usage (from a Step 4-6 rejection site):
+//
+//	s.rejectAndLog(c, counters.SignalInvalidNanoID, "send",
+//	    fmt.Sprintf("non-member send attempt on %s", roomID),
+//	    protocol.OpaqueReject())
+func OpaqueReject() *Error {
+	return &Error{
+		Type:    "error",
+		Code:    CodeDenied,
+		Message: "operation rejected",
+	}
+}
+
+// RateLimit returns a rate-limit rejection error with the given backoff hint
+// in milliseconds. Clients handling Category A (retriable transient) use the
+// hint for exponential-backoff seeding; refresh-verb clients (A-silent) drop
+// the error silently and leave cached data on screen.
+//
+// retryAfterMs may be 0 if no specific backoff is suggested — the
+// RetryAfterMs field uses `omitempty` so zero is elided from the wire.
+func RateLimit(retryAfterMs int64) *Error {
+	return &Error{
+		Type:         "error",
+		Code:         CodeRateLimit,
+		Message:      "please slow down",
+		RetryAfterMs: retryAfterMs,
+	}
+}
+
+// MalformedField returns a malformed-field rejection naming the public field
+// and a reason string. Use for client-facing validation failures where the
+// field name is public knowledge (payload size, file_ids cap, wrapped_keys
+// cap, content_hash format, etc.).
+//
+// Do NOT use for privacy-sensitive fields — a malformed-field message with
+// a private field name leaks server state. Use OpaqueReject() instead.
+func MalformedField(field, reason string) *Error {
+	return &Error{
+		Type:    "error",
+		Code:    CodeMalformed,
+		Message: field + ": " + reason,
+	}
+}
 
 // RawMessage is a JSON object that hasn't been decoded into a specific type yet.
 // Used in sync batches and history results which contain mixed message types.

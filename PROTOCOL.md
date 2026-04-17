@@ -1030,7 +1030,11 @@ Metadata on Channel 1, raw bytes on Channel 2 (downloads) or Channel 3 (uploads)
 {"type":"upload_complete","upload_id":"up_001","file_id":"file_xyz"}
 ```
 
-The `content_hash` field is **required**. Format: `blake2b-256:<hex>` — a BLAKE2b-256 hash of the encrypted bytes. The server verifies the hash after receiving the file and rejects on mismatch. The hash is stored and echoed back on downloads so clients can verify integrity before decrypting.
+The `content_hash` field is **required**. Format: `blake2b-256:<hex>` — a BLAKE2b-256 hash of the encrypted bytes, strictly lowercase hex. The server validates the format shape at `upload_start` receipt; malformed values (wrong prefix, wrong length, uppercase hex, non-hex characters) are rejected with `invalid_content_hash` before the upload begins. After the binary frame arrives, the server re-computes the hash and rejects on mismatch. The hash is stored and echoed back on downloads so clients can verify integrity before decrypting.
+
+**Wire contract (strict):** `^blake2b-256:[0-9a-f]{64}$`. Clients producing uppercase hex (`%X` in Go, `toUpperCase()` equivalents) will be rejected — this is specified behavior, not a server implementation quirk. Any BLAKE2b-256 hash library produces hex output; clients MUST emit it in lowercase.
+
+**`upload_id` contract:** client-generated correlation token used to match Channel 1 `upload_start` to the Channel 3 binary frame. Format: `up_` prefix + 21-character nanoid body from the alphabet `[0-9A-Za-z_-]`. Server validates shape at `upload_start` receipt; malformed values are rejected. Clients should generate fresh upload_ids per upload via the same nanoid helper used for other client-generated IDs (e.g. correlation IDs).
 
 If the server rejects an `upload_start` (rate limit, size limit, missing hash, hash mismatch, etc.), it replies with `upload_error`:
 
@@ -1039,7 +1043,7 @@ If the server rejects an `upload_start` (rate limit, size limit, missing hash, h
 {"type":"upload_error","upload_id":"up_001","code":"rate_limited","message":"Upload rate limit exceeded"}
 ```
 
-Upload error codes: `rate_limited`, `upload_too_large`, `missing_hash`, `hash_mismatch`, `invalid_message`.
+Upload error codes: `rate_limited`, `upload_too_large`, `missing_hash`, `invalid_content_hash`, `hash_mismatch`, `invalid_upload_id`, `invalid_message`.
 
 Then send a message referencing the `file_id`. Upload first, message second.
 
@@ -1071,6 +1075,13 @@ id_len (1 byte) | id (variable) | data_len (8 bytes, big-endian uint64) | data (
 ```
 
 The `id` is the `upload_id` (on Channel 3, client -> server) or `file_id` (on Channel 2, server -> client). Read `id_len`, then `id`, then `data_len`, then exactly `data_len` bytes.
+
+**Server-enforced bounds on inbound Channel 3 frames:**
+- `data_len` MUST NOT exceed `MaxFileSize` (server config; default 50MB). Frames claiming larger `data_len` are rejected before any allocation — the server does not stream into a buffer larger than the declared `size` of the preceding `upload_start`.
+- `id_len` is bounded by the wire format (1 byte, max 255); server further caps at 128 to match the `upload_id` space (3-byte prefix + 21-byte body = 24 bytes; 128 gives generous margin for future prefix growth).
+- Frames whose `id` doesn't match a pending upload are rejected (no corresponding `upload_start` seen).
+
+These are hard protocol limits, not server tuning. Clients that produce oversized frames or invalid IDs will see their Channel 3 stream disconnected.
 
 Concurrent uploads share Channel 3 and so must serialize their frame writes (clients typically use a single mutex for the upload channel). Concurrent downloads share Channel 2 the same way on the client side. But an upload and a download happen on different channels and can proceed in parallel.
 
@@ -1148,6 +1159,36 @@ Server disconnects the device and rejects future connections from that device ID
 Users can list and revoke their own devices without admin intervention. The server validates that the target `device_id` belongs to the authenticated user before revoking. Self-revocation (revoking the current device) is allowed and will disconnect the requesting session.
 
 Admins can still revoke any user's device via `sshkey-ctl revoke-device --user --device`.
+
+### Auto-Revoke on sustained misbehavior
+
+**Server-side input validation and rate limits are the primary defenses.** Every request the server receives is validated at the boundary (frame size, field shapes, envelope caps, etc.) and rate-limited per device. Invalid or excessive requests are rejected individually, regardless of whether auto-revoke is enabled. Validation and rate-limiting cannot be disabled — they are part of the protocol contract.
+
+Auto-revoke is a **feature add on top of these defenses**: it tracks misbehavior signals per device over sliding windows, and when a device crosses a configured threshold for any signal, the server auto-revokes it via the same `pending_device_revocations` path used by admin-initiated revocation. The client receives the same `device_revoked` message; the recovery path is the same (`sshkey-ctl approve-device`).
+
+A server with auto-revoke disabled (`[server.autoRevoke] enabled = false`) still rejects invalid requests and applies rate limits — operators just need to manually revoke devices that repeatedly misbehave. Enabling auto-revoke automates that last step; it does not change the primary protection.
+
+Misbehavior signals are things well-behaved clients produce zero of:
+- malformed NDJSON frames
+- invalid-shape nanoids on the wire
+- `wrapped_keys` maps that exceed the member-count cap
+- `file_ids` arrays that exceed the envelope cap
+- malformed `content_hash` strings
+- oversized Channel 3 upload frames
+- unknown verbs (transient version skew is tolerated up to a small count)
+- reconnect flooding
+
+Server operators configure this under `[server.autoRevoke]` in `server.toml`. The feature ships enabled by default; operators can set `enabled = false` and restart to disable it.
+
+**Client implementer responsibility.** Independent of whether auto-revoke is enabled: clients MUST produce protocol-valid output — valid JSON, valid nanoid shapes, envelope fields within caps, etc. This is the baseline contract. A client that sends malformed output will have those individual messages rejected by server-side validation regardless of auto-revoke settings.
+
+Auto-revoke adds one consequence to that baseline: a client that produces misbehavior at a sustained rate on a server with auto-revoke enabled will additionally have its device cut off. To avoid that consequence on auto-revoke-enabled servers, validate client builds before deploying:
+
+1. Run the client through representative usage (login, send, edit, react, upload, scroll history, open info panels, reconnect) against a server with `enabled = true`
+2. Verify zero misbehavior-signal events accumulated for the client's device (check server logs; ops tooling may expose this via a counter snapshot)
+3. If the client trips any signal during validation, fix the bug before deploying to users
+
+A client that ships with a bug producing (for example) malformed JSON under specific load conditions will see every affected instance auto-revoked as the bug triggers in the field. Server operators can disable auto-revoke as an emergency stop (`enabled = false` + restart), restore affected devices via `sshkey-ctl approve-device`, and re-enable auto-revoke after the corrected client build is deployed — but the cost of this incident is borne by users, not by the server. **Test client code against the validation rules before deploying.** This is a protocol-level contract, not a client-internal nice-to-have.
 
 ### Account Retirement
 
@@ -1371,6 +1412,8 @@ A minimal client that can connect and chat needs:
 A minimal client that understands only rooms + 1:1 DMs is still a usable chat client — group DMs can be deferred — but the handshake sequence MUST be handled correctly (including catchup lists before active-list messages) or multi-device `/delete` will desync.
 
 Everything else (typing, reactions, presence, file transfer, pins, read receipts, safety numbers, replay detection, `/leave`, `/delete`, room retirement) is optional and can be added incrementally. When you add `/leave` or `/delete`, wait for the server echo (`room_left`, `group_left`, `dm_left`, `room_deleted`, `group_deleted`) before touching local state — the server is authoritative.
+
+**Before shipping a client build:** validate it does not trip server-side misbehavior signals during representative usage. See "Auto-Revoke on sustained misbehavior" above — clients that generate malformed frames, invalid ID shapes, oversized envelopes, or similar signals will be auto-revoked on servers with the default configuration. Test against a server with `[server.autoRevoke] enabled = true` and verify zero misbehavior-signal events before deploying the build to users.
 
 ---
 

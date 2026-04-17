@@ -17,6 +17,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
+	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/push"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
@@ -37,6 +38,15 @@ type Server struct {
 	logger   *slog.Logger
 	listener net.Listener
 	dataDir  string
+
+	// counters tracks per-(signal, device) rejection events for
+	// observability and (via Phase 17b) the auto-revoke sliding-window
+	// policy. Introduced in Phase 17 Step 2. Written by rejectAndLog
+	// from every Step 4-6 rejection site; read by Phase 17b's threshold
+	// checker (not yet implemented) and by `counters.Snapshot()` for
+	// tests / future admin tooling. In-memory only — no persistence; a
+	// server bounce resets all counts.
+	counters *counters.Counters
 
 	mu       sync.RWMutex
 	clients  map[string]*Client // device_id -> Client
@@ -131,6 +141,7 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		logger:               logger,
 		epochs:               newEpochManager(),
 		limiter:              newRateLimiter(),
+		counters:             counters.New(),
 		clients:              make(map[string]*Client),
 		dataDir:              dir,
 		roomRetirementStop:   make(chan struct{}),
