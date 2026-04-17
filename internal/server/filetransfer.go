@@ -14,6 +14,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
+	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
@@ -311,10 +312,205 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 	})
 }
 
+// authorizeDownload runs the ACL check for a single download request.
+// Returns true iff the caller is allowed to download file_id under the
+// per-context rules documented in download_fix.md §"Download access
+// check" and §"Temporal gate semantics".
+//
+// Per-context semantics:
+//   - Room: current member of the file's bound room AND first_seen
+//     <= file.ts (forward-secrecy gate — new joiners cannot download
+//     attachments sent before they joined).
+//   - Group: current member AND joined_at <= file.ts. Group re-join
+//     produces a fresh joined_at (AddGroupMember is DELETE-then-INSERT),
+//     so re-joiners correctly lose access to files attached during
+//     their absence window.
+//   - 1:1 DM: party check only. user_*_left_at is a history-hiding
+//     lower bound on message reads (ghost-conversation fix), NOT an
+//     upper-bound access gate. See context_lifecycle_model memory
+//     note — misreading this as a forward-secrecy gate would break
+//     the ghost-conversation design by rejecting downloads a leaver
+//     is entitled to after re-engaging.
+//
+// Privacy: this function returns a single bool. Callers render the
+// "no" case byte-identically to "file doesn't exist" — the caller
+// cannot distinguish "no binding row" from "no membership" from
+// "before my join time" from the false return.
+func (s *Server) authorizeDownload(userID, fileID string) bool {
+	if s.store == nil {
+		return false
+	}
+	binding, err := s.store.GetFileContext(fileID)
+	if err != nil || binding == nil {
+		return false
+	}
+
+	switch binding.ContextType {
+	case store.FileContextRoom:
+		if !s.store.IsRoomMemberByID(binding.ContextID, userID) {
+			return false
+		}
+		firstSeen, _, _ := s.store.GetUserRoom(userID, binding.ContextID)
+		if firstSeen <= 0 {
+			return false
+		}
+		return firstSeen <= binding.TS
+
+	case store.FileContextGroup:
+		isMember, err := s.store.IsGroupMember(binding.ContextID, userID)
+		if err != nil || !isMember {
+			return false
+		}
+		joinedAt, err := s.store.GetUserGroupJoinedAt(userID, binding.ContextID)
+		if err != nil || joinedAt <= 0 {
+			return false
+		}
+		return joinedAt <= binding.TS
+
+	case store.FileContextDM:
+		dm, err := s.store.GetDirectMessage(binding.ContextID)
+		if err != nil || dm == nil {
+			return false
+		}
+		return dm.UserA == userID || dm.UserB == userID
+
+	default:
+		// Unknown context_type — reject. InsertFileContext guards
+		// against bad values at write time, so this should never hit.
+		s.logger.Error("download: unknown context_type in binding",
+			"file_id", fileID,
+			"context_type", binding.ContextType,
+		)
+		return false
+	}
+}
+
+// handleDownload processes a download request arriving as a Channel 1
+// NDJSON message. Writes the binary frame to the client's per-session
+// DownloadChannel (2nd session channel) and echoes
+// download_start/download_complete on Channel 1.
+//
+// Security: runs authorizeDownload (membership + forward-secrecy gate
+// per context type). The file_id is also validated via strict
+// ValidateNanoID (path-traversal defense — file_id flows into
+// filepath.Join below). An attacker sending
+// `file_id = "../../etc/passwd"` is rejected at the validator before
+// any filesystem access.
+//
+// Privacy: not-found / no-access / no-channel responses all use
+// `not_found` code with an identical message; a probing client cannot
+// distinguish "the file exists but you can't read it" from "the file
+// doesn't exist" from "you haven't opened a download channel".
+func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
+	var msg protocol.Download
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		c.Encoder.Encode(protocol.Error{
+			Type: "error", Code: "invalid_message",
+			Message: "malformed download",
+		})
+		return
+	}
+
+	// Path-traversal defense: file_id flows into filepath.Join below.
+	// Strict nanoid shape check catches "../../etc/passwd" and other
+	// filesystem-escape attempts at the wire boundary.
+	if err := store.ValidateNanoID(msg.FileID, "file_"); err != nil {
+		s.counters.Inc(counters.SignalInvalidNanoID, c.DeviceID)
+		c.Encoder.Encode(protocol.DownloadError{
+			Type:    "download_error",
+			FileID:  msg.FileID,
+			Code:    "invalid_file_id",
+			Message: "invalid file_id",
+		})
+		return
+	}
+
+	// ACL check: caller must be a current member of the file's bound
+	// context, and (for rooms/groups) joined before the file was
+	// attached. Forward-secrecy gate for rooms/groups; party-only for
+	// DMs (no joined_at check, per the ghost-conversation design).
+	if !s.authorizeDownload(c.UserID, msg.FileID) {
+		c.Encoder.Encode(protocol.DownloadError{
+			Type:    "download_error",
+			FileID:  msg.FileID,
+			Code:    "not_found",
+			Message: "File not found: " + msg.FileID,
+		})
+		return
+	}
+
+	// DownloadChannel is the 2nd session channel. A well-behaved
+	// client always opens it during connect; nil here means the
+	// client failed to open Channel 2 within the grace period in
+	// handleSession. Treat as not_found to preserve the privacy
+	// envelope (no leak of the underlying cause).
+	if c.DownloadChannel == nil {
+		s.logger.Debug("download request without Channel 2 open",
+			"user", c.UserID, "device", c.DeviceID)
+		c.Encoder.Encode(protocol.DownloadError{
+			Type:    "download_error",
+			FileID:  msg.FileID,
+			Code:    "not_found",
+			Message: "File not found: " + msg.FileID,
+		})
+		return
+	}
+
+	filePath := filepath.Join(s.files.dir, msg.FileID)
+	info, err := os.Stat(filePath)
+	if err != nil {
+		c.Encoder.Encode(protocol.DownloadError{
+			Type:    "download_error",
+			FileID:  msg.FileID,
+			Code:    "not_found",
+			Message: "File not found: " + msg.FileID,
+		})
+		return
+	}
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		s.logger.Error("download: open failed", "file", msg.FileID, "error", err)
+		c.Encoder.Encode(protocol.DownloadError{
+			Type:    "download_error",
+			FileID:  msg.FileID,
+			Code:    "not_found",
+			Message: "File not found: " + msg.FileID,
+		})
+		return
+	}
+	defer f.Close()
+
+	// Stored content hash for end-to-end integrity verification.
+	var storedHash string
+	if s.store != nil {
+		storedHash, _ = s.store.GetFileHash(msg.FileID)
+	}
+
+	c.Encoder.Encode(protocol.DownloadStart{
+		Type:        "download_start",
+		FileID:      msg.FileID,
+		Size:        info.Size(),
+		ContentHash: storedHash,
+	})
+
+	if err := writeBinaryFrame(c.DownloadChannel, msg.FileID, f, info.Size()); err != nil {
+		s.logger.Error("download: write failed", "file", msg.FileID, "error", err)
+		// Can't signal via Channel 1 cleanly — the client is mid-read
+		// on Channel 2 and the binary frame is partial/corrupt. SSH
+		// layer will close on connection drop; rely on client-side
+		// timeout.
+		return
+	}
+
+	c.Encoder.Encode(protocol.DownloadComplete{
+		Type:   "download_complete",
+		FileID: msg.FileID,
+	})
+}
+
 // handleBinaryChannel processes incoming upload frames on the upload
-// channel (the 2nd "session"-type SSH channel on a client connection;
-// was numbered "Channel 3" in the pre-Phase-17-Step-4.f model alongside
-// a separate per-session download channel that's now retired).
+// channel (the 3rd "session"-type SSH channel on a client connection).
 func (s *Server) handleBinaryChannel(userID string, ch ssh.Channel) {
 	defer ch.Close()
 

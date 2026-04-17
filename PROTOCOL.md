@@ -28,17 +28,13 @@ The server does not allow anonymous access. Before a user can connect and chat, 
 
 This lets admins know someone is waiting for approval without polling.
 
-SSH channels per connection:
+SSH channels per connection — **three `session` channels**, opened in a fixed order before `client_hello`:
 
 - **Control channel:** type `session`, 1st session channel opened. NDJSON protocol messages (one JSON object per line, terminated by `\n`). This is the long-lived control plane for the session.
-- **Upload channel:** type `session`, 2nd session channel opened. Client writes raw encrypted file bytes here (length-prefixed frames); server reads. Long-lived; reused across uploads for the session.
-- **Download channels:** type `sshkey-chat-download`. Opened on-demand, **one SSH channel per download request**. Short-lived; server reads the inline download request, runs the access check, streams bytes, closes.
+- **Download channel:** type `session`, 2nd session channel opened. Server writes raw encrypted file bytes here in response to `download` verbs on the control channel; client reads. One channel shared across all downloads on the connection — clients MUST serialize their `download` requests (one at a time per session).
+- **Upload channel:** type `session`, 3rd session channel opened. Client writes raw encrypted file bytes here; server reads. Long-lived; reused across uploads.
 
-Downloads open their own SSH channel per request so concurrent downloads don't serialize and don't interleave on a shared stream. The client opens the control + upload channels in order before sending `client_hello`; download channels open on demand after `client_hello` completes.
-
-**Per-connection download concurrency cap.** The server bounds how many `sshkey-chat-download` channels can be open simultaneously on a single SSH connection. Over-cap channel opens are rejected at the SSH layer with `ResourceShortage` / `"concurrent download limit reached"`. The cap is operator-configurable via `[server.downloads].max_concurrent_per_client` (default 3). Clients should queue local download requests and retry when an existing download completes.
-
-**Per-channel TTL.** Every download channel has a hard wall-clock time-to-live enforced by the server; a channel open longer than the TTL is closed by the server regardless of progress. Protects against hostile slow-read. TTL is operator-configurable via `[server.downloads].channel_ttl_seconds` (default 60). Downloads are content-addressed by `file_id` — retries after a TTL-cut channel are safe; no state changes on the server between attempts.
+Access control, content-hash verification, and cascade cleanup are enforced by the server's `file_contexts` binding table — see the File Transfer section for details.
 
 The server's SSH host key is Ed25519, generated on first run. Clients should use trust-on-first-use (TOFU) -- store the host key fingerprint on first connect, verify on subsequent connects.
 
@@ -46,8 +42,7 @@ The server's SSH host key is Ed25519, generated on first run. Clients should use
 
 ```
 Client opens SSH connection with Ed25519 key
-Client opens 2 session channels (1st: control/NDJSON, 2nd: upload binary frames)
-Client opens sshkey-chat-download channels on demand, one per file download
+Client opens 3 session channels (1st: control/NDJSON, 2nd: download, 3rd: upload)
 
   Server -> {"type":"server_hello","protocol":"sshkey-chat","version":1,
              "server_id":"chat.example.com",
@@ -1020,7 +1015,7 @@ Clients should treat retired rooms as read-only — disable message input and su
 
 Capability: `file_transfer`
 
-**Upload:** metadata on the control channel, raw bytes on the upload channel (2nd `session` channel). **Download:** metadata AND raw bytes on a dedicated per-request `sshkey-chat-download` channel (one SSH channel per download). File content is encrypted client-side before upload.
+**Upload:** metadata on the control channel, raw bytes on the upload channel (3rd `session` channel). **Download:** metadata on the control channel, raw bytes on the download channel (2nd `session` channel). File content is encrypted client-side before upload.
 
 #### Upload
 
@@ -1058,39 +1053,43 @@ Then send a message referencing the `file_id`. Upload first, message second. The
 
 #### Download
 
-**One SSH channel per download.** The client opens a new channel of type `sshkey-chat-download` for each file it wants to fetch. The download request lives inline on the new channel, followed by the binary stream:
+Client writes a `download` verb on the control channel; server replies with `download_start` on the control channel, then writes the binary frame to the pre-established shared download channel (2nd `session` channel).
 
-```
-Client: open SSH channel, type = "sshkey-chat-download"
-Client: write   {"type":"download","file_id":"file_xyz"}\n
-Server: reply   {"type":"download_start","file_id":"file_xyz","size":45000,"content_hash":"blake2b-256:a1b2c3..."}\n
-Server: stream  <binary frame — see format below>
-Server: reply   {"type":"download_complete","file_id":"file_xyz"}\n
-Server: close channel
+```json
+// Control channel: Client -> Server
+{"type":"download","file_id":"file_xyz"}
+
+// Control channel: Server -> Client
+{"type":"download_start","file_id":"file_xyz","size":45000,"content_hash":"blake2b-256:a1b2c3..."}
+
+// Download channel: Server -> Client (binary frame)
+
+// Control channel: Server -> Client
+{"type":"download_complete","file_id":"file_xyz"}
 ```
 
-On the client side, read the first JSON line to distinguish success (`download_start`) from failure (`download_error`). On success, read the binary frame, then the trailing `download_complete` line, then the channel closes. On failure, there's no binary frame and no `download_complete` — the channel closes after the error line.
+Clients MUST wait for `download_start` before reading from the download channel. On receipt, read the binary frame, then wait for `download_complete` on the control channel. Clients MUST serialize their `download` requests (one at a time per session) because the shared channel can only hold one in-flight stream at a time.
 
-```
-Server: reply  {"type":"download_error","file_id":"file_xyz","code":"not_found","message":"file not found"}\n
-Server: close channel
+On rejection, the server replies with `download_error` on the control channel and writes nothing to the download channel:
+
+```json
+// Control channel: Server -> Client
+{"type":"download_error","file_id":"file_xyz","code":"not_found","message":"File not found: file_xyz"}
 ```
 
 **Access control.** The server checks the caller has access to `file_id`'s owning context before streaming. Rooms and groups apply a forward-secrecy gate: a user who joined the context AFTER the file was uploaded cannot download it, even if they're currently a member. (Client-side decryption would fail anyway — they don't have the epoch / wrapped key for that era — but the server-side ACL keeps the byte stream out of reach entirely.) 1:1 DMs use party-only access without a time gate, matching the ghost-conversation design for DMs where leaving is soft.
 
 Download error codes: `not_found` (file doesn't exist OR caller lacks access — byte-identical response for both, so a probing client cannot distinguish), `invalid_file_id` (malformed shape), `invalid_request` (malformed JSON or wrong type field).
 
-**Concurrency and TTL.** Per-connection cap on simultaneous `sshkey-chat-download` channels (default 3; operator-configurable). Over-cap channel opens are rejected at the SSH layer with `ResourceShortage`. Each channel has a hard TTL (default 60s; operator-configurable) — a download that doesn't complete within the TTL has its channel closed by the server. Retries are safe because downloads are content-addressed by `file_id`.
-
 **Timeout:** Clients should apply a 30-second timeout when waiting for `upload_ready`, `upload_complete`, and `download_start`. If the server doesn't respond within the timeout, abort with a timeout error.
 
-**Binary frame format (upload channel and download channels):**
+**Binary frame format (upload channel and download channel):**
 
 ```
 id_len (1 byte) | id (variable) | data_len (8 bytes, big-endian uint64) | data (raw bytes)
 ```
 
-The `id` is the `upload_id` (on the upload channel, client -> server) or `file_id` (on a download channel, server -> client). Read `id_len`, then `id`, then `data_len`, then exactly `data_len` bytes.
+The `id` is the `upload_id` (on the upload channel, client -> server) or `file_id` (on the download channel, server -> client). Read `id_len`, then `id`, then `data_len`, then exactly `data_len` bytes.
 
 **Server-enforced bounds on inbound upload-channel frames:**
 - `data_len` MUST NOT exceed `MaxFileSize` (server config; default 50MB). Frames claiming larger `data_len` are rejected before any allocation — the server does not stream into a buffer larger than the declared `size` of the preceding `upload_start`.
@@ -1099,7 +1098,7 @@ The `id` is the `upload_id` (on the upload channel, client -> server) or `file_i
 
 These are hard protocol limits, not server tuning. Clients that produce oversized frames or invalid IDs will see their upload channel disconnected.
 
-Concurrent uploads share the upload channel and must serialize their frame writes (clients typically use a single mutex for the upload channel). Concurrent downloads are on **separate** SSH channels per request — they do NOT share state and run independently, bounded only by the per-connection cap described above. Uploads and downloads also run on separate channels and proceed in parallel naturally.
+Concurrent uploads share the upload channel and must serialize their frame writes (clients typically use a single mutex for the upload channel). Downloads share the download channel and must likewise serialize — one download in flight per session at a time. Uploads and downloads run on separate channels and proceed in parallel naturally.
 
 **Room files:** encrypt with the current epoch key. Record `file_epoch` in the attachment metadata so recipients know which epoch key decrypts the file (usually matches the message's epoch; only differs during epoch transitions).
 

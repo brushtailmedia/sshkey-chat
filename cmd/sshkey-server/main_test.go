@@ -213,7 +213,7 @@ type testClient struct {
 	enc  *protocol.Encoder
 	dec  *protocol.Decoder
 	ch   ssh.Channel
-	conn *ssh.Client // underlying connection — used by tests that need to open additional channels (e.g. per-request download channels in Phase 17 Step 4.f)
+	conn *ssh.Client // underlying SSH connection — used by tests that need to open additional session channels (e.g. the shared download channel in the legacy-path download tests)
 	t    *testing.T
 }
 

@@ -55,7 +55,6 @@ type ServerConfig struct {
 	Retention  RetentionSection  `toml:"retention"`
 	Sync       SyncSection       `toml:"sync"`
 	Files      FilesSection      `toml:"files"`
-	Downloads  DownloadsSection  `toml:"downloads"`
 	Devices    DevicesSection    `toml:"devices"`
 	RateLimits RateLimitsSection `toml:"rate_limits"`
 	Shutdown   ShutdownSection   `toml:"shutdown"`
@@ -105,37 +104,6 @@ type FilesSection struct {
 
 type DevicesSection struct {
 	MaxPerUser int `toml:"max_per_user"`
-}
-
-// DownloadsSection configures the per-request download channel model
-// (Phase 17 Step 4.f). Each file download opens a dedicated SSH channel
-// of type `sshkey-chat-download`; MaxConcurrentPerClient caps how many
-// such channels can be open simultaneously per connected session, and
-// ChannelTTLSeconds is the hard wall-clock cap on any single channel's
-// lifetime (defense against hostile slow-read, retries on TTL expiry
-// are safe because downloads are content-addressed by file_id).
-//
-// Both values are hot-reloadable via config reload. In-flight channels
-// keep the values they were created with; only channels opened after
-// the reload see new values.
-type DownloadsSection struct {
-	// MaxConcurrentPerClient bounds how many download channels a single
-	// connected session may have open simultaneously. Over-cap channel
-	// opens are rejected with an SSH channel-reject; the client is
-	// expected to queue locally and retry when an existing download
-	// completes. Default 3 covers typical chat UIs (scroll past a row
-	// of images) without unbounded resource draw.
-	MaxConcurrentPerClient int `toml:"max_concurrent_per_client"`
-
-	// ChannelTTLSeconds is the hard cap on any single download channel's
-	// lifetime. At the default MaxFileSize=50MB, 60s implies a ~850 KB/s
-	// throughput floor — comfortably covered by broadband and 4G/5G.
-	// Slow-3G edge cases may time out on very large files; downloads are
-	// idempotent (file_id is the identity, server serves the same bytes
-	// on retry, no state change) so client retry is safe. Hard TTL is
-	// preferred over inactivity-only timeout because it defends against
-	// "open channel, read 1 byte/sec forever" hostile slow-read.
-	ChannelTTLSeconds int `toml:"channel_ttl_seconds"`
 }
 
 type RateLimitsSection struct {
@@ -230,10 +198,6 @@ func DefaultServerConfig() ServerConfig {
 			MaxFileSize:       "50MB",
 			MaxAvatarSize:     "256KB",
 			AllowedAvatarTypes: []string{"image/png", "image/jpeg"},
-		},
-		Downloads: DownloadsSection{
-			MaxConcurrentPerClient: 3,
-			ChannelTTLSeconds:      60,
 		},
 		Devices: DevicesSection{
 			MaxPerUser: 10,

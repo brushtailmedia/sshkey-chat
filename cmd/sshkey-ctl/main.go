@@ -219,11 +219,20 @@ func cmdApprove(configDir, dataDir string, args []string) error {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--name":
-			if i+1 < len(args) { displayName = args[i+1]; i++ }
+			if i+1 < len(args) {
+				displayName = args[i+1]
+				i++
+			}
 		case "--key":
-			if i+1 < len(args) { key = args[i+1]; i++ }
+			if i+1 < len(args) {
+				key = args[i+1]
+				i++
+			}
 		case "--rooms":
-			if i+1 < len(args) { rooms = args[i+1]; i++ }
+			if i+1 < len(args) {
+				rooms = args[i+1]
+				i++
+			}
 		}
 	}
 
@@ -776,9 +785,15 @@ func cmdAddToRoom(configDir, dataDir string, args []string) error {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--user":
-			if i+1 < len(args) { user = args[i+1]; i++ }
+			if i+1 < len(args) {
+				user = args[i+1]
+				i++
+			}
 		case "--room":
-			if i+1 < len(args) { room = args[i+1]; i++ }
+			if i+1 < len(args) {
+				room = args[i+1]
+				i++
+			}
 		}
 	}
 	if user == "" || room == "" {
@@ -846,9 +861,15 @@ func cmdRemoveFromRoom(configDir, dataDir string, args []string) error {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--user":
-			if i+1 < len(args) { user = args[i+1]; i++ }
+			if i+1 < len(args) {
+				user = args[i+1]
+				i++
+			}
 		case "--room":
-			if i+1 < len(args) { room = args[i+1]; i++ }
+			if i+1 < len(args) {
+				room = args[i+1]
+				i++
+			}
 		}
 	}
 	if user == "" || room == "" {
@@ -903,9 +924,15 @@ func cmdAddRoom(dataDir string, args []string) error {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--name":
-			if i+1 < len(args) { name = args[i+1]; i++ }
+			if i+1 < len(args) {
+				name = args[i+1]
+				i++
+			}
 		case "--topic":
-			if i+1 < len(args) { topic = args[i+1]; i++ }
+			if i+1 < len(args) {
+				topic = args[i+1]
+				i++
+			}
 		}
 	}
 	if name == "" {
@@ -1325,11 +1352,20 @@ func cmdRevokeDevice(dataDir string, args []string) error {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--user":
-			if i+1 < len(args) { user = args[i+1]; i++ }
+			if i+1 < len(args) {
+				user = args[i+1]
+				i++
+			}
 		case "--device":
-			if i+1 < len(args) { device = args[i+1]; i++ }
+			if i+1 < len(args) {
+				device = args[i+1]
+				i++
+			}
 		case "--reason":
-			if i+1 < len(args) { reason = args[i+1]; i++ }
+			if i+1 < len(args) {
+				reason = args[i+1]
+				i++
+			}
 		}
 	}
 	if user == "" || device == "" {
@@ -1374,9 +1410,15 @@ func cmdRestoreDevice(dataDir string, args []string) error {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--user":
-			if i+1 < len(args) { user = args[i+1]; i++ }
+			if i+1 < len(args) {
+				user = args[i+1]
+				i++
+			}
 		case "--device":
-			if i+1 < len(args) { device = args[i+1]; i++ }
+			if i+1 < len(args) {
+				device = args[i+1]
+				i++
+			}
 		}
 	}
 	if user == "" || device == "" {
@@ -1489,7 +1531,10 @@ func cmdPurge(dataDir string, args []string) error {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--older-than":
-			if i+1 < len(args) { olderThan = args[i+1]; i++ }
+			if i+1 < len(args) {
+				olderThan = args[i+1]
+				i++
+			}
 		case "--dry-run":
 			dryRun = true
 		}

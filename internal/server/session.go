@@ -35,10 +35,19 @@ var allCapabilities = []string{
 
 // handleSession runs the protocol session on an accepted SSH channel.
 // The session channel is the NDJSON control plane (1st session channel
-// on the SSH connection). Uploads flow on the 2nd session channel
-// (handleBinaryChannel); downloads use per-request `sshkey-chat-download`
-// channels (handleDownloadChannel) and do not touch this session.
-func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Channel) {
+// on the SSH connection).
+//
+// dlChanCh delivers the shared download channel (2nd session channel).
+// Clients open all three session channels in order before client_hello
+// completes, so by the time this function attaches the client, the 2nd
+// channel should already be queued. A short wait tolerates SSH
+// channel-open reordering. If the 2nd channel doesn't arrive within
+// the grace period, Client.DownloadChannel stays nil and any later
+// `download` verb fails closed with not_found — well-behaved clients
+// never hit that path.
+//
+// Uploads flow on the 3rd session channel (handleBinaryChannel).
+func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Channel, dlChanCh <-chan ssh.Channel) {
 	defer ch.Close()
 
 	enc := protocol.NewEncoder(ch)
@@ -194,6 +203,23 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 	s.mu.Lock()
 	s.clients[clientHello.DeviceID] = client
 	s.mu.Unlock()
+
+	// Attach the shared download channel. Clients open Channels 1-3
+	// before client_hello completes, so the 2nd session channel should
+	// already be on dlChanCh by now. The 500ms wait tolerates SSH
+	// channel-open reordering; a well-behaved client always arrives
+	// within it. Missing Channel 2 past the grace period means a
+	// buggy / partial client — DownloadChannel stays nil and any
+	// `download` verb it sends later fails closed with not_found.
+	select {
+	case dlCh := <-dlChanCh:
+		s.mu.Lock()
+		client.DownloadChannel = dlCh
+		s.mu.Unlock()
+	case <-time.After(500 * time.Millisecond):
+		s.logger.Debug("no download channel opened within grace period",
+			"user", userID, "device", clientHello.DeviceID)
+	}
 
 	defer func() {
 		s.mu.Lock()
@@ -763,10 +789,11 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 		s.handleRoomMembers(c, raw)
 	case "upload_start":
 		s.handleUploadStart(c, raw)
-	// Phase 17 Step 4.f: the old `download` verb on Channel 1 is retired.
-	// Downloads now open a dedicated SSH channel of type
-	// `sshkey-chat-download` and write the download request inline on
-	// that channel. See handleDownloadChannel in download_channel.go.
+	case "download":
+		// Metadata reply on Channel 1, raw bytes on the client's
+		// DownloadChannel (2nd session channel). Serialized one
+		// download at a time per session by the shared-channel model.
+		s.handleDownload(c, raw)
 	case "push_register":
 		s.handlePushRegister(c, raw)
 	case "typing":
