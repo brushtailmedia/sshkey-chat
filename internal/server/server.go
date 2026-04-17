@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -635,19 +636,43 @@ func (s *Server) handleConnection(conn net.Conn) {
 		}
 	}()
 
+	// Per-connection state for the per-request download channels (Phase
+	// 17 Step 4.f). Each download opens a fresh SSH channel with type
+	// sshkey-chat-download; activeDownloads is the atomic counter the
+	// download-channel handler uses for CAS-based cap enforcement. Lifetime
+	// matches this connection — goroutines spawned below hold a pointer
+	// back to this local, so when handleConnection returns and the value
+	// goes out of scope, any surviving goroutines will hit Channel.Write
+	// errors on the already-dead ssh.Channel and exit cleanly.
+	var activeDownloads atomic.Int32
+
 	// Handle channels:
-	//   Channel 1 = NDJSON protocol
-	//   Channel 2 = downloads (server writes file bytes here)
-	//   Channel 3 = uploads   (server reads file bytes here)
-	// Download and upload are split onto separate SSH channels so a large
-	// upload doesn't block concurrent downloads (and vice versa). The
-	// download channel is handed to handleSession so handleDownload can
-	// write to client.DownloadChannel.
-	dlChanCh := make(chan ssh.Channel, 1)
-	channelNum := 0
+	//   Channel type "session"                — NDJSON (1st open) or
+	//                                           upload-frame channel (2nd open)
+	//   Channel type "sshkey-chat-download"   — per-request download streams
+	//                                           (Phase 17 Step 4.f); unlimited
+	//                                           count, bounded per-connection
+	//                                           by the activeDownloads cap
+	// Session channels are position-dispatched (1st = NDJSON, 2nd = uploads).
+	// Download channels are type-dispatched and have no position dependency —
+	// a client opens them on demand, one per download request.
+	//
+	// Any other channel type is rejected with UnknownChannelType.
+	sessionCount := 0
 	for newCh := range chans {
-		if newCh.ChannelType() != "session" {
-			newCh.Reject(ssh.UnknownChannelType, "only session channels are supported")
+		chanType := newCh.ChannelType()
+
+		// Per-request download channels — handled entirely inside the new
+		// handler (accept, cap-check, ACL, stream, close). Does NOT consume
+		// a session-channel slot, so multiple concurrent downloads coexist
+		// with the NDJSON + upload channels.
+		if chanType == DownloadChannelType {
+			go s.handleDownloadChannel(userID, sshConn, newCh, &activeDownloads)
+			continue
+		}
+
+		if chanType != "session" {
+			newCh.Reject(ssh.UnknownChannelType, "unknown channel type: "+chanType)
 			continue
 		}
 
@@ -658,18 +683,21 @@ func (s *Server) handleConnection(conn net.Conn) {
 		}
 		go ssh.DiscardRequests(chReqs)
 
-		channelNum++
-		switch channelNum {
+		sessionCount++
+		switch sessionCount {
 		case 1:
-			// Channel 1: NDJSON protocol
-			go s.handleSession(userID, sshConn, ch, dlChanCh)
+			// 1st session channel: NDJSON protocol (control plane).
+			go s.handleSession(userID, sshConn, ch)
 		case 2:
-			// Channel 2: downloads — server writes here; no reader needed
-			dlChanCh <- ch
-		case 3:
-			// Channel 3: uploads — server reads upload frames here
+			// 2nd session channel: upload frames. Was numbered "Channel 3"
+			// in the pre-Phase-17-Step-4.f model (alongside a separate
+			// per-session download channel that's now retired).
 			go s.handleBinaryChannel(userID, ch)
 		default:
+			// A 3rd+ session channel is now out of spec. Pre-Phase-17-Step-4.f
+			// clients opened 3 session channels (1=NDJSON, 2=download, 3=upload);
+			// new clients open 2. Close extras — doesn't disrupt the
+			// already-running goroutines, just drops the unused channel.
 			ch.Close()
 		}
 	}

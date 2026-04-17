@@ -222,14 +222,15 @@ func TestAutoRevokeSignals_ExactList(t *testing.T) {
 	// Guard against accidental inclusion of load/observational signals.
 	// Adding a new misbehavior signal means updating this test + the slice.
 	want := map[string]bool{
-		SignalMalformedFrame:       true,
-		SignalOversizedBody:        true,
-		SignalUnknownVerb:          true,
-		SignalInvalidNanoID:        true,
-		SignalWrappedKeysOverCap:   true,
-		SignalFileIDsOverCap:       true,
-		SignalInvalidContentHash:   true,
-		SignalOversizedUploadFrame: true,
+		SignalMalformedFrame:          true,
+		SignalOversizedBody:           true,
+		SignalUnknownVerb:             true,
+		SignalInvalidNanoID:           true,
+		SignalWrappedKeysOverCap:      true,
+		SignalFileIDsOverCap:          true,
+		SignalInvalidContentHash:      true,
+		SignalOversizedUploadFrame:    true,
+		SignalDownloadChannelRejected: true,
 	}
 	if len(AutoRevokeSignals) != len(want) {
 		t.Errorf("AutoRevokeSignals len = %d, want %d", len(AutoRevokeSignals), len(want))

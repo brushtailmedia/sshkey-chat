@@ -1553,7 +1553,10 @@ func cmdPurge(dataDir string, args []string) error {
 		if dryRun {
 			fmt.Printf("  %s: would delete %d messages\n", name, count)
 		} else {
-			// Collect file IDs from messages being purged
+			// Collect file IDs from messages being purged. For each,
+			// remove the bytes on disk + file_hashes row + file_contexts
+			// binding (Phase 17 Step 4.f — the binding cascade keeps the
+			// "file exists iff bound" invariant intact after bulk purge).
 			fileRows, _ := db.Query("SELECT file_ids FROM messages WHERE ts < ? AND file_ids != ''", cutoff)
 			if fileRows != nil {
 				for fileRows.Next() {
@@ -1565,6 +1568,7 @@ func cmdPurge(dataDir string, args []string) error {
 							if fid != "" {
 								os.Remove(filepath.Join(dataDir, "data", "files", fid))
 								st.DataDB().Exec("DELETE FROM file_hashes WHERE file_id = ?", fid)
+								st.DataDB().Exec("DELETE FROM file_contexts WHERE file_id = ?", fid)
 							}
 						}
 					}

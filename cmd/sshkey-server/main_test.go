@@ -210,10 +210,11 @@ func newTestEnv(t *testing.T) *testEnv {
 
 // testClient is a connected protocol client.
 type testClient struct {
-	enc *protocol.Encoder
-	dec *protocol.Decoder
-	ch  ssh.Channel
-	t   *testing.T
+	enc  *protocol.Encoder
+	dec  *protocol.Decoder
+	ch   ssh.Channel
+	conn *ssh.Client // underlying connection — used by tests that need to open additional channels (e.g. per-request download channels in Phase 17 Step 4.f)
+	t    *testing.T
 }
 
 func (e *testEnv) connect(keyPath, deviceID string) *testClient {
@@ -247,10 +248,11 @@ func (e *testEnv) connect(keyPath, deviceID string) *testClient {
 	go ssh.DiscardRequests(reqs)
 
 	tc := &testClient{
-		enc: protocol.NewEncoder(ch),
-		dec: protocol.NewDecoder(ch),
-		ch:  ch,
-		t:   e.t,
+		enc:  protocol.NewEncoder(ch),
+		dec:  protocol.NewDecoder(ch),
+		ch:   ch,
+		conn: conn,
+		t:    e.t,
 	}
 
 	// Read server_hello

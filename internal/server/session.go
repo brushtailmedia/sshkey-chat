@@ -34,9 +34,11 @@ var allCapabilities = []string{
 }
 
 // handleSession runs the protocol session on an accepted SSH channel.
-// dlChanCh delivers the download channel (Channel 2) once the client opens
-// it; may remain empty if the client never opens it.
-func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Channel, dlChanCh <-chan ssh.Channel) {
+// The session channel is the NDJSON control plane (1st session channel
+// on the SSH connection). Uploads flow on the 2nd session channel
+// (handleBinaryChannel); downloads use per-request `sshkey-chat-download`
+// channels (handleDownloadChannel) and do not touch this session.
+func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Channel) {
 	defer ch.Close()
 
 	enc := protocol.NewEncoder(ch)
@@ -192,20 +194,6 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 	s.mu.Lock()
 	s.clients[clientHello.DeviceID] = client
 	s.mu.Unlock()
-
-	// Attach the download channel if the client opened Channel 2. The
-	// client opens Channels 1-3 before sending client_hello, so by now the
-	// download channel should already be on dlChanCh. Wait briefly to
-	// tolerate any reordering, then proceed without it (downloads will
-	// fail, uploads still work via Channel 3).
-	select {
-	case dlCh := <-dlChanCh:
-		s.mu.Lock()
-		client.DownloadChannel = dlCh
-		s.mu.Unlock()
-	case <-time.After(500 * time.Millisecond):
-		s.logger.Debug("no download channel", "user", userID, "device", clientHello.DeviceID)
-	}
 
 	defer func() {
 		s.mu.Lock()
@@ -775,8 +763,10 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 		s.handleRoomMembers(c, raw)
 	case "upload_start":
 		s.handleUploadStart(c, raw)
-	case "download":
-		s.handleDownload(c, raw)
+	// Phase 17 Step 4.f: the old `download` verb on Channel 1 is retired.
+	// Downloads now open a dedicated SSH channel of type
+	// `sshkey-chat-download` and write the download request inline on
+	// that channel. See handleDownloadChannel in download_channel.go.
 	case "push_register":
 		s.handlePushRegister(c, raw)
 	case "typing":
@@ -864,6 +854,15 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 			})
 			return
 		}
+	}
+
+	// Phase 17 Step 4.f: every file_id referenced in this send must be
+	// bound to this room. Blocks a wire-level attacker from smuggling
+	// an attachment from context X into context Y. Legitimate clients
+	// only reference file_ids they uploaded to this same room, so this
+	// check is invisible to normal use.
+	if !s.validateFileIDsForContext(c, msg.FileIDs, store.FileContextRoom, msg.Room) {
+		return
 	}
 
 	// Assign server-generated ID and timestamp
@@ -960,6 +959,11 @@ func (s *Server) handleSendGroup(c *Client, raw json.RawMessage) {
 				}
 			}
 		}
+	}
+
+	// Phase 17 Step 4.f: file_ids[] must be bound to this group.
+	if !s.validateFileIDsForContext(c, msg.FileIDs, store.FileContextGroup, msg.Group) {
+		return
 	}
 
 	outMsg := protocol.GroupMessage{
@@ -1756,7 +1760,72 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 	}
 }
 
+// validateFileIDsForContext verifies every file_id in the slice is
+// bound to the expected context. Phase 17 Step 4.f — blocks a raw-wire
+// attacker who crafts a send with a file_id belonging to a context
+// they're not in (attempting to smuggle the attachment into a channel
+// they ARE in). Legitimate clients never trip this check because the
+// server stamps file_id bindings at upload time and clients only
+// reference file_ids they uploaded themselves.
+//
+// Returns true if all file_ids are valid for the context OR the slice
+// is empty. Returns false after encoding a privacy-preserving error to
+// the client (doesn't reveal where the file IS bound, just that it's
+// not accessible via this context).
+//
+// Note on single-binding semantics: since forwards are not an
+// implemented client feature today, every file_id has exactly one
+// binding. A cross-context reference is either a bug or an attack;
+// either way, reject. If forwards ever ship with multi-binding
+// semantics, this check grows a "binding exists for EITHER context"
+// branch — out of scope today.
+func (s *Server) validateFileIDsForContext(c *Client, fileIDs []string, expectedType, expectedID string) bool {
+	if len(fileIDs) == 0 {
+		return true
+	}
+	if s.store == nil {
+		return true // no store = no binding data available; fail open
+	}
+	for _, fid := range fileIDs {
+		binding, err := s.store.GetFileContext(fid)
+		if err != nil {
+			s.logger.Error("file_context lookup failed on send",
+				"file_id", fid, "error", err)
+			c.Encoder.Encode(protocol.Error{
+				Type: "error", Code: "internal",
+				Message: "file lookup failed",
+			})
+			return false
+		}
+		if binding == nil || binding.ContextType != expectedType || binding.ContextID != expectedID {
+			// Unknown or wrong-context file_id. Privacy-identical
+			// response regardless of which — don't reveal whether the
+			// file exists or where it's bound.
+			c.Encoder.Encode(protocol.Error{
+				Type: "error", Code: "unknown_file",
+				Message: "file not found or not accessible in this context",
+			})
+			return false
+		}
+	}
+	return true
+}
+
 // cleanupFiles deletes file blobs from disk and their hash entries.
+// Called from handleDelete after DeleteRoomMessage / DeleteGroupMessage
+// / DeleteDMMessage return the file_ids that were attached to a
+// tombstoned message.
+//
+// Phase 17 Step 4.f also drops the file_contexts binding for each
+// file_id so the download ACL correctly reports "not found" for any
+// subsequent download attempt (the message is gone, the file bytes are
+// gone, the binding is gone — the whole chain matches the
+// "lookup-fails-safe" privacy response).
+//
+// The single-binding model means deleting the binding here is unambiguous:
+// one message referenced this file, the message is gone, so the binding
+// is too. If a future forward-as-feature spawns multi-binding, this site
+// would need a reference-count check — out of scope today.
 func (s *Server) cleanupFiles(fileIDs []string) {
 	if s.files == nil || s.store == nil || len(fileIDs) == 0 {
 		return
@@ -1767,6 +1836,10 @@ func (s *Server) cleanupFiles(fileIDs []string) {
 		}
 		os.Remove(filepath.Join(s.files.dir, fid))
 		s.store.DeleteFileHash(fid)
+		if err := s.store.DeleteFileContextByFileID(fid); err != nil {
+			s.logger.Warn("file_contexts cascade failed on message cleanup",
+				"file_id", fid, "error", err)
+		}
 	}
 }
 
@@ -1889,8 +1962,11 @@ func (s *Server) performGroupLeave(groupID, userID, reason, by, initiatedBy stri
 
 		// Last-member cleanup: if removing this user emptied the group,
 		// drop the row + group-<id>.db file + cached *sql.DB handle.
-		// Idempotent — safe under concurrent calls.
+		// Idempotent — safe under concurrent calls. Phase 17 Step 4.f:
+		// cascade file_contexts + eager physical-file GC BEFORE the store
+		// teardown so the file_id lookup still works.
 		if remaining, err := s.store.GetGroupMembers(groupID); err == nil && len(remaining) == 0 {
+			s.cleanupFilesForContext(store.FileContextGroup, groupID)
 			if err := s.store.DeleteGroupConversation(groupID); err != nil {
 				s.logger.Error("group cleanup failed",
 					"group", groupID, "error", err)
@@ -2062,8 +2138,10 @@ func (s *Server) handleDeleteGroup(c *Client, raw json.RawMessage) {
 			// Last-member cleanup. If we just removed the only remaining
 			// member, drop the group row + db file. The cleanup does NOT
 			// touch the deleted_groups row we wrote in step 1, so offline
-			// catchup still works.
+			// catchup still works. Phase 17 Step 4.f: cascade file_contexts
+			// + eager physical-file GC BEFORE the store teardown.
 			if remaining, err := s.store.GetGroupMembers(msg.Group); err == nil && len(remaining) == 0 {
+				s.cleanupFilesForContext(store.FileContextGroup, msg.Group)
 				if err := s.store.DeleteGroupConversation(msg.Group); err != nil {
 					s.logger.Error("group cleanup failed",
 						"group", msg.Group, "error", err)
@@ -2395,6 +2473,9 @@ func (s *Server) handleDeleteRoom(c *Client, raw json.RawMessage) {
 	//    (see DeleteRoomRecord in store/room_deletion.go), so the row
 	//    we wrote in step 1 survives.
 	if remaining := s.store.GetRoomMemberIDsByRoomID(msg.Room); len(remaining) == 0 {
+		// Phase 17 Step 4.f: cascade file_contexts + eager physical-file
+		// GC BEFORE the store teardown so the file_id lookup still works.
+		s.cleanupFilesForContext(store.FileContextRoom, msg.Room)
 		if err := s.store.DeleteRoomRecord(msg.Room); err != nil {
 			s.logger.Error("room cleanup failed",
 				"room", msg.Room, "error", err)
@@ -2657,6 +2738,11 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	// Phase 17 Step 4.f: file_ids[] must be bound to this DM.
+	if !s.validateFileIDsForContext(c, msg.FileIDs, store.FileContextDM, dm.ID) {
+		return
+	}
+
 	outMsg := protocol.DM{
 		Type:        "dm",
 		ID:          generateID("msg_"),
@@ -2797,6 +2883,10 @@ func (s *Server) cleanupDormantDM(dmID string) {
 	if dm.UserALeftAt == 0 || dm.UserBLeftAt == 0 {
 		return
 	}
+
+	// Phase 17 Step 4.f: cascade file_contexts + eager physical-file GC
+	// BEFORE the store teardown so the file_id lookup still works.
+	s.cleanupFilesForContext(store.FileContextDM, dmID)
 
 	if err := s.store.DeleteDirectMessage(dmID); err != nil {
 		s.logger.Error("dm cleanup failed", "dm", dmID, "error", err)

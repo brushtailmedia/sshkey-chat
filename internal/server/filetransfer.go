@@ -8,12 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/blake2b"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
 
 // contentHash computes a BLAKE2b-256 hash in tagged format.
@@ -50,15 +52,28 @@ func newFileManager(dataDir string) *fileManager {
 	}
 }
 
-// cleanOrphanFiles removes files in the files directory that have no
-// corresponding entry in the file_hashes table. These are artifacts of
-// crashed mid-uploads that were written to disk but never completed.
-// Called once on server startup.
+// cleanOrphanFiles is the lazy backstop for the Phase 17 Step 4.f hybrid
+// GC model. Called once on server startup. Catches two kinds of orphan:
+//
+//  1. Files on disk with no file_hashes row — artifacts of crashed
+//     mid-uploads that were written to disk but never completed.
+//     (Pre-existing behavior.)
+//
+//  2. file_hashes rows with no file_contexts binding — orphans left by
+//     a context-gone cleanup where the eager file-byte removal didn't
+//     complete (os.Remove error, crash between DELETE statements).
+//     (New — reconverges the "file exists iff it has a binding"
+//     invariant every time the server boots.)
+//
+// Both passes are idempotent and bounded by the number of files on disk
+// / rows in file_hashes. Not called on any hot path; safe to run even
+// on large deployments because startup is rare and operators expect it.
 func (s *Server) cleanOrphanFiles() {
 	if s.files == nil || s.store == nil {
 		return
 	}
 
+	// Pass 1: files on disk with no hash row (pre-existing invariant).
 	entries, err := os.ReadDir(s.files.dir)
 	if err != nil {
 		return
@@ -78,8 +93,74 @@ func (s *Server) cleanOrphanFiles() {
 		}
 	}
 
+	// Pass 2: file_hashes rows with no file_contexts binding (Step 4.f
+	// invariant). Each one means eager GC failed partway; clean up now.
+	unbound, err := s.store.OrphanedFileHashes()
+	if err != nil {
+		s.logger.Error("orphan file_hashes scan failed", "error", err)
+	} else {
+		for _, fid := range unbound {
+			os.Remove(filepath.Join(s.files.dir, fid))
+			s.store.DeleteFileHash(fid)
+			removed++
+		}
+	}
+
 	if removed > 0 {
 		s.logger.Info("cleaned orphan files", "count", removed)
+	}
+}
+
+// cleanupFilesForContext runs the Phase 17 Step 4.f file_contexts
+// cascade for a single context that's about to be torn down. MUST be
+// called BEFORE the matching store-layer teardown
+// (`DeleteRoomRecord` / `DeleteGroupConversation` / `DeleteDirectMessage`)
+// so the file_ids can still be looked up via the binding table.
+//
+// Steps:
+//  1. Delete all file_contexts rows for this context; capture file_ids.
+//  2. For each formerly-bound file_id, check remaining bindings. Under
+//     today's single-binding model there's nothing left, so we proceed
+//     to GC. The check is kept anyway for future multi-binding scenarios
+//     and to handle the rare race where a new binding for the same
+//     file_id was inserted between steps 1 and 2.
+//  3. For truly-orphaned files, delete the bytes on disk and the
+//     file_hashes row. cleanOrphanFiles' lazy pass reconverges anything
+//     this eager pass misses (e.g., os.Remove error on a locked file).
+//
+// Errors log and continue — partial cleanup is better than none, and
+// the lazy backstop catches what partial cleanup leaves behind.
+func (s *Server) cleanupFilesForContext(ctxType, ctxID string) {
+	if s.store == nil || s.files == nil {
+		return
+	}
+
+	fileIDs, err := s.store.DeleteFileContextsByContext(ctxType, ctxID)
+	if err != nil {
+		s.logger.Error("file_contexts cascade failed",
+			"context_type", ctxType,
+			"context_id", ctxID,
+			"error", err,
+		)
+		return
+	}
+
+	for _, fid := range fileIDs {
+		remaining, err := s.store.FileHasRemainingBindings(fid)
+		if err != nil {
+			s.logger.Error("file_contexts remaining check failed",
+				"file_id", fid, "error", err)
+			continue
+		}
+		if remaining {
+			continue // still bound elsewhere — don't GC
+		}
+		// Truly orphaned — remove bytes + hash row.
+		if err := os.Remove(filepath.Join(s.files.dir, fid)); err != nil && !os.IsNotExist(err) {
+			s.logger.Warn("file bytes removal failed during context cleanup",
+				"file_id", fid, "error", err)
+		}
+		s.store.DeleteFileHash(fid)
 	}
 }
 
@@ -230,79 +311,10 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 	})
 }
 
-// handleDownload processes a download request on Channel 1.
-func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
-	var msg protocol.Download
-	if err := json.Unmarshal(raw, &msg); err != nil {
-		return
-	}
-
-	filePath := filepath.Join(s.files.dir, msg.FileID)
-	info, err := os.Stat(filePath)
-	if err != nil {
-		c.Encoder.Encode(protocol.DownloadError{
-			Type:    "download_error",
-			FileID:  msg.FileID,
-			Code:    "not_found",
-			Message: "File not found: " + msg.FileID,
-		})
-		return
-	}
-
-	if c.DownloadChannel == nil {
-		s.logger.Error("download: no download channel", "user", c.UserID)
-		c.Encoder.Encode(protocol.DownloadError{
-			Type:    "download_error",
-			FileID:  msg.FileID,
-			Code:    "no_channel",
-			Message: "Download channel not open",
-		})
-		return
-	}
-
-	f, err := os.Open(filePath)
-	if err != nil {
-		s.logger.Error("download: open failed", "file", msg.FileID, "error", err)
-		c.Encoder.Encode(protocol.DownloadError{
-			Type:    "download_error",
-			FileID:  msg.FileID,
-			Code:    "open_failed",
-			Message: "Server could not open file",
-		})
-		return
-	}
-	defer f.Close()
-
-	// Look up stored content hash to include in download_start
-	var storedHash string
-	if s.store != nil {
-		storedHash, _ = s.store.GetFileHash(msg.FileID)
-	}
-
-	c.Encoder.Encode(protocol.DownloadStart{
-		Type:        "download_start",
-		FileID:      msg.FileID,
-		Size:        info.Size(),
-		ContentHash: storedHash,
-	})
-
-	if err := writeBinaryFrame(c.DownloadChannel, msg.FileID, f, info.Size()); err != nil {
-		s.logger.Error("download: write failed", "file", msg.FileID, "error", err)
-		// Can't signal via Channel 1 anymore — the client is mid-read on
-		// Channel 2 and the binary frame is partial/corrupt. Closing the
-		// download channel is the only way to abort cleanly, but that
-		// would tear down other concurrent downloads too. Log and hope
-		// the client times out (SSH layer will close on connection drop).
-		return
-	}
-
-	c.Encoder.Encode(protocol.DownloadComplete{
-		Type:   "download_complete",
-		FileID: msg.FileID,
-	})
-}
-
-// handleBinaryChannel processes incoming upload frames on SSH Channel 3.
+// handleBinaryChannel processes incoming upload frames on the upload
+// channel (the 2nd "session"-type SSH channel on a client connection;
+// was numbered "Channel 3" in the pre-Phase-17-Step-4.f model alongside
+// a separate per-session download channel that's now retired).
 func (s *Server) handleBinaryChannel(userID string, ch ssh.Channel) {
 	defer ch.Close()
 
@@ -399,9 +411,43 @@ func (s *Server) handleBinaryChannel(userID string, ch ssh.Channel) {
 			continue
 		}
 
-		// Store content hash in DB for download verification
+		// Store content hash in DB for download verification. Atomically
+		// with this, write the file_contexts binding (Phase 17 Step 4.f)
+		// so the file is authorized for download by members of the
+		// context it was uploaded to. Both writes live in data.db, so a
+		// crash between them leaves an orphan the cleanOrphanFiles
+		// startup sweep reconciles; no intermediate state is queryable
+		// in a way that matters for correctness or security.
 		if s.store != nil {
 			s.store.StoreFileHash(pending.fileID, pending.contentHash, int64(size))
+
+			var ctxType, ctxID string
+			switch {
+			case pending.room != "":
+				ctxType, ctxID = store.FileContextRoom, pending.room
+			case pending.groupID != "":
+				ctxType, ctxID = store.FileContextGroup, pending.groupID
+			case pending.dmID != "":
+				ctxType, ctxID = store.FileContextDM, pending.dmID
+			}
+			if ctxType != "" {
+				if err := s.store.InsertFileContext(
+					pending.fileID, ctxType, ctxID, time.Now().Unix(),
+				); err != nil {
+					s.logger.Error("failed to insert file_context binding",
+						"file_id", pending.fileID,
+						"context_type", ctxType,
+						"context_id", ctxID,
+						"error", err,
+					)
+					// Don't fail the upload — client has uploaded successfully
+					// and the hash is stored. A missing binding just means
+					// this file won't be downloadable until either (a) the
+					// binding is re-inserted on a future upload of the same
+					// bytes (hash dedup), or (b) cleanOrphanFiles reaps it.
+					// Logged so operators can spot persistent issues.
+				}
+			}
 		}
 
 		// Clean up pending

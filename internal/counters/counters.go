@@ -34,14 +34,15 @@ import (
 
 // Misbehavior signals — valid auto-revoke inputs.
 const (
-	SignalMalformedFrame       = "malformed_frame"
-	SignalOversizedBody        = "oversized_body"
-	SignalUnknownVerb          = "unknown_verb"
-	SignalInvalidNanoID        = "invalid_nanoid"
-	SignalWrappedKeysOverCap   = "wrapped_keys_over_cap"
-	SignalFileIDsOverCap       = "file_ids_over_cap"
-	SignalInvalidContentHash   = "invalid_content_hash"
-	SignalOversizedUploadFrame = "oversized_upload_frame"
+	SignalMalformedFrame          = "malformed_frame"
+	SignalOversizedBody           = "oversized_body"
+	SignalUnknownVerb             = "unknown_verb"
+	SignalInvalidNanoID           = "invalid_nanoid"
+	SignalWrappedKeysOverCap      = "wrapped_keys_over_cap"
+	SignalFileIDsOverCap          = "file_ids_over_cap"
+	SignalInvalidContentHash      = "invalid_content_hash"
+	SignalOversizedUploadFrame    = "oversized_upload_frame"
+	SignalDownloadChannelRejected = "download_channel_rejected"
 )
 
 // Load signals — counted but NEVER auto-revoke inputs.
@@ -72,6 +73,7 @@ var AutoRevokeSignals = []string{
 	SignalFileIDsOverCap,
 	SignalInvalidContentHash,
 	SignalOversizedUploadFrame,
+	SignalDownloadChannelRejected,
 }
 
 // key identifies a single counter — (signal, deviceID). Unexported so callers
