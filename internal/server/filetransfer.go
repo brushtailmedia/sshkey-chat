@@ -130,6 +130,85 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	// Authorization: caller must be a member of the claimed context. Without
+	// this check, any authenticated user could post upload_start with an
+	// arbitrary room/group/dm ID, the server would allocate a fileID and
+	// accept bytes on Channel 3, and the file would persist on disk as an
+	// orphan (subsequent `send` referencing it fails the same membership
+	// check, but the bytes remain until next startup cleanup — which only
+	// removes files WITHOUT hash records, and upload completion records one).
+	// Rate-limited DoS, not a data leak, but the cross-context upload path
+	// should never have been accepted.
+	//
+	// Privacy: responses match handleSend/handleSendGroup/handleSendDM —
+	// byte-identical "not a member" reply whether the context exists or not,
+	// so a probing client cannot use upload_start to enumerate room/group/dm
+	// existence.
+	contextCount := 0
+	if msg.Room != "" {
+		contextCount++
+	}
+	if msg.Group != "" {
+		contextCount++
+	}
+	if msg.DM != "" {
+		contextCount++
+	}
+	if contextCount != 1 {
+		c.Encoder.Encode(protocol.UploadError{
+			Type:     "upload_error",
+			UploadID: msg.UploadID,
+			Code:     "invalid_context",
+			Message:  "upload_start requires exactly one of room, group, or dm",
+		})
+		return
+	}
+
+	if s.store == nil {
+		c.Encoder.Encode(protocol.UploadError{
+			Type:     "upload_error",
+			UploadID: msg.UploadID,
+			Code:     "internal",
+			Message:  "storage not available",
+		})
+		return
+	}
+
+	switch {
+	case msg.Room != "":
+		if !s.store.IsRoomMemberByID(msg.Room, c.UserID) {
+			c.Encoder.Encode(protocol.UploadError{
+				Type:     "upload_error",
+				UploadID: msg.UploadID,
+				Code:     protocol.ErrUnknownRoom,
+				Message:  "You are not a member of this room",
+			})
+			return
+		}
+	case msg.Group != "":
+		isMember, err := s.store.IsGroupMember(msg.Group, c.UserID)
+		if err != nil || !isMember {
+			c.Encoder.Encode(protocol.UploadError{
+				Type:     "upload_error",
+				UploadID: msg.UploadID,
+				Code:     protocol.ErrUnknownGroup,
+				Message:  "You are not a member of this group",
+			})
+			return
+		}
+	case msg.DM != "":
+		dm, err := s.store.GetDirectMessage(msg.DM)
+		if err != nil || dm == nil || (dm.UserA != c.UserID && dm.UserB != c.UserID) {
+			c.Encoder.Encode(protocol.UploadError{
+				Type:     "upload_error",
+				UploadID: msg.UploadID,
+				Code:     protocol.ErrUnknownDM,
+				Message:  "You are not a party to this DM",
+			})
+			return
+		}
+	}
+
 	fileID := generateID("file_")
 
 	s.files.mu.Lock()
