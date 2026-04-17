@@ -335,6 +335,68 @@ func TestDownloadChannel_Concurrent(t *testing.T) {
 	}
 }
 
+// TestDownloadChannel_TTLExpiry verifies the hard per-channel TTL:
+// a download channel open past the configured `channel_ttl_seconds`
+// is forcibly closed by the server regardless of streaming progress.
+// Defends against hostile slow-read (open channel, read 1 byte/sec
+// forever) by bounding the wall-clock time the server will keep a
+// channel alive.
+//
+// Approach: override the TTL to 1 second via in-memory config mutation
+// (the server reads `s.cfg.Server.Downloads.ChannelTTLSeconds` under
+// RLock at channel-open time; taking the write lock here is race-safe
+// against concurrent reads). Open a channel, don't drive the protocol,
+// wait for TTL+buffer, assert the channel reads EOF because the server
+// closed it.
+//
+// Uses a 1-second TTL + 1.5-second wait so the test is deterministic
+// but adds ~1.5s to the suite runtime. Bounded; not a flake risk.
+func TestDownloadChannel_TTLExpiry(t *testing.T) {
+	e := newTestEnv(t)
+
+	// Override the TTL on the shared config. Server reads under RLock;
+	// take the write lock to avoid a data race under -race.
+	e.cfg.Lock()
+	e.cfg.Server.Downloads.ChannelTTLSeconds = 1
+	e.cfg.Unlock()
+
+	alice := e.connect("/tmp/sshkey-test-key", "dev_alice")
+
+	// Open a download channel without driving the protocol. The server
+	// will spin up its handler goroutine, register the TTL timer, then
+	// block in bufio.Reader.ReadBytes('\n') waiting for our download
+	// request that never comes. After ~1s, the TTL timer fires and
+	// closes the channel from the server side.
+	ch, reqs, err := alice.conn.OpenChannel("sshkey-chat-download", nil)
+	if err != nil {
+		t.Fatalf("open channel: %v", err)
+	}
+	go ssh.DiscardRequests(reqs)
+	defer ch.Close()
+
+	// Wait past the TTL. The read below should return EOF when the
+	// server's TTL fires; reading before TTL would block, reading after
+	// returns quickly because the channel is closed.
+	readDone := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 1)
+		_, err := ch.Read(buf)
+		readDone <- err
+	}()
+
+	select {
+	case err := <-readDone:
+		// Expect io.EOF (server closed the channel) — any error from
+		// the read means the channel is no longer writable, which is
+		// what TTL is supposed to produce.
+		if err == nil {
+			t.Error("expected read to return error after TTL expiry")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("channel did not close within 3s of 1s TTL — TTL enforcement broken")
+	}
+}
+
 // TestDownloadChannel_CapEnforced verifies the per-connection cap
 // blocks a 4th concurrent download. Default is 3; the 4th OpenChannel
 // must return an SSH error (ssh.ResourceShortage) rather than proceed.
