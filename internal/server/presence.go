@@ -34,17 +34,19 @@ func (s *Server) broadcastPresence(userID, status string) {
 		}
 	}
 
+	// Phase 17 Step 3: lock-release pattern.
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	var targets []*Client
 	for _, client := range s.clients {
 		if client.UserID == userID {
 			continue
 		}
 		if visibleTo[client.UserID] {
-			client.Encoder.Encode(presence)
+			targets = append(targets, client)
 		}
 	}
+	s.mu.RUnlock()
+	s.fanOut("presence", presence, targets)
 }
 
 // sendUnreadCounts sends unread counts for each room and conversation on connect.

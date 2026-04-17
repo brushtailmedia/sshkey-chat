@@ -207,13 +207,16 @@ func (s *Server) handleAddToGroup(c *Client, raw json.RawMessage) {
 		Admins:  admins,
 		AddedBy: c.UserID,
 	}
+	// Phase 17 Step 3: lock-release pattern.
 	s.mu.RLock()
+	var targets []*Client
 	for _, client := range s.clients {
 		if client.UserID == msg.User {
-			client.Encoder.Encode(addedTo)
+			targets = append(targets, client)
 		}
 	}
 	s.mu.RUnlock()
+	s.fanOut("group_added_to", addedTo, targets)
 
 	// Echo to caller.
 	c.Encoder.Encode(protocol.AddGroupResult{

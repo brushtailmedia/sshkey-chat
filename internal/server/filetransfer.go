@@ -295,19 +295,25 @@ func (s *Server) handleBinaryChannel(userID string, ch ssh.Channel) {
 				"got", serverHash,
 			)
 			os.Remove(filePath)
+			// Phase 17 Step 3: lock-release pattern. Preserve find-first-by-
+			// UserID semantics (upload response goes to one originating
+			// device, not all the user's devices) — select under lock, fanOut
+			// with a single-element target slice.
 			s.mu.RLock()
+			var targets []*Client
 			for _, client := range s.clients {
 				if client.UserID == userID {
-					client.Encoder.Encode(protocol.UploadError{
-						Type:     "upload_error",
-						UploadID: uploadID,
-						Code:     "hash_mismatch",
-						Message:  "Content hash mismatch — file corrupted in transit",
-					})
+					targets = []*Client{client}
 					break
 				}
 			}
 			s.mu.RUnlock()
+			s.fanOut("upload_error", protocol.UploadError{
+				Type:     "upload_error",
+				UploadID: uploadID,
+				Code:     "hash_mismatch",
+				Message:  "Content hash mismatch — file corrupted in transit",
+			}, targets)
 			s.files.mu.Lock()
 			delete(s.files.uploads, uploadID)
 			s.files.mu.Unlock()
@@ -331,19 +337,22 @@ func (s *Server) handleBinaryChannel(userID string, ch ssh.Channel) {
 			"size", size,
 		)
 
-		// Send upload_complete on Channel 1 — find the client
+		// Send upload_complete on Channel 1 — find the originating client.
+		// Phase 17 Step 3: lock-release pattern with find-first semantics.
 		s.mu.RLock()
+		var targets []*Client
 		for _, client := range s.clients {
 			if client.UserID == userID {
-				client.Encoder.Encode(protocol.UploadComplete{
-					Type:     "upload_complete",
-					UploadID: uploadID,
-					FileID:   pending.fileID,
-				})
+				targets = []*Client{client}
 				break
 			}
 		}
 		s.mu.RUnlock()
+		s.fanOut("upload_complete", protocol.UploadComplete{
+			Type:     "upload_complete",
+			UploadID: uploadID,
+			FileID:   pending.fileID,
+		}, targets)
 	}
 }
 

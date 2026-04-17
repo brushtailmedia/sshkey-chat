@@ -172,16 +172,24 @@ func (s *Server) handleRevokeDevice(c *Client, raw json.RawMessage) {
 // sshkey-ctl) should produce identical session-termination effects;
 // sharing the helper enforces that by construction.
 func (s *Server) kickRevokedDeviceSession(userID, deviceID, reason string) {
+	// Phase 17 Step 3: lock-release pattern. Encode via fanOut outside the
+	// lock, then iterate targets to call Channel.Close().
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	var targets []*Client
 	for _, client := range s.clients {
 		if client.UserID == userID && client.DeviceID == deviceID {
-			client.Encoder.Encode(protocol.DeviceRevoked{
-				Type:     "device_revoked",
-				DeviceID: deviceID,
-				Reason:   reason,
-			})
-			client.Channel.Close()
+			targets = append(targets, client)
 		}
+	}
+	s.mu.RUnlock()
+
+	revoked := protocol.DeviceRevoked{
+		Type:     "device_revoked",
+		DeviceID: deviceID,
+		Reason:   reason,
+	}
+	s.fanOut("device_revoked", revoked, targets)
+	for _, client := range targets {
+		client.Channel.Close()
 	}
 }

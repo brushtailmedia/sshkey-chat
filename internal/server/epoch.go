@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 )
 
@@ -339,10 +340,20 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 		Epoch: msg.Epoch,
 	})
 
-	// Distribute epoch keys to all other online members
+	// Distribute epoch keys to all other online members.
+	// Phase 17 Step 3: lock-release pattern. This site cannot use the
+	// fanOut helper because each recipient receives a DIFFERENT message
+	// (their own wrapped epoch key from msg.WrappedKeys[client.UserID]).
+	// The fix pattern is applied inline with drop-counting parity: same
+	// counter signal (SignalBroadcastDropped), same log shape, same
+	// verb ("epoch_key"), just constructed per-recipient because the
+	// message body varies.
+	type epochTarget struct {
+		client     *Client
+		wrappedKey string
+	}
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	var targets []epochTarget
 	for _, client := range s.clients {
 		if client.DeviceID == c.DeviceID {
 			continue // already sent epoch_confirmed
@@ -351,12 +362,25 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 		if !ok {
 			continue // not in this room
 		}
-		client.Encoder.Encode(protocol.EpochKey{
+		targets = append(targets, epochTarget{client: client, wrappedKey: wrappedKey})
+	}
+	s.mu.RUnlock()
+
+	for _, t := range targets {
+		perMsg := protocol.EpochKey{
 			Type:       "epoch_key",
 			Room:       msg.Room,
 			Epoch:      msg.Epoch,
-			WrappedKey: wrappedKey,
-		})
+			WrappedKey: t.wrappedKey,
+		}
+		if err := t.client.Encoder.Encode(perMsg); err != nil {
+			s.counters.Inc(counters.SignalBroadcastDropped, t.client.DeviceID)
+			s.logger.Debug("broadcast dropped",
+				"verb", "epoch_key",
+				"device", t.client.DeviceID,
+				"error", err,
+			)
+		}
 	}
 }
 

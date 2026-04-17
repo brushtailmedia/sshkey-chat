@@ -117,14 +117,16 @@ func (s *Server) processPendingRoomRetirements() {
 		}
 
 		// Deliver to every connected session whose UserID is in the
-		// member set.
+		// member set. Phase 17 Step 3: lock-release pattern.
 		s.mu.RLock()
+		var targets []*Client
 		for _, client := range s.clients {
 			if memberSet[client.UserID] {
-				client.Encoder.Encode(event)
+				targets = append(targets, client)
 			}
 		}
 		s.mu.RUnlock()
+		s.fanOut("room_retired", event, targets)
 
 		// Audit log entry crediting the admin. The CLI can't write to
 		// the audit log directly (it's a separate process with its

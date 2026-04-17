@@ -1030,19 +1030,22 @@ func (s *Server) handleTyping(c *Client, raw json.RawMessage) {
 	} else if msg.Group != "" {
 		s.broadcastToGroupExcept(msg.Group, c.DeviceID, out)
 	} else if msg.DM != "" {
-		// For 1:1 DMs, send to the other party's sessions
+		// For 1:1 DMs, send to the other party's sessions.
+		// Phase 17 Step 3: lock-release pattern.
 		if s.store != nil {
 			if dm, err := s.store.GetDirectMessage(msg.DM); err == nil && dm != nil {
 				s.mu.RLock()
+				var targets []*Client
 				for _, client := range s.clients {
 					if client.DeviceID == c.DeviceID {
 						continue
 					}
 					if client.UserID == dm.UserA || client.UserID == dm.UserB {
-						client.Encoder.Encode(out)
+						targets = append(targets, client)
 					}
 				}
 				s.mu.RUnlock()
+				s.fanOut("typing", out, targets)
 			}
 		}
 	}
@@ -1074,18 +1077,21 @@ func (s *Server) handleRead(c *Client, raw json.RawMessage) {
 	} else if msg.Group != "" {
 		s.broadcastToGroupExcept(msg.Group, c.DeviceID, out)
 	} else if msg.DM != "" {
-		// For 1:1 DMs, broadcast to both members' other devices
+		// For 1:1 DMs, broadcast to both members' other devices.
+		// Phase 17 Step 3: lock-release pattern.
 		if dm, err := s.store.GetDirectMessage(msg.DM); err == nil && dm != nil {
 			s.mu.RLock()
+			var targets []*Client
 			for _, client := range s.clients {
 				if client.DeviceID == c.DeviceID {
 					continue
 				}
 				if client.UserID == dm.UserA || client.UserID == dm.UserB {
-					client.Encoder.Encode(out)
+					targets = append(targets, client)
 				}
 			}
 			s.mu.RUnlock()
+			s.fanOut("read", out, targets)
 		}
 	}
 }
@@ -1236,15 +1242,18 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 	} else if msg.Group != "" {
 		s.broadcastToGroup(msg.Group, reaction)
 	} else if msg.DM != "" {
-		// For 1:1 DMs, broadcast to both members
+		// For 1:1 DMs, broadcast to both members.
+		// Phase 17 Step 3: lock-release pattern.
 		if dm, err := s.store.GetDirectMessage(msg.DM); err == nil && dm != nil {
 			s.mu.RLock()
+			var targets []*Client
 			for _, client := range s.clients {
 				if client.UserID == dm.UserA || client.UserID == dm.UserB {
-					client.Encoder.Encode(reaction)
+					targets = append(targets, client)
 				}
 			}
 			s.mu.RUnlock()
+			s.fanOut("reaction", reaction, targets)
 		}
 	}
 }
@@ -1352,14 +1361,17 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 	} else if group != "" {
 		s.broadcastToGroup(group, removed)
 	} else if dmID != "" {
+		// Phase 17 Step 3: lock-release pattern.
 		if dm, err := s.store.GetDirectMessage(dmID); err == nil && dm != nil {
 			s.mu.RLock()
+			var targets []*Client
 			for _, client := range s.clients {
 				if client.UserID == dm.UserA || client.UserID == dm.UserB {
-					client.Encoder.Encode(removed)
+					targets = append(targets, client)
 				}
 			}
 			s.mu.RUnlock()
+			s.fanOut("reaction_removed", removed, targets)
 		}
 	}
 }
@@ -1545,21 +1557,24 @@ func (s *Server) handleCreateGroup(c *Client, raw json.RawMessage) {
 	// Send group_created to the creator
 	c.Encoder.Encode(created)
 
-	// Also notify all other online members so they know the group exists
-	s.mu.RLock()
+	// Also notify all other online members so they know the group exists.
+	// Phase 17 Step 3: lock-release pattern.
 	memberSet := make(map[string]bool, len(allMembers))
 	for _, m := range allMembers {
 		memberSet[m] = true
 	}
+	s.mu.RLock()
+	var targets []*Client
 	for _, client := range s.clients {
 		if client.DeviceID == c.DeviceID {
 			continue // already sent to creator
 		}
 		if memberSet[client.UserID] {
-			client.Encoder.Encode(created)
+			targets = append(targets, client)
 		}
 	}
 	s.mu.RUnlock()
+	s.fanOut("group_created", created, targets)
 
 	s.logger.Info("group created",
 		"group", groupID,
@@ -1727,13 +1742,16 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 			TS:        time.Now().Unix(),
 			DM:        dm.ID,
 		}
+		// Phase 17 Step 3: lock-release pattern.
 		s.mu.RLock()
+		var targets []*Client
 		for _, client := range s.clients {
 			if client.UserID == dm.UserA || client.UserID == dm.UserB {
-				client.Encoder.Encode(deleted)
+				targets = append(targets, client)
 			}
 		}
 		s.mu.RUnlock()
+		s.fanOut("deleted", deleted, targets)
 		return
 	}
 }
@@ -1902,13 +1920,16 @@ func (s *Server) performGroupLeave(groupID, userID, reason, by, initiatedBy stri
 		Reason: reason,
 		By:     by,
 	}
+	// Phase 17 Step 3: lock-release pattern.
 	s.mu.RLock()
+	var targets []*Client
 	for _, client := range s.clients {
 		if client.UserID == userID {
-			client.Encoder.Encode(left)
+			targets = append(targets, client)
 		}
 	}
 	s.mu.RUnlock()
+	s.fanOut("group_left", left, targets)
 
 	s.logger.Info("group leave",
 		"user", userID,
@@ -2063,13 +2084,16 @@ func (s *Server) handleDeleteGroup(c *Client, raw json.RawMessage) {
 		Type:  "group_deleted",
 		Group: msg.Group,
 	}
+	// Phase 17 Step 3: lock-release pattern.
 	s.mu.RLock()
+	var targets []*Client
 	for _, client := range s.clients {
 		if client.UserID == c.UserID {
-			client.Encoder.Encode(deleted)
+			targets = append(targets, client)
 		}
 	}
 	s.mu.RUnlock()
+	s.fanOut("group_deleted", deleted, targets)
 
 	s.logger.Info("group delete",
 		"user", c.UserID,
@@ -2226,13 +2250,16 @@ func (s *Server) performRoomLeave(roomID, userID, reason, initiatedBy string) {
 		Room:   roomID,
 		Reason: reason,
 	}
+	// Phase 17 Step 3: lock-release pattern.
 	s.mu.RLock()
+	var targets []*Client
 	for _, client := range s.clients {
 		if client.UserID == userID {
-			client.Encoder.Encode(left)
+			targets = append(targets, client)
 		}
 	}
 	s.mu.RUnlock()
+	s.fanOut("room_left", left, targets)
 
 	// Mark room for epoch rotation. Same path handleRetirement uses for
 	// users: the next sender will trigger epoch_trigger and the new key
@@ -2397,13 +2424,16 @@ func (s *Server) handleDeleteRoom(c *Client, raw json.RawMessage) {
 		Type: "room_deleted",
 		Room: msg.Room,
 	}
+	// Phase 17 Step 3: lock-release pattern — collect targets, release, fanOut.
 	s.mu.RLock()
+	var targets []*Client
 	for _, client := range s.clients {
 		if client.UserID == c.UserID {
-			client.Encoder.Encode(deleted)
+			targets = append(targets, client)
 		}
 	}
 	s.mu.RUnlock()
+	s.fanOut("room_deleted", deleted, targets)
 
 	s.logger.Info("room delete",
 		"user", c.UserID,
@@ -2551,14 +2581,17 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 		Members: []string{dm.UserA, dm.UserB},
 	}
 
-	// Send dm_created to all sessions of both members
+	// Send dm_created to all sessions of both members.
+	// Phase 17 Step 3: lock-release pattern.
 	s.mu.RLock()
+	var targets []*Client
 	for _, client := range s.clients {
 		if client.UserID == dm.UserA || client.UserID == dm.UserB {
-			client.Encoder.Encode(created)
+			targets = append(targets, client)
 		}
 	}
 	s.mu.RUnlock()
+	s.fanOut("dm_created", created, targets)
 
 	s.logger.Info("DM created",
 		"dm", dm.ID,
@@ -2650,14 +2683,17 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 		s.logger.Error("failed to store DM", "dm", dm.ID, "error", err)
 	}
 
-	// Broadcast to both members' active sessions
+	// Broadcast to both members' active sessions.
+	// Phase 17 Step 3: lock-release pattern.
 	s.mu.RLock()
+	var targets []*Client
 	for _, client := range s.clients {
 		if client.UserID == dm.UserA || client.UserID == dm.UserB {
-			client.Encoder.Encode(outMsg)
+			targets = append(targets, client)
 		}
 	}
 	s.mu.RUnlock()
+	s.fanOut("dm", outMsg, targets)
 
 	// Notify offline members via push
 	go s.notifyOfflineUsers([]string{dm.UserA, dm.UserB})
@@ -2721,13 +2757,16 @@ func (s *Server) handleLeaveDM(c *Client, raw json.RawMessage) {
 		Type: "dm_left",
 		DM:   msg.DM,
 	}
+	// Phase 17 Step 3: lock-release pattern.
 	s.mu.RLock()
+	var targets []*Client
 	for _, client := range s.clients {
 		if client.UserID == c.UserID {
-			client.Encoder.Encode(left)
+			targets = append(targets, client)
 		}
 	}
 	s.mu.RUnlock()
+	s.fanOut("dm_left", left, targets)
 
 	s.logger.Info("DM leave (silent)",
 		"user", c.UserID,
@@ -2834,13 +2873,15 @@ func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
 		Admin:          isAdmin,
 	}
 
-	// Broadcast to all users who can see this user
+	// Broadcast to all users who can see this user.
+	// Phase 17 Step 3: lock-release pattern.
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	targets := make([]*Client, 0, len(s.clients))
 	for _, client := range s.clients {
-		client.Encoder.Encode(profile)
+		targets = append(targets, client)
 	}
+	s.mu.RUnlock()
+	s.fanOut("profile", profile, targets)
 }
 
 // handleSetStatus updates a user's status text.
@@ -2859,6 +2900,9 @@ func (s *Server) handleSetStatus(c *Client, raw json.RawMessage) {
 }
 
 // broadcastToRoom sends a message to all connected clients in a room.
+// Phase 17 Step 3: collect recipients under the server RLock, release, then
+// encode outside the lock via s.fanOut — prevents one slow reader from
+// stalling the broadcast loop for every other room member.
 func (s *Server) broadcastToRoom(roomID string, msg any) {
 	if s.store == nil {
 		return
@@ -2869,16 +2913,18 @@ func (s *Server) broadcastToRoom(roomID string, msg any) {
 	}
 
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	var targets []*Client
 	for _, client := range s.clients {
 		if memberSet[client.UserID] {
-			client.Encoder.Encode(msg)
+			targets = append(targets, client)
 		}
 	}
+	s.mu.RUnlock()
+	s.fanOut("message", msg, targets)
 }
 
 // broadcastToGroup sends a message to all connected clients in a group DM.
+// Phase 17 Step 3: same lock-release pattern as broadcastToRoom.
 func (s *Server) broadcastToGroup(groupID string, msg any) {
 	if s.store == nil {
 		return
@@ -2896,16 +2942,18 @@ func (s *Server) broadcastToGroup(groupID string, msg any) {
 	}
 
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	var targets []*Client
 	for _, client := range s.clients {
 		if memberSet[client.UserID] {
-			client.Encoder.Encode(msg)
+			targets = append(targets, client)
 		}
 	}
+	s.mu.RUnlock()
+	s.fanOut("message", msg, targets)
 }
 
 // broadcastToRoomExcept sends to all room members except the given device.
+// Phase 17 Step 3: same lock-release pattern as broadcastToRoom.
 func (s *Server) broadcastToRoomExcept(roomID, excludeDevice string, msg any) {
 	if s.store == nil {
 		return
@@ -2916,19 +2964,21 @@ func (s *Server) broadcastToRoomExcept(roomID, excludeDevice string, msg any) {
 	}
 
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	var targets []*Client
 	for _, client := range s.clients {
 		if client.DeviceID == excludeDevice {
 			continue
 		}
 		if memberSet[client.UserID] {
-			client.Encoder.Encode(msg)
+			targets = append(targets, client)
 		}
 	}
+	s.mu.RUnlock()
+	s.fanOut("message", msg, targets)
 }
 
 // broadcastToGroupExcept sends to all group DM members except the given device.
+// Phase 17 Step 3: same lock-release pattern as broadcastToRoom.
 func (s *Server) broadcastToGroupExcept(groupID, excludeDevice string, msg any) {
 	if s.store == nil {
 		return
@@ -2945,16 +2995,17 @@ func (s *Server) broadcastToGroupExcept(groupID, excludeDevice string, msg any) 
 	}
 
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	var targets []*Client
 	for _, client := range s.clients {
 		if client.DeviceID == excludeDevice {
 			continue
 		}
 		if memberSet[client.UserID] {
-			client.Encoder.Encode(msg)
+			targets = append(targets, client)
 		}
 	}
+	s.mu.RUnlock()
+	s.fanOut("message", msg, targets)
 }
 
 // handleListPendingKeys returns the list of pending (unapproved) SSH keys.

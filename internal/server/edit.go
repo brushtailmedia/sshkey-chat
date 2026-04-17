@@ -391,13 +391,16 @@ func (s *Server) handleEditDM(c *Client, raw json.RawMessage) {
 		Signature:   msg.Signature,
 		EditedAt:    editedAt,
 	}
+	// Phase 17 Step 3: lock-release pattern.
 	s.mu.RLock()
+	var targets []*Client
 	for _, client := range s.clients {
 		if client.UserID == dm.UserA || client.UserID == dm.UserB {
-			client.Encoder.Encode(out)
+			targets = append(targets, client)
 		}
 	}
 	s.mu.RUnlock()
+	s.fanOut("dm_edited", out, targets)
 	s.logger.Info("dm message edited", "dm", dm.ID, "id", msg.ID, "user", c.UserID)
 }
 

@@ -415,16 +415,19 @@ func (s *Server) Close() error {
 		}
 	}
 
-	// Broadcast shutdown to all connected clients
+	// Broadcast shutdown to all connected clients.
+	// Phase 17 Step 3: lock-release pattern.
 	s.mu.RLock()
+	targets := make([]*Client, 0, len(s.clients))
 	for _, client := range s.clients {
-		client.Encoder.Encode(protocol.ServerShutdown{
-			Type:        "server_shutdown",
-			Message:     "Server shutting down",
-			ReconnectIn: 10,
-		})
+		targets = append(targets, client)
 	}
 	s.mu.RUnlock()
+	s.fanOut("server_shutdown", protocol.ServerShutdown{
+		Type:        "server_shutdown",
+		Message:     "Server shutting down",
+		ReconnectIn: 10,
+	}, targets)
 
 	// Wait grace period for in-flight operations
 	gracePeriod := 10 * time.Second
@@ -581,14 +584,16 @@ func (s *Server) logPendingKey(fingerprint, remote string) {
 
 // notifyAdmins sends a message to all connected admin clients.
 func (s *Server) notifyAdmins(msg any) {
+	// Phase 17 Step 3: lock-release pattern.
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	var targets []*Client
 	for _, client := range s.clients {
 		if s.store != nil && s.store.IsAdmin(client.UserID) {
-			client.Encoder.Encode(msg)
+			targets = append(targets, client)
 		}
 	}
+	s.mu.RUnlock()
+	s.fanOut("admin_notify", msg, targets)
 }
 
 // handleConnection processes a new SSH connection through the full lifecycle.

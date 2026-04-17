@@ -188,9 +188,12 @@ func (s *Server) broadcastUserProfile(user *store.UserRecord) {
 		RetiredAt:      user.RetiredAt,
 	}
 
+	// Phase 17 Step 3: lock-release pattern.
 	s.mu.RLock()
+	targets := make([]*Client, 0, len(s.clients))
 	for _, client := range s.clients {
-		client.Encoder.Encode(event)
+		targets = append(targets, client)
 	}
 	s.mu.RUnlock()
+	s.fanOut("profile", event, targets)
 }

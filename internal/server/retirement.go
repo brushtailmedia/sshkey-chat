@@ -182,14 +182,17 @@ func (s *Server) handleRetirement(userID string, oldRooms []string, reason strin
 		User: userID,
 		Ts:   time.Now().Unix(),
 	}
+	// Phase 17 Step 3: lock-release pattern.
 	s.mu.RLock()
+	var targets []*Client
 	for _, client := range s.clients {
 		if client.UserID == userID {
 			continue // don't send to the retiring user's own sessions
 		}
-		client.Encoder.Encode(retiredEvent)
+		targets = append(targets, client)
 	}
 	s.mu.RUnlock()
+	s.fanOut("retired", retiredEvent, targets)
 
 	// 8. Update stored profile display_name to the suffixed version
 	if s.store != nil {
@@ -200,19 +203,28 @@ func (s *Server) handleRetirement(userID string, oldRooms []string, reason strin
 			userID, newDisplayName)
 	}
 
-	// 9. Terminate active sessions for the retired user
+	// 9. Terminate active sessions for the retired user.
+	// Phase 17 Step 3: lock-release pattern. Encode via fanOut outside the
+	// lock, then iterate targets to call Channel.Close(). Close is a side
+	// effect the helper does not handle; keeping it in this function.
 	s.mu.RLock()
+	var retiredTargets []*Client
 	for _, client := range s.clients {
 		if client.UserID == userID {
-			client.Encoder.Encode(protocol.Error{
-				Type:    "error",
-				Code:    protocol.ErrUserRetired,
-				Message: "Your account has been retired",
-			})
-			client.Channel.Close()
+			retiredTargets = append(retiredTargets, client)
 		}
 	}
 	s.mu.RUnlock()
+
+	retiredErr := protocol.Error{
+		Type:    "error",
+		Code:    protocol.ErrUserRetired,
+		Message: "Your account has been retired",
+	}
+	s.fanOut("retired", retiredErr, retiredTargets)
+	for _, client := range retiredTargets {
+		client.Channel.Close()
+	}
 
 	// 10. Audit log
 	if s.audit != nil {

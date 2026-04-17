@@ -138,12 +138,15 @@ func (s *Server) processPendingRoomUpdates() {
 			memberSet[m] = true
 		}
 
+		// Phase 17 Step 3: lock-release pattern.
 		s.mu.RLock()
+		var targets []*Client
 		for _, client := range s.clients {
 			if memberSet[client.UserID] {
-				client.Encoder.Encode(event)
+				targets = append(targets, client)
 			}
 		}
 		s.mu.RUnlock()
+		s.fanOut("room_updated", event, targets)
 	}
 }
