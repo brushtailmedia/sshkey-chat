@@ -683,6 +683,29 @@ func (s *Store) initDataDB() error {
 			size         INTEGER NOT NULL
 		);
 
+		-- File-to-context bindings (Phase 17 Step 4.f). Each uploaded file is
+		-- bound to exactly ONE context at upload completion: one of room /
+		-- group / 1:1 DM. Used by handleDownload's ACL check to verify the
+		-- caller has access to the file's owning context. Composite PK is
+		-- future-proofed for multi-binding (e.g. forwards as a feature) but
+		-- current usage is one row per file_id.
+		--
+		-- Cleanup cascades: rows for context X are deleted when context X
+		-- itself is cleaned up (DeleteRoomRecord, DeleteGroupConversation,
+		-- DeleteDirectMessage), when a specific file_id is tombstoned via
+		-- cleanupFiles (message-delete path), or when admin CLI cmdPurge
+		-- reaps old messages. The cleanOrphanFiles startup sweep catches
+		-- stragglers where the file_contexts row was dropped but the
+		-- file_hashes row wasn't (crash window between DELETE statements).
+		-- See download_fix.md for the full cleanup site enumeration.
+		CREATE TABLE IF NOT EXISTS file_contexts (
+			file_id      TEXT NOT NULL,
+			context_type TEXT NOT NULL,     -- 'room' | 'group' | 'dm'
+			context_id   TEXT NOT NULL,
+			ts           INTEGER NOT NULL,  -- unix seconds; attachment time
+			PRIMARY KEY (file_id, context_type, context_id)
+		);
+
 		-- Indexes for per-connect query paths (sync, epoch keys, group DMs)
 		CREATE INDEX IF NOT EXISTS idx_epoch_keys_room_user_epoch
 			ON epoch_keys(room, user, epoch);
@@ -694,6 +717,15 @@ func (s *Store) initDataDB() error {
 			ON devices(last_synced) WHERE last_synced IS NOT NULL AND last_synced != '';
 		CREATE INDEX IF NOT EXISTS idx_push_tokens_user_active
 			ON push_tokens(user, active);
+
+		-- file_contexts indexes: lookup serves the download ACL (GetFileContext
+		-- by file_id, O(1) with this index); cleanup serves the context-gone
+		-- cascade (DELETE WHERE context_type = ? AND context_id = ?, O(rows)
+		-- matching the single context being cleaned up).
+		CREATE INDEX IF NOT EXISTS idx_file_contexts_lookup
+			ON file_contexts(file_id);
+		CREATE INDEX IF NOT EXISTS idx_file_contexts_cleanup
+			ON file_contexts(context_type, context_id);
 	`)
 	return err
 }

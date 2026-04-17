@@ -272,6 +272,72 @@ func TestHandleRetirement_SetsDMCutoff(t *testing.T) {
 	}
 }
 
+// TestHandleRetirement_CleansUpDormantDM locks in the Phase 17 Step 4.f
+// retirement-cleanup fix: when a user retires AND the other party of a
+// DM had already /leave'd beforehand, the retirement step 5 now fires
+// cleanupDormantDM which finds both user_*_left_at are non-zero and
+// tears down the DM row + per-DM DB file. Before the fix, retirement
+// only called SetDMLeftAt and the row persisted forever (orphan).
+//
+// This also exercises the Step 4.f file_contexts cascade site #3: if
+// any file was bound to this DM, it would get cleaned up via
+// DeleteDirectMessage's extension. The test here just locks in the
+// DM-row cleanup half; file_contexts tests live separately.
+func TestHandleRetirement_CleansUpDormantDMWhenOtherPartyAlreadyLeft(t *testing.T) {
+	s := newTestServer(t)
+
+	// Alice and Bob have a DM. Alice /leaves at time T1.
+	dm, err := s.store.CreateOrGetDirectMessage("dm_ab_cleanup", "alice", "bob")
+	if err != nil {
+		t.Fatalf("create DM: %v", err)
+	}
+	if err := s.store.SetDMLeftAt(dm.ID, "alice", 1000); err != nil {
+		t.Fatalf("alice leave: %v", err)
+	}
+
+	// Sanity: DM still exists because only Alice has left.
+	stillThere, _ := s.store.GetDirectMessage(dm.ID)
+	if stillThere == nil {
+		t.Fatal("DM should persist while only one party has left")
+	}
+
+	// Now bob retires. Step 5 of handleRetirement sets bob's cutoff AND
+	// calls cleanupDormantDM, which finds both parties have now left and
+	// tears down the row.
+	s.handleRetirement("bob", nil, "admin")
+
+	gone, _ := s.store.GetDirectMessage(dm.ID)
+	if gone != nil {
+		t.Errorf("DM should be deleted after both-party exit via retirement+prior-leave, got %+v", gone)
+	}
+}
+
+// TestHandleRetirement_PreservesDMWhenOtherPartyActive is the
+// negative case for the above: if the other party hasn't left,
+// retirement must NOT delete the DM row. The active party still needs
+// access to history; bob's cutoff just blocks his own future reads.
+func TestHandleRetirement_PreservesDMWhenOtherPartyActive(t *testing.T) {
+	s := newTestServer(t)
+
+	dm, err := s.store.CreateOrGetDirectMessage("dm_ab_keep", "alice", "bob")
+	if err != nil {
+		t.Fatalf("create DM: %v", err)
+	}
+
+	s.handleRetirement("bob", nil, "admin")
+
+	// Alice is still active in the DM, so the row must survive.
+	stillThere, _ := s.store.GetDirectMessage(dm.ID)
+	if stillThere == nil {
+		t.Error("DM should persist when only retired party has left")
+	}
+	// And alice's left_at should still be zero — retirement only touches
+	// the retiring user's cutoff.
+	if stillThere != nil && stillThere.CutoffFor("alice") != 0 {
+		t.Errorf("alice's cutoff should be untouched, got %d", stillThere.CutoffFor("alice"))
+	}
+}
+
 // TestHandleRetirement_BroadcastsUserRetiredReasonToRemainingMembers
 // verifies that the room_event{leave} broadcast emitted when a user
 // retires carries Reason: "user_retired", so client UIs can render a

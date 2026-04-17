@@ -133,6 +133,16 @@ func (s *Server) handleRetirement(userID string, oldRooms []string, reason strin
 	// see any messages sent after this timestamp. The other party's row is
 	// unchanged — they still see the DM in their sidebar, can read history,
 	// but sends are blocked by the retired-recipient check in handleSendDM.
+	//
+	// After setting the cutoff, run cleanupDormantDM for each DM: if the
+	// OTHER party had already /leave'd before this retirement, both
+	// user_*_left_at columns are now non-zero and the DM row + per-DM DB
+	// file can be cleaned up. Without this call the row would persist
+	// forever (pre-Phase-17 bug caught during the Step 4.f audit).
+	// cleanupDormantDM is idempotent and no-ops unless both parties have
+	// left, so it's safe to call unconditionally. When it DOES fire
+	// DeleteDirectMessage, the Step 4.f file_contexts cascade (site #3)
+	// picks up any bound attachments for the dormant DM.
 	dmCount := 0
 	if s.store != nil {
 		now := time.Now().Unix()
@@ -151,7 +161,9 @@ func (s *Server) handleRetirement(userID string, oldRooms []string, reason strin
 						"dm", dm.ID,
 						"error", err,
 					)
+					continue // skip cleanup if SetDMLeftAt failed
 				}
+				s.cleanupDormantDM(dm.ID)
 			}
 		}
 	}
