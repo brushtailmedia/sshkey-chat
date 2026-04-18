@@ -32,11 +32,16 @@ func newRejectTestServer(t *testing.T, logWriter io.Writer) *Server {
 // newRejectTestClient returns a minimally-initialized *Client whose Encoder writes
 // to the supplied buffer. Suitable for asserting on the wire output of
 // rejectAndLog when it encodes a clientErr.
+//
+// Phase 17b Step 5b: Client.Encoder is *safeEncoder; wrap the raw
+// protocol.Encoder for compatibility. sendCh is left nil so fanOut's
+// test-mode fallback path (synchronous Encode to the buffer) exercises
+// the same wire-level assertions these tests were written against.
 func newRejectTestClient(deviceID string, encBuf *bytes.Buffer) *Client {
 	return &Client{
 		UserID:   "usr_test",
 		DeviceID: deviceID,
-		Encoder:  protocol.NewEncoder(encBuf),
+		Encoder:  newSafeEncoder(protocol.NewEncoder(encBuf)),
 	}
 }
 

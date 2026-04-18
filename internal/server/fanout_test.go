@@ -149,7 +149,7 @@ func TestFanOut_OneFailingRecipient_CountsDropAndContinues(t *testing.T) {
 	c3 := &Client{
 		UserID:   "usr_test",
 		DeviceID: "dev_bad",
-		Encoder:  protocol.NewEncoder(sw),
+		Encoder:  newSafeEncoder(protocol.NewEncoder(sw)),
 	}
 
 	msg := protocol.OpaqueReject()
@@ -184,7 +184,7 @@ func TestFanOut_DropLogsAtDebugWithVerbAndDevice(t *testing.T) {
 	c := &Client{
 		UserID:   "usr_test",
 		DeviceID: "dev_failing",
-		Encoder:  protocol.NewEncoder(sw),
+		Encoder:  newSafeEncoder(protocol.NewEncoder(sw)),
 	}
 	s.fanOut("epoch_key", protocol.OpaqueReject(), []*Client{c})
 
@@ -313,7 +313,7 @@ func TestFanOut_SlowRecipientDoesNotBlockFastRecipients(t *testing.T) {
 	cSlow := &Client{
 		UserID:   "usr_slow",
 		DeviceID: "dev_slow",
-		Encoder:  protocol.NewEncoder(sw),
+		Encoder:  newSafeEncoder(protocol.NewEncoder(sw)),
 	}
 
 	// Drive fanOut from a goroutine. It should complete for the fast

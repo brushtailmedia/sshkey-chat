@@ -89,13 +89,18 @@ func (s *Server) rejectAndLog(
 //	s.mu.RUnlock()
 //	s.fanOut("message", msg, targets)
 //
-// Drop handling: if a recipient's Encode returns an error (typically because
-// the SSH channel closed or its write buffer is full and the session is
-// tearing down), fanOut increments `counters.SignalBroadcastDropped` for the
-// recipient's device and emits a Debug-level log line. Debug level, not
-// Warn, because broadcast drops during client disconnect are routine (not
-// server bugs); operators enable Debug logging if they want live visibility,
-// otherwise the counter surface via `Snapshot()` is sufficient.
+// Drop handling (updated Phase 17b Step 5b): fanOut now non-blocking-
+// enqueues into each recipient's per-client outbound queue (Client.sendCh).
+// A full queue indicates a slow reader; the drop increments
+// SignalBroadcastDropped and advances the recipient's consecutiveDrops
+// counter. When that counter crosses s.cfg.Server.RateLimits.
+// ConsecutiveDropDisconnectThreshold, fanOut closes the recipient's SSH
+// channel — disconnect (not auto-revoke) is the remedy, and the client
+// recovers via normal reconnect + sync-catchup.
+//
+// Clients constructed in test code without a sendCh (Client.sendCh == nil)
+// take a fallback synchronous-Encode path so existing tests that
+// verify fanOut wire output via a captured io.Writer continue to pass.
 //
 // The `verb` parameter mirrors the `rejectAndLog` pattern — it names the
 // high-level action that triggered the broadcast (e.g. "message", "profile",
@@ -110,13 +115,51 @@ func (s *Server) rejectAndLog(
 // is cleaner than adding a second helper variant for one caller.
 func (s *Server) fanOut(verb string, msg any, recipients []*Client) {
 	for _, c := range recipients {
+		s.fanOutOne(verb, msg, c)
+	}
+}
+
+// fanOutOne enqueues msg to a single recipient with drop-tracking and
+// consecutive-drop disconnect. Used by fanOut and by handleEpochRotate's
+// inline per-recipient path (where each recipient gets a different
+// message). Phase 17b Step 5b.
+func (s *Server) fanOutOne(verb string, msg any, c *Client) {
+	// Test-mode fallback: Client constructed without a sendCh (see
+	// fanout_test.go, reject_test.go fixtures). Synchronous Encode
+	// preserves pre-5b behavior for those tests.
+	if c.sendCh == nil {
 		if err := c.Encoder.Encode(msg); err != nil {
 			s.counters.Inc(counters.SignalBroadcastDropped, c.DeviceID)
-			s.logger.Debug("broadcast dropped",
+			s.logger.Debug("broadcast dropped (sync test path)",
 				"verb", verb,
 				"device", c.DeviceID,
 				"error", err,
 			)
 		}
+		return
+	}
+
+	queued, drops := c.TryEnqueue(msg)
+	if queued {
+		return
+	}
+
+	s.counters.Inc(counters.SignalBroadcastDropped, c.DeviceID)
+	s.logger.Debug("broadcast dropped (queue full)",
+		"verb", verb,
+		"device", c.DeviceID,
+		"consecutive_drops", drops,
+	)
+
+	threshold := s.cfg.Server.RateLimits.ConsecutiveDropDisconnectThreshold
+	if threshold > 0 && drops >= int32(threshold) {
+		s.logger.Warn("slow-reader disconnect",
+			"verb", verb,
+			"user", c.UserID,
+			"device", c.DeviceID,
+			"consecutive_drops", drops,
+			"threshold", threshold,
+		)
+		c.Channel.Close()
 	}
 }

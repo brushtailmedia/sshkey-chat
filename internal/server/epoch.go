@@ -384,14 +384,10 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 			Epoch:      msg.Epoch,
 			WrappedKey: t.wrappedKey,
 		}
-		if err := t.client.Encoder.Encode(perMsg); err != nil {
-			s.counters.Inc(counters.SignalBroadcastDropped, t.client.DeviceID)
-			s.logger.Debug("broadcast dropped",
-				"verb", "epoch_key",
-				"device", t.client.DeviceID,
-				"error", err,
-			)
-		}
+		// Phase 17b Step 5b: route per-recipient varying message
+		// through the shared fanOutOne helper to pick up the
+		// per-client queue + consecutive-drop disconnect policy.
+		s.fanOutOne("epoch_key", perMsg, t.client)
 	}
 }
 

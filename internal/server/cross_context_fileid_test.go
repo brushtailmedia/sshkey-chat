@@ -29,11 +29,16 @@ import (
 
 // newCrossContextTestClient is a minimal *Client whose Encoder writes
 // to the supplied buffer so tests can assert on the wire response.
+//
+// Phase 17b Step 5b: Client.Encoder is *safeEncoder; wrap the raw
+// protocol.Encoder. sendCh left nil — fanOut's test-mode fallback
+// takes the synchronous-Encode path so wire-level assertions still
+// work as written.
 func newCrossContextTestClient(deviceID string, encBuf *bytes.Buffer) *Client {
 	return &Client{
 		UserID:   "alice",
 		DeviceID: deviceID,
-		Encoder:  protocol.NewEncoder(encBuf),
+		Encoder:  newSafeEncoder(protocol.NewEncoder(encBuf)),
 	}
 }
 

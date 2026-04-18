@@ -72,7 +72,7 @@ var autoRevokeDescriptions = map[string]string{
 	counters.SignalNonMemberContext:     "too many requests to contexts you don't belong to",
 	counters.SignalDownloadNotFound:     "too many invalid download requests",
 	counters.SignalDownloadNoChannel:    "upload channel misuse (client bug)",
-	// SignalReconnectFlood will land here in Step 5.
+	counters.SignalReconnectFlood:       "reconnecting too rapidly",
 }
 
 // buildAutoRevokeReason builds the operator-readable reason string

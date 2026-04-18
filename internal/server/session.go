@@ -51,7 +51,7 @@ var allCapabilities = []string{
 func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Channel, dlChanCh <-chan ssh.Channel) {
 	defer ch.Close()
 
-	enc := protocol.NewEncoder(ch)
+	enc := newSafeEncoder(protocol.NewEncoder(ch))
 	dec := protocol.NewDecoder(ch)
 
 	// Step 1: Send server_hello
@@ -190,7 +190,13 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 		}
 	}
 
-	// Register client
+	// Register client. Phase 17b Step 5b: sendCh sized from config
+	// (default 256); sessionDone is closed by the defer chain on
+	// session teardown to signal the writer goroutine to exit.
+	bufSize := s.cfg.Server.RateLimits.PerClientWriteBufferSize
+	if bufSize <= 0 {
+		bufSize = 256
+	}
 	client := &Client{
 		UserID:       userID,
 		DeviceID:     clientHello.DeviceID,
@@ -199,11 +205,37 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 		Channel:      ch,
 		Conn:         conn,
 		Capabilities: active,
+		sendCh:       make(chan any, bufSize),
+		sessionDone:  make(chan struct{}),
 	}
 
 	s.mu.Lock()
 	s.clients[clientHello.DeviceID] = client
 	s.mu.Unlock()
+
+	// Phase 17b Step 5b: start the per-client writer goroutine.
+	// Must run AFTER the Client is registered in s.clients so
+	// concurrent fanOut sites see it. Stops when sessionDone closes.
+	go s.runSendWriter(client)
+	defer close(client.sessionDone)
+
+	// Phase 17b Step 5c: reconnect-flood signal. Every successful
+	// session establishment is one Inc. Legit clients reconnect
+	// rarely (network blips, user restart); a client hitting
+	// reconnect_flood threshold (e.g. 10:60) is thrashing the
+	// session-setup pipeline. Counter feeds Phase 17b auto-revoke.
+	s.counters.Inc(counters.SignalReconnectFlood, clientHello.DeviceID)
+
+	// Phase 17b Step 5a: NDJSON idle-timeout watchdog. Starts only
+	// when rate_limits.idle_timeout_seconds is non-zero (disabled
+	// by default). messageLoop stamps LastActivity on every
+	// successful Decode; the watchdog closes the channel if
+	// LastActivity ages past the configured timeout.
+	if idleTimeout := s.cfg.Server.RateLimits.IdleTimeoutSeconds; idleTimeout > 0 {
+		watchdogDone := make(chan struct{})
+		defer close(watchdogDone)
+		go s.runIdleWatchdog(client, idleTimeout, computeIdleWatchdogCadence(idleTimeout), watchdogDone)
+	}
 
 	// Attach the shared download channel. Clients open Channels 1-3
 	// before client_hello completes, so the 2nd session channel should
@@ -319,7 +351,7 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 }
 
 // sendInstallBanner sends the install instructions and closes.
-func (s *Server) sendInstallBanner(enc *protocol.Encoder) {
+func (s *Server) sendInstallBanner(enc *safeEncoder) {
 	enc.Encode(map[string]string{"type": "error", "code": "client_required", "message": "This server requires the sshkey-chat client. Install: https://sshkey.chat"})
 }
 
@@ -701,6 +733,10 @@ func (s *Server) sendProfiles(c *Client) {
 }
 
 // messageLoop reads and dispatches messages from the client.
+//
+// Phase 17b Step 5a: stamps c.LastActivity on every successful
+// Decode. runIdleWatchdog reads this timestamp to detect
+// NDJSON-level slow-loris and close the channel.
 func (s *Server) messageLoop(c *Client) {
 	for {
 		raw, err := c.Decoder.DecodeRaw()
@@ -710,6 +746,7 @@ func (s *Server) messageLoop(c *Client) {
 			}
 			return
 		}
+		c.LastActivity.Store(time.Now().Unix())
 
 		msgType, err := protocol.TypeOf(raw)
 		if err != nil {

@@ -167,6 +167,36 @@ type RateLimitsSection struct {
 	// because attachment-heavy chat views legitimately fire many
 	// requests when opened.
 	DownloadRequestsPerMinute int `toml:"download_requests_per_minute"`
+
+	// IdleTimeoutSeconds is the Phase 17b Step 5a NDJSON idle
+	// watchdog threshold. If a client connection sends no complete
+	// protocol frame for this many seconds, the server closes the
+	// SSH channel. 0 disables (default) — operators tune post-launch
+	// once legitimate user idle patterns are observed. Slow-loris
+	// defense; SSH-layer keepalive (30s) already kills dead TCP
+	// connections independently.
+	IdleTimeoutSeconds int `toml:"idle_timeout_seconds"`
+
+	// PerClientWriteBufferSize is the Phase 17b Step 5b per-connection
+	// outbound message queue depth. fanOut broadcasts non-blocking-
+	// enqueue into each recipient's queue; a slow reader whose queue
+	// fills causes drops (counted as SignalBroadcastDropped) rather
+	// than blocking the sender. Default 256 absorbs ~50 seconds of
+	// a chatty room's worth of broadcasts. Raise for deployments
+	// with very large rooms or sustained broadcast storms; lower
+	// only if memory pressure demands it (size × active connections
+	// is the memory budget).
+	PerClientWriteBufferSize int `toml:"per_client_write_buffer_size"`
+
+	// ConsecutiveDropDisconnectThreshold is the Phase 17b Step 5b
+	// cutoff for "slow-reader" disconnects. After a client's
+	// outbound queue has been full for this many consecutive
+	// fanOut attempts, the server closes their SSH channel.
+	// Disconnect (not auto-revoke) is the remedy — the client can
+	// reconnect with a clean slate and sync-catchup. Default 10.
+	// 0 disables disconnect-on-drops (drops still counted, but the
+	// channel stays open — not recommended).
+	ConsecutiveDropDisconnectThreshold int `toml:"consecutive_drop_disconnect_threshold"`
 	// AdminActionsPerMinute caps the rate at which a single user can issue
 	// in-group admin verbs (add_to_group, remove_from_group, promote_group_admin,
 	// demote_group_admin, rename_group) against a single group. Scoped per
@@ -286,6 +316,9 @@ func DefaultServerConfig() ServerConfig {
 			RoomMembersPerMinute:      6,  // info-panel refresh cadence
 			DeviceListPerMinute:       6,  // settings-panel refresh cadence
 			DownloadRequestsPerMinute: 60, // attachment-heavy chat tolerance
+			// Phase 17b Step 5b: per-client outbound queue
+			PerClientWriteBufferSize:           256, // ~50s of chatty-room traffic
+			ConsecutiveDropDisconnectThreshold: 10,  // disconnect slow readers
 		},
 		Shutdown: ShutdownSection{
 			GracePeriod: "10s",

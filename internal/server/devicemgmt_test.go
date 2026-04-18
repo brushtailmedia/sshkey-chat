@@ -29,12 +29,16 @@ func (cc *captureClient) messages() []json.RawMessage {
 // testClientFor constructs a minimal Client whose Encoder writes to an
 // in-memory buffer. Used to test handleListDevices / handleRevokeDevice
 // in isolation from the SSH layer.
+//
+// Phase 17b Step 5b: Client.Encoder is *safeEncoder; wrap the raw
+// protocol.Encoder. sendCh left nil — fanOut's test-mode fallback
+// keeps synchronous-Encode behavior so wire-capture tests still pass.
 func testClientFor(userID, deviceID string) *captureClient {
 	buf := &bytes.Buffer{}
 	c := &Client{
-		UserID: userID,
+		UserID:   userID,
 		DeviceID: deviceID,
-		Encoder:  protocol.NewEncoder(buf),
+		Encoder:  newSafeEncoder(protocol.NewEncoder(buf)),
 	}
 	return &captureClient{Client: c, buf: buf}
 }

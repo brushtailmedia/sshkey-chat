@@ -43,6 +43,19 @@ func TestBuildAutoRevokeReason_Format(t *testing.T) {
 	}
 }
 
+func TestBuildAutoRevokeReason_ReconnectFlood(t *testing.T) {
+	// Phase 17b Step 5c: reconnect_flood must be both an accepted
+	// AutoRevokeSignals entry AND produce a clean human-readable
+	// reason string. Locks in the end-to-end wiring across the
+	// counters constant, AutoRevokeSignals slice, and the
+	// autoRevokeDescriptions map.
+	got := buildAutoRevokeReason(counters.SignalReconnectFlood, 10, 60)
+	want := "Automatic revocation: reconnecting too rapidly (10 events in 60s)"
+	if got != want {
+		t.Errorf("buildAutoRevokeReason(reconnect_flood) = %q, want %q", got, want)
+	}
+}
+
 func TestBuildAutoRevokeReason_UnknownSignalFallback(t *testing.T) {
 	got := buildAutoRevokeReason("brand_new_signal", 5, 30)
 	want := "Automatic revocation: signal brand_new_signal (5 events in 30s)"

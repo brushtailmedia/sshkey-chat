@@ -80,6 +80,17 @@ const (
 	// A buggy client hits this on every download; a legit client
 	// should never hit it.
 	SignalDownloadNoChannel = "download_no_channel"
+
+	// SignalReconnectFlood fires on each new session registration
+	// (post client_hello, after Client is added to s.clients). A
+	// legit client reconnects occasionally — network blips, server
+	// restarts, user restart. A flood (e.g. 10+ reconnects in 60s)
+	// is a broken or hostile client thrashing the session-setup
+	// pipeline. Zero legitimate baseline ≠ zero connects; it means
+	// no LEGITIMATE client reconnects at rates Phase 17b's threshold
+	// windows (tight default ~10:60) flag as flooding.
+	// Phase 17b Step 5c.
+	SignalReconnectFlood = "reconnect_flood"
 )
 
 // Load signals — counted but NEVER auto-revoke inputs.
@@ -113,6 +124,7 @@ var AutoRevokeSignals = []string{
 	SignalNonMemberContext,
 	SignalDownloadNotFound,
 	SignalDownloadNoChannel,
+	SignalReconnectFlood,
 }
 
 // key identifies a single counter — (signal, deviceID). Unexported so callers
