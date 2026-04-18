@@ -25,6 +25,38 @@ func contentHash(data []byte) string {
 	return fmt.Sprintf("blake2b-256:%x", h)
 }
 
+// validContentHash enforces the strict wire contract for content_hash:
+// exactly `blake2b-256:<64 hex chars>`, lowercase only. Protocol spec
+// (PROTOCOL.md File Transfer section) states this explicitly — clients
+// MUST emit lowercase hex; the server rejects otherwise.
+//
+// Phase 17 Step 4c: early-reject at upload_start shape check, before
+// any pendingUpload allocation. Pre-4c a malformed hash propagated all
+// the way to the re-compute step at upload completion and surfaced as
+// a noisy "hash_mismatch" — costing server bandwidth for no reason
+// AND giving the operator no Phase-17b-compatible signal distinguishing
+// hostile malformed-hash clients from legitimate corrupt-in-transit
+// mismatches.
+//
+// Implementation avoids the regexp package on the hot path: two
+// constant string checks + a 64-byte alphabet loop, zero allocation.
+func validContentHash(h string) bool {
+	const prefix = "blake2b-256:"
+	if len(h) != len(prefix)+64 {
+		return false
+	}
+	if h[:len(prefix)] != prefix {
+		return false
+	}
+	for i := len(prefix); i < len(h); i++ {
+		c := h[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 // fileManager handles file uploads (Channel 3) and downloads (Channel 2).
 type fileManager struct {
 	dir string // file storage directory
@@ -51,6 +83,32 @@ func newFileManager(dataDir string) *fileManager {
 		dir:     dir,
 		uploads: make(map[string]*pendingUpload),
 	}
+}
+
+// failUpload cleans up per-upload state on any error path in
+// handleBinaryChannel. Removes the physical file (if filePath
+// non-empty) and drops the pendingUpload map entry. Best-effort on
+// os.Remove — missing files are tolerated silently. Idempotent.
+//
+// Phase 17 Step 4b introduced this helper to fix three leak sites
+// that removed the partial file but forgot to delete the
+// pendingUpload map entry — accumulating map cruft over a connection
+// lifetime. Every error path in handleBinaryChannel now calls this
+// helper.
+//
+// Caller sites:
+//   - data_len > MaxFileSize (oversized frame, 4b)
+//   - os.Create failure
+//   - Write / short-write failure
+//   - Hash read-back failure
+//   - Hash mismatch (already cleaned the entry pre-4b, now uses helper for consistency)
+func (s *Server) failUpload(uploadID, filePath string) {
+	if filePath != "" {
+		_ = os.Remove(filePath)
+	}
+	s.files.mu.Lock()
+	delete(s.files.uploads, uploadID)
+	s.files.mu.Unlock()
 }
 
 // cleanOrphanFiles is the lazy backstop for the Phase 17 Step 4.f hybrid
@@ -170,16 +228,40 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 	var msg protocol.UploadStart
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		// No upload_id parsed yet — fall back to generic error
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed upload_start"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "upload_start", "malformed upload_start frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed upload_start"})
 		return
 	}
 
 	if !s.limiter.allowPerMinute("upload:"+c.UserID, s.cfg.Server.RateLimits.UploadsPerMinute) {
+		// Phase 17 Step 4c Part 3: count rate-limit rejections on the
+		// attachment path so Phase 17b observability sees the signal.
+		// Not in AutoRevokeSignals (load-shaped, legitimate clients
+		// trip this during bursty catchup) but counted for visibility.
+		s.rejectAndLog(c, counters.SignalRateLimited, "upload_start",
+			"upload rate limit exceeded", nil)
 		c.Encoder.Encode(protocol.UploadError{
 			Type:     "upload_error",
 			UploadID: msg.UploadID,
 			Code:     protocol.ErrRateLimited,
 			Message:  "Too many uploads — wait a moment",
+		})
+		return
+	}
+
+	// Phase 17 Step 4c: strict upload_id shape. UploadID is client-
+	// generated (protocol contract: `up_` + 21-char nanoid body) and
+	// becomes the map key for pending uploads. Without this check a
+	// client can wedge the pending-uploads map with 1MB-long keys.
+	// Malformed upload_id is NOT echoed back in the UploadError —
+	// avoids log-injection via buggy clients shipping control chars.
+	if err := store.ValidateNanoID(msg.UploadID, "up_"); err != nil {
+		s.rejectAndLog(c, counters.SignalInvalidNanoID, "upload_start",
+			fmt.Sprintf("invalid upload_id: %v", err), nil)
+		c.Encoder.Encode(protocol.UploadError{
+			Type:    "upload_error",
+			Code:    "invalid_upload_id",
+			Message: "invalid upload_id",
 		})
 		return
 	}
@@ -193,6 +275,14 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 		maxSize = 50 * 1024 * 1024 // fallback: 50MB
 	}
 	if msg.Size > maxSize {
+		// Phase 17 Step 4c Part 3: client declared upload size exceeds
+		// MaxFileSize (config knob, default 50MB). No legitimate client
+		// has a reason to declare >50MB for a chat attachment — this is
+		// a hostile or broken client. SignalOversizedBody is an
+		// AutoRevokeSignals-eligible misbehavior signal; Phase 17b will
+		// threshold on sustained rate.
+		s.rejectAndLog(c, counters.SignalOversizedBody, "upload_start",
+			fmt.Sprintf("declared size=%d exceeds max=%d", msg.Size, maxSize), nil)
 		c.Encoder.Encode(protocol.UploadError{
 			Type:     "upload_error",
 			UploadID: msg.UploadID,
@@ -203,11 +293,35 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 	}
 
 	if msg.ContentHash == "" {
+		// Phase 17 Step 4c Part 3: content_hash is a required protocol
+		// field. Omission is a protocol violation — legitimate clients
+		// always include it. SignalMalformedFrame fires so Phase 17b
+		// can threshold on sustained rate.
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "upload_start",
+			"missing required content_hash field", nil)
 		c.Encoder.Encode(protocol.UploadError{
 			Type:     "upload_error",
 			UploadID: msg.UploadID,
 			Code:     "missing_hash",
 			Message:  "content_hash is required",
+		})
+		return
+	}
+
+	// Phase 17 Step 4c: strict format check on content_hash.
+	// `^blake2b-256:[0-9a-f]{64}$` — lowercase hex only, per the
+	// protocol contract. Pre-4c a malformed hash reached the re-compute
+	// path at upload completion and surfaced as a silent hash_mismatch;
+	// now we reject early with a distinct signal that Phase 17b can
+	// act on.
+	if !validContentHash(msg.ContentHash) {
+		s.rejectAndLog(c, counters.SignalInvalidContentHash, "upload_start",
+			"content_hash fails blake2b-256:<hex64> format", nil)
+		c.Encoder.Encode(protocol.UploadError{
+			Type:     "upload_error",
+			UploadID: msg.UploadID,
+			Code:     "invalid_content_hash",
+			Message:  "content_hash must match blake2b-256:<64 lowercase hex chars>",
 		})
 		return
 	}
@@ -237,6 +351,12 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 		contextCount++
 	}
 	if contextCount != 1 {
+		// Phase 17 Step 4c Part 3: envelope must specify exactly one of
+		// room/group/dm. Zero contexts or >1 contexts is a protocol
+		// violation — legitimate clients know where they're sending.
+		// SignalMalformedFrame fires for Phase 17b observability.
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "upload_start",
+			fmt.Sprintf("contextCount=%d (want exactly 1 of room/group/dm)", contextCount), nil)
 		c.Encoder.Encode(protocol.UploadError{
 			Type:     "upload_error",
 			UploadID: msg.UploadID,
@@ -256,9 +376,17 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	// Phase 17 Step 4c follow-up: each non-member branch fires
+	// SignalNonMemberContext so Phase 17b threshold analysis can
+	// discriminate one-shot legit races (kick-during-compose, stale
+	// reconnect state → 1-2 events) from sustained probing / buggy
+	// clients (many events). Wire response stays byte-identical per
+	// Phase 14 privacy invariant.
 	switch {
 	case msg.Room != "":
 		if !s.store.IsRoomMemberByID(msg.Room, c.UserID) {
+			s.rejectAndLog(c, counters.SignalNonMemberContext, "upload_start",
+				fmt.Sprintf("not-a-member of room=%s", msg.Room), nil)
 			c.Encoder.Encode(protocol.UploadError{
 				Type:     "upload_error",
 				UploadID: msg.UploadID,
@@ -270,6 +398,8 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 	case msg.Group != "":
 		isMember, err := s.store.IsGroupMember(msg.Group, c.UserID)
 		if err != nil || !isMember {
+			s.rejectAndLog(c, counters.SignalNonMemberContext, "upload_start",
+				fmt.Sprintf("not-a-member of group=%s", msg.Group), nil)
 			c.Encoder.Encode(protocol.UploadError{
 				Type:     "upload_error",
 				UploadID: msg.UploadID,
@@ -281,6 +411,8 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 	case msg.DM != "":
 		dm, err := s.store.GetDirectMessage(msg.DM)
 		if err != nil || dm == nil || (dm.UserA != c.UserID && dm.UserB != c.UserID) {
+			s.rejectAndLog(c, counters.SignalNonMemberContext, "upload_start",
+				fmt.Sprintf("not-a-party of dm=%s", msg.DM), nil)
 			c.Encoder.Encode(protocol.UploadError{
 				Type:     "upload_error",
 				UploadID: msg.UploadID,
@@ -404,10 +536,11 @@ func (s *Server) authorizeDownload(userID, fileID string) bool {
 func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 	var msg protocol.Download
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{
-			Type: "error", Code: "invalid_message",
-			Message: "malformed download",
-		})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "download", "malformed download frame",
+			&protocol.Error{
+				Type: "error", Code: "invalid_message",
+				Message: "malformed download",
+			})
 		return
 	}
 
@@ -429,7 +562,14 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 	// context, and (for rooms/groups) joined before the file was
 	// attached. Forward-secrecy gate for rooms/groups; party-only for
 	// DMs (no joined_at check, per the ghost-conversation design).
+	//
+	// Phase 17 Step 4c follow-up: ACL-deny fires SignalDownloadNotFound
+	// (misbehavior). Wire response stays byte-identical to the
+	// file-missing case below. One-shot post-leave click stays under
+	// threshold; sustained probing crosses it.
 	if !s.authorizeDownload(c.UserID, msg.FileID) {
+		s.rejectAndLog(c, counters.SignalDownloadNotFound, "download",
+			fmt.Sprintf("ACL deny for file_id=%s", msg.FileID), nil)
 		c.Encoder.Encode(protocol.DownloadError{
 			Type:    "download_error",
 			FileID:  msg.FileID,
@@ -444,9 +584,14 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 	// client failed to open Channel 2 within the grace period in
 	// handleSession. Treat as not_found to preserve the privacy
 	// envelope (no leak of the underlying cause).
+	//
+	// Phase 17 Step 4c follow-up: SignalDownloadNoChannel fires so
+	// Phase 17b can auto-revoke broken clients that repeatedly send
+	// download verbs without Channel 2 open. Legit clients never hit
+	// this path; a buggy client hits it every download.
 	if c.DownloadChannel == nil {
-		s.logger.Debug("download request without Channel 2 open",
-			"user", c.UserID, "device", c.DeviceID)
+		s.rejectAndLog(c, counters.SignalDownloadNoChannel, "download",
+			fmt.Sprintf("download request without Channel 2 open for file_id=%s", msg.FileID), nil)
 		c.Encoder.Encode(protocol.DownloadError{
 			Type:    "download_error",
 			FileID:  msg.FileID,
@@ -459,6 +604,12 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 	filePath := filepath.Join(s.files.dir, msg.FileID)
 	info, err := os.Stat(filePath)
 	if err != nil {
+		// Phase 17 Step 4c follow-up: file-missing path fires the same
+		// SignalDownloadNotFound as ACL-deny (single signal for the
+		// first cut — wire response is byte-identical anyway;
+		// post-launch data tells us if we need to split).
+		s.rejectAndLog(c, counters.SignalDownloadNotFound, "download",
+			fmt.Sprintf("file missing on disk for file_id=%s", msg.FileID), nil)
 		c.Encoder.Encode(protocol.DownloadError{
 			Type:    "download_error",
 			FileID:  msg.FileID,
@@ -470,7 +621,19 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 
 	f, err := os.Open(filePath)
 	if err != nil {
-		s.logger.Error("download: open failed", "file", msg.FileID, "error", err)
+		// Phase 17 Step 4c follow-up: server-side I/O error after
+		// os.Stat succeeded. Fires SignalDownloadNotFound — merged
+		// with the ACL-deny + file-missing paths above because the
+		// wire response is byte-identical (Phase 17c Category D:
+		// one signal per privacy-identical response). Circuit-
+		// breaker behavior: a degrading disk that affects every
+		// active user cascades to mass auto-revoke via Phase 17b
+		// thresholds, stopping further writes against compromised
+		// storage. Recovery is operator-manual per Phase 17b
+		// design (`enabled = false` + restart, or OS-SSH +
+		// `sshkey-ctl approve-device`).
+		s.rejectAndLog(c, counters.SignalDownloadNotFound, "download",
+			fmt.Sprintf("os.Open failed for file_id=%s: %v", msg.FileID, err), nil)
 		c.Encoder.Encode(protocol.DownloadError{
 			Type:    "download_error",
 			FileID:  msg.FileID,
@@ -544,9 +707,46 @@ func (s *Server) handleBinaryChannel(userID string, ch ssh.Channel) {
 		s.files.mu.RUnlock()
 
 		if !ok {
-			// Unknown upload — discard the data
+			// Unknown upload — discard the data and continue. Not
+			// strictly hostile (may be a timing race where the client
+			// disconnected the control channel before the server saw
+			// upload_start) so no counter increment. The refactor plan
+			// notes this as a low-priority observability gap.
 			io.CopyN(io.Discard, ch, int64(size))
 			continue
+		}
+
+		// Phase 17 Step 4b: bound `size` (the wire-supplied data_len)
+		// against the upload_start-declared size before any allocation.
+		// A hostile client can set data_len to ExaBytes — io.CopyN
+		// below would then attempt an ExaByte allocation. pending.size
+		// is already bounded by MaxFileSize at upload_start, so using
+		// it as the ceiling here composes the two checks correctly.
+		// On reject: increment SignalOversizedUploadFrame (Phase 17b
+		// misbehavior signal), notify the originator via find-first-
+		// by-UserID (matching the hash-mismatch pattern below), drop
+		// the pending entry, and close the upload channel — draining
+		// ExaBytes of garbage is not an option.
+		if size > uint64(pending.size) {
+			s.rejectAndLog(nil, counters.SignalOversizedUploadFrame, "upload_frame",
+				fmt.Sprintf("upload_id=%s data_len=%d exceeds declared size=%d", uploadID, size, pending.size), nil)
+			s.mu.RLock()
+			var targets []*Client
+			for _, client := range s.clients {
+				if client.UserID == userID {
+					targets = []*Client{client}
+					break
+				}
+			}
+			s.mu.RUnlock()
+			s.fanOut("upload_error", protocol.UploadError{
+				Type:     "upload_error",
+				UploadID: uploadID,
+				Code:     protocol.ErrUploadTooLarge,
+				Message:  "Upload frame exceeds declared size",
+			}, targets)
+			s.failUpload(uploadID, "")
+			return
 		}
 
 		// Write to file
@@ -555,6 +755,7 @@ func (s *Server) handleBinaryChannel(userID string, ch ssh.Channel) {
 		if err != nil {
 			s.logger.Error("upload: create file failed", "error", err)
 			io.CopyN(io.Discard, ch, int64(size))
+			s.failUpload(uploadID, "") // Phase 17 Step 4b: was leaking pending entry
 			continue
 		}
 
@@ -563,7 +764,7 @@ func (s *Server) handleBinaryChannel(userID string, ch ssh.Channel) {
 
 		if err != nil || written != int64(size) {
 			s.logger.Error("upload: write failed", "expected", size, "written", written, "error", err)
-			os.Remove(filePath)
+			s.failUpload(uploadID, filePath) // Phase 17 Step 4b: was leaking pending entry
 			continue
 		}
 
@@ -571,17 +772,26 @@ func (s *Server) handleBinaryChannel(userID string, ch ssh.Channel) {
 		fileData, err := os.ReadFile(filePath)
 		if err != nil {
 			s.logger.Error("upload: read-back for hash failed", "file", pending.fileID, "error", err)
-			os.Remove(filePath)
+			s.failUpload(uploadID, filePath) // Phase 17 Step 4b: was leaking pending entry
 			continue
 		}
 		serverHash := contentHash(fileData)
 		if serverHash != pending.contentHash {
+			// Phase 17 Step 4c Part 3: count hash-mismatch rejections so
+			// Phase 17b observability sees them. Hash mismatch at commit
+			// time is unusual — legitimate clients use the same library
+			// the server does, matching byte-for-byte; a mismatch is
+			// either in-transit corruption (rare) or a client bug / attack
+			// probing the re-compute path. Channel 3 attribution limitation
+			// applies: rejection counts under empty deviceID per Step 2 spec.
+			s.rejectAndLog(nil, counters.SignalInvalidContentHash, "upload_frame",
+				fmt.Sprintf("upload_id=%s file_id=%s hash mismatch (expected=%s got=%s)",
+					uploadID, pending.fileID, pending.contentHash, serverHash), nil)
 			s.logger.Error("upload: content hash mismatch",
 				"file", pending.fileID,
 				"expected", pending.contentHash,
 				"got", serverHash,
 			)
-			os.Remove(filePath)
 			// Phase 17 Step 3: lock-release pattern. Preserve find-first-by-
 			// UserID semantics (upload response goes to one originating
 			// device, not all the user's devices) — select under lock, fanOut
@@ -601,9 +811,7 @@ func (s *Server) handleBinaryChannel(userID string, ch ssh.Channel) {
 				Code:     "hash_mismatch",
 				Message:  "Content hash mismatch — file corrupted in transit",
 			}, targets)
-			s.files.mu.Lock()
-			delete(s.files.uploads, uploadID)
-			s.files.mu.Unlock()
+			s.failUpload(uploadID, filePath)
 			continue
 		}
 

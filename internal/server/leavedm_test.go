@@ -160,7 +160,7 @@ func TestHandleLeaveDM_MemberSucceeds(t *testing.T) {
 func TestHandleLeaveDM_TriggersCleanupWhenBothLeft(t *testing.T) {
 	s := newTestServer(t)
 
-	dm, err := s.store.CreateOrGetDirectMessage("dm_ab", "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestHandleLeaveDM_NoCleanupWhenOnlyOneLeft(t *testing.T) {
 func TestHandleLeaveDM_CleanupIsIdempotent(t *testing.T) {
 	s := newTestServer(t)
 
-	dm, err := s.store.CreateOrGetDirectMessage("dm_ab", "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestHandleCreateDM_FreshAfterCleanup(t *testing.T) {
 	s := newTestServer(t)
 
 	// Create the original DM and have both parties leave.
-	original, err := s.store.CreateOrGetDirectMessage("dm_original", "alice", "bob")
+	original, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
 	if err != nil {
 		t.Fatalf("create original DM: %v", err)
 	}

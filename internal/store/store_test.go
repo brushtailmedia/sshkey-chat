@@ -58,7 +58,8 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 
 	// Insert a group DM message
-	err = s.InsertGroupMessage("group_test001", StoredMessage{
+	groupID := GenerateID("group_")
+	err = s.InsertGroupMessage(groupID, StoredMessage{
 		ID:          "msg_dm001",
 		Sender:      "alice",
 		TS:          1712345680,
@@ -70,7 +71,7 @@ func TestStoreRoundTrip(t *testing.T) {
 		t.Fatalf("insert group message: %v", err)
 	}
 
-	dmMsgs, err := s.GetGroupMessages("group_test001", 0, 10)
+	dmMsgs, err := s.GetGroupMessages(groupID, 0, 10)
 	if err != nil {
 		t.Fatalf("get group messages: %v", err)
 	}
@@ -108,12 +109,12 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 
 	// Test group creation
-	err = s.CreateGroup("group_test001", "alice", []string{"alice", "bob", "carol"})
+	err = s.CreateGroup(groupID, "alice", []string{"alice", "bob", "carol"})
 	if err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	members, err := s.GetGroupMembers("group_test001")
+	members, err := s.GetGroupMembers(groupID)
 	if err != nil {
 		t.Fatalf("get group members: %v", err)
 	}
@@ -122,11 +123,11 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 
 	// Test 1:1 DM dedup
-	dm1, err := s.CreateOrGetDirectMessage("dm_t1", "alice", "bob")
+	dm1, err := s.CreateOrGetDirectMessage(GenerateID("dm_"), "alice", "bob")
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
-	dm2, err := s.CreateOrGetDirectMessage("dm_t2", "bob", "alice")
+	dm2, err := s.CreateOrGetDirectMessage(GenerateID("dm_"), "bob", "alice")
 	if err != nil {
 		t.Fatalf("create DM 2: %v", err)
 	}
@@ -174,11 +175,11 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 
 	// Test leave group
-	err = s.RemoveGroupMember("group_test001", "bob")
+	err = s.RemoveGroupMember(groupID, "bob")
 	if err != nil {
 		t.Fatalf("remove member: %v", err)
 	}
-	members, err = s.GetGroupMembers("group_test001")
+	members, err = s.GetGroupMembers(groupID)
 	if err != nil {
 		t.Fatalf("get members after leave: %v", err)
 	}

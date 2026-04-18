@@ -277,8 +277,9 @@ func TestGetRoomMessageByID_MissingReturnsErrNoRows(t *testing.T) {
 func TestUpdateGroupMessageEditedWithKeys_RewrapsWrappedKeys(t *testing.T) {
 	s, _ := setupEditTestStore(t)
 
+	groupID := GenerateID("group_")
 	// Insert a group message with initial wrapped_keys.
-	err := s.InsertGroupMessage("group_edit_test", StoredMessage{
+	err := s.InsertGroupMessage(groupID, StoredMessage{
 		ID:          "msg_g1",
 		Sender:      "alice",
 		TS:          1000,
@@ -293,12 +294,12 @@ func TestUpdateGroupMessageEditedWithKeys_RewrapsWrappedKeys(t *testing.T) {
 	// Edit with a fresh K_msg wrapped for the current member set.
 	// Fresh wrapped_keys JSON — matches encodeMap shape from the store.
 	newKeysJSON := `{"alice":"wk_alice_v2","bob":"wk_bob_v2"}`
-	err = s.UpdateGroupMessageEditedWithKeys("group_edit_test", "msg_g1", "new_payload", "new_sig", newKeysJSON, 5000)
+	err = s.UpdateGroupMessageEditedWithKeys(groupID, "msg_g1", "new_payload", "new_sig", newKeysJSON, 5000)
 	if err != nil {
 		t.Fatalf("update with keys: %v", err)
 	}
 
-	got, err := s.GetGroupMessageByID("group_edit_test", "msg_g1")
+	got, err := s.GetGroupMessageByID(groupID, "msg_g1")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}

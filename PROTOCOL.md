@@ -358,7 +358,7 @@ Multi-device `/delete` sync for 1:1 DMs uses the `left_at_for_caller` field on `
 
 ### Group DMs
 
-Group DMs are multi-party conversations with 2–150 members. Identified by `group_` nanoids. **Phase 14 introduced an in-group admin model** — the creator becomes the first admin; admins can add, remove, promote, demote, and rename. The pre-Phase-14 "membership is fixed at creation" model is no longer in force.
+Group DMs are multi-party conversations with 2–N members, where N is server-configured via `[server.groups].max_members` (default 150). Identified by `group_` nanoids. **Phase 14 introduced an in-group admin model** — the creator becomes the first admin; admins can add, remove, promote, demote, and rename. The pre-Phase-14 "membership is fixed at creation" model is no longer in force.
 
 ```json
 // Client -> Server (create a group DM — members excludes sender, name optional)
@@ -378,7 +378,7 @@ Group DMs are multi-party conversations with 2–150 members. Identified by `gro
  "payload":"base64...","signature":"base64..."}
 ```
 
-- **Max 150 members** (server-enforced hard cap). Per-message wrapped keys scale linearly with member count (~80 bytes per member per message on the wire). At 150 members, each message carries ~12KB of key material. **Recommended:** for groups with 50+ members, clients should suggest using a room instead — rooms use a shared epoch key and are significantly more efficient for high-traffic conversations. The server does not enforce this recommendation; it is a UX guideline for client implementers.
+- **Max N members** (server-enforced hard cap, configurable via `[server.groups].max_members`, default 150). Per-message wrapped keys scale linearly with member count (~80 bytes per member per message on the wire). At the 150-member default, each message carries ~12KB of key material. **Recommended:** for groups with 50+ members, clients should suggest using a room instead — rooms use a shared epoch key and are significantly more efficient for high-traffic conversations. The server does not enforce this recommendation; it is a UX guideline for client implementers.
 - **Membership is mutable by admin action** (Phase 14). The user who calls `create_group` becomes the initial admin. Admins can `add_to_group`, `remove_from_group`, `promote_group_admin`, `demote_group_admin`, and `rename_group`. New members see only post-join messages (per-message wrapped keys; no backfill).
 - **`wrapped_keys` must match the current member list exactly.** Server rejects with `invalid_wrapped_keys` on mismatch. Membership is small enough that new sends re-wrapping for every recipient is cheap.
 - **Include yourself in `wrapped_keys`** so your other devices can decrypt your own sends.

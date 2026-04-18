@@ -268,7 +268,18 @@ func (s *Server) triggerEpochRotation(c *Client, roomID string, reason string) {
 func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 	var msg protocol.EpochRotate
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed epoch_rotate"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "epoch_rotate", "malformed epoch_rotate frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed epoch_rotate"})
+		return
+	}
+
+	// Phase 17 Step 4c: envelope cap on wrapped_keys. Bounded by the
+	// configured max group-member count (a room with N members
+	// legitimately carries N wrapped keys; anything larger is either
+	// a client bug or a DoS). Check happens before the epoch validation
+	// walk below so we don't allocate the wrappedSet map from attacker-
+	// sized input.
+	if !s.checkWrappedKeysCap(c, msg.WrappedKeys, "epoch_rotate") {
 		return
 	}
 

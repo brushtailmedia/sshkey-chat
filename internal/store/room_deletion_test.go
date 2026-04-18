@@ -341,34 +341,35 @@ func TestDeleteRoomRecord_RemovesRowAndFile(t *testing.T) {
 	}
 	defer s.Close()
 
+	roomID := GenerateID("room_")
 	// Seed a room, a member, and a cached DB handle (which creates
 	// the per-room file).
-	seedTestRoom(t, s, "room_cleanup", "cleanup", "")
-	seedRoomMember(t, s, "room_cleanup", "usr_alice")
+	seedTestRoom(t, s, roomID, "cleanup", "")
+	seedRoomMember(t, s, roomID, "usr_alice")
 
 	// Trigger creation of the per-room file by calling RoomDB
-	if _, err := s.RoomDB("room_cleanup"); err != nil {
+	if _, err := s.RoomDB(roomID); err != nil {
 		t.Fatalf("RoomDB: %v", err)
 	}
 
 	// Seed an epoch key row (in data.db) referencing the room
 	s.dataDB.Exec(
 		`INSERT INTO epoch_keys (room, epoch, user, wrapped_key) VALUES (?, ?, ?, ?)`,
-		"room_cleanup", int64(1), "usr_alice", "wrapped",
+		roomID, int64(1), "usr_alice", "wrapped",
 	)
 
-	dbPath := filepath.Join(s.dir, "room-room_cleanup.db")
+	dbPath := filepath.Join(s.dir, "room-"+roomID+".db")
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Fatalf("per-room DB file should exist before cleanup: %v", err)
 	}
 
 	// Run the cleanup cascade
-	if err := s.DeleteRoomRecord("room_cleanup"); err != nil {
+	if err := s.DeleteRoomRecord(roomID); err != nil {
 		t.Fatalf("DeleteRoomRecord: %v", err)
 	}
 
 	// Rooms row should be gone
-	r, _ := s.GetRoomByID("room_cleanup")
+	r, _ := s.GetRoomByID(roomID)
 	if r != nil {
 		t.Error("rooms row should be deleted")
 	}
@@ -376,7 +377,7 @@ func TestDeleteRoomRecord_RemovesRowAndFile(t *testing.T) {
 	// Members should be gone
 	var memberCount int
 	s.roomsDB.QueryRow(
-		`SELECT COUNT(*) FROM room_members WHERE room_id = ?`, "room_cleanup",
+		`SELECT COUNT(*) FROM room_members WHERE room_id = ?`, roomID,
 	).Scan(&memberCount)
 	if memberCount != 0 {
 		t.Errorf("expected 0 members, got %d", memberCount)
@@ -385,7 +386,7 @@ func TestDeleteRoomRecord_RemovesRowAndFile(t *testing.T) {
 	// Epoch keys should be gone
 	var keyCount int
 	s.dataDB.QueryRow(
-		`SELECT COUNT(*) FROM epoch_keys WHERE room = ?`, "room_cleanup",
+		`SELECT COUNT(*) FROM epoch_keys WHERE room = ?`, roomID,
 	).Scan(&keyCount)
 	if keyCount != 0 {
 		t.Errorf("expected 0 epoch_keys, got %d", keyCount)
@@ -398,7 +399,7 @@ func TestDeleteRoomRecord_RemovesRowAndFile(t *testing.T) {
 
 	// Cached handle should be evicted
 	s.mu.RLock()
-	_, cached := s.roomDBs["room_cleanup"]
+	_, cached := s.roomDBs[roomID]
 	s.mu.RUnlock()
 	if cached {
 		t.Error("cached DB handle should be evicted")
@@ -419,16 +420,17 @@ func TestDeleteRoomRecord_Idempotent(t *testing.T) {
 	defer s.Close()
 
 	// Delete a room that never existed
-	if err := s.DeleteRoomRecord("room_never_existed"); err != nil {
+	if err := s.DeleteRoomRecord(GenerateID("room_")); err != nil {
 		t.Errorf("delete of nonexistent room should be no-op, got: %v", err)
 	}
 
 	// Seed and double-delete
-	seedTestRoom(t, s, "room_twice", "twice", "")
-	if err := s.DeleteRoomRecord("room_twice"); err != nil {
+	twiceID := GenerateID("room_")
+	seedTestRoom(t, s, twiceID, "twice", "")
+	if err := s.DeleteRoomRecord(twiceID); err != nil {
 		t.Fatalf("first delete: %v", err)
 	}
-	if err := s.DeleteRoomRecord("room_twice"); err != nil {
+	if err := s.DeleteRoomRecord(twiceID); err != nil {
 		t.Errorf("second delete should be no-op, got: %v", err)
 	}
 }
@@ -445,18 +447,19 @@ func TestDeleteRoomRecord_PreservesDeletedRoomsSidecar(t *testing.T) {
 	}
 	defer s.Close()
 
-	seedTestRoom(t, s, "room_lastmember", "lastmember", "")
-	seedRoomMember(t, s, "room_lastmember", "usr_alice")
+	roomID := GenerateID("room_")
+	seedTestRoom(t, s, roomID, "lastmember", "")
+	seedRoomMember(t, s, roomID, "usr_alice")
 
 	// Simulate handleDeleteRoom ordering: sidecar FIRST, then leave
 	// + cleanup cascade
-	if err := s.RecordRoomDeletion("usr_alice", "room_lastmember"); err != nil {
+	if err := s.RecordRoomDeletion("usr_alice", roomID); err != nil {
 		t.Fatalf("RecordRoomDeletion: %v", err)
 	}
-	if err := s.RemoveRoomMember("room_lastmember", "usr_alice"); err != nil {
+	if err := s.RemoveRoomMember(roomID, "usr_alice"); err != nil {
 		t.Fatalf("RemoveRoomMember: %v", err)
 	}
-	if err := s.DeleteRoomRecord("room_lastmember"); err != nil {
+	if err := s.DeleteRoomRecord(roomID); err != nil {
 		t.Fatalf("DeleteRoomRecord: %v", err)
 	}
 
@@ -468,13 +471,13 @@ func TestDeleteRoomRecord_PreservesDeletedRoomsSidecar(t *testing.T) {
 	}
 	found := false
 	for _, id := range ids {
-		if id == "room_lastmember" {
+		if id == roomID {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Error("deleted_rooms row for room_lastmember should survive the cleanup cascade")
+		t.Error("deleted_rooms row for room should survive the cleanup cascade")
 	}
 }
 
@@ -498,8 +501,9 @@ func TestDeleteRoomRecord_OpportunisticPrune(t *testing.T) {
 
 	// Seed and delete a different room (which triggers the
 	// opportunistic prune)
-	seedTestRoom(t, s, "room_trigger", "trigger", "")
-	if err := s.DeleteRoomRecord("room_trigger"); err != nil {
+	triggerID := GenerateID("room_")
+	seedTestRoom(t, s, triggerID, "trigger", "")
+	if err := s.DeleteRoomRecord(triggerID); err != nil {
 		t.Fatalf("DeleteRoomRecord: %v", err)
 	}
 

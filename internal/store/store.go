@@ -185,6 +185,16 @@ func (s *Store) openDB(name string) (*sql.DB, error) {
 
 // RoomDB returns (or creates) the database for a room.
 func (s *Store) RoomDB(room string) (*sql.DB, error) {
+	// Phase 17 Step 4a: path-traversal defense. `room` flows into a
+	// `filepath.Join`-equivalent construction at the openDB site below;
+	// a malformed ID like "../../etc/passwd" without this check escapes
+	// the data directory. Validation is server-generated-ID strict
+	// (prefix + 21 alphabet chars) — in production these IDs are
+	// always minted via GenerateID, so strict shape is correct.
+	if err := ValidateNanoID(room, "room_"); err != nil {
+		return nil, fmt.Errorf("RoomDB: %w", err)
+	}
+
 	s.mu.RLock()
 	db, ok := s.roomDBs[room]
 	s.mu.RUnlock()
@@ -214,6 +224,11 @@ func (s *Store) RoomDB(room string) (*sql.DB, error) {
 
 // GroupDB returns (or creates) the database for a group DM.
 func (s *Store) GroupDB(groupID string) (*sql.DB, error) {
+	// Phase 17 Step 4a: path-traversal defense. See RoomDB comment.
+	if err := ValidateNanoID(groupID, "group_"); err != nil {
+		return nil, fmt.Errorf("GroupDB: %w", err)
+	}
+
 	s.mu.RLock()
 	db, ok := s.groupDBs[groupID]
 	s.mu.RUnlock()
@@ -242,6 +257,11 @@ func (s *Store) GroupDB(groupID string) (*sql.DB, error) {
 
 // DMDB returns (or creates) the database for a 1:1 DM.
 func (s *Store) DMDB(dmID string) (*sql.DB, error) {
+	// Phase 17 Step 4a: path-traversal defense. See RoomDB comment.
+	if err := ValidateNanoID(dmID, "dm_"); err != nil {
+		return nil, fmt.Errorf("DMDB: %w", err)
+	}
+
 	s.mu.RLock()
 	db, ok := s.dmDBs[dmID]
 	s.mu.RUnlock()

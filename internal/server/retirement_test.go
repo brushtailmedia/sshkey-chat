@@ -11,6 +11,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
 
 const testKeyAlice = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJPpG4hFrxw7JOAppGdh0JrkNDNGxypfmwJxNFCWXnpG test@sshkey"
@@ -287,7 +288,7 @@ func TestHandleRetirement_CleansUpDormantDMWhenOtherPartyAlreadyLeft(t *testing.
 	s := newTestServer(t)
 
 	// Alice and Bob have a DM. Alice /leaves at time T1.
-	dm, err := s.store.CreateOrGetDirectMessage("dm_ab_cleanup", "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}

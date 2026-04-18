@@ -203,6 +203,15 @@ func (s *Store) ConsumePendingRoomRetirements() ([]PendingRoomRetirement, error)
 //
 // Mirrors DeleteGroupConversation from group_deletion.go.
 func (s *Store) DeleteRoomRecord(roomID string) error {
+	// Phase 17 Step 4a: path-traversal defense. `roomID` flows into
+	// `filepath.Join(s.dir, fmt.Sprintf("room-%s.db", roomID))` below
+	// and then directly to `os.Remove`. Without this check a malformed
+	// ID like "../../etc/passwd" could unlink files outside the data
+	// directory. Same strict validation as RoomDB.
+	if err := ValidateNanoID(roomID, "room_"); err != nil {
+		return fmt.Errorf("DeleteRoomRecord: %w", err)
+	}
+
 	// Close and evict any cached handle so the file is not held open
 	// when we unlink it. WAL mode keeps -wal/-shm files alive while the
 	// connection is open; close-then-unlink is the safe order.

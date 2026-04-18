@@ -230,6 +230,9 @@ func TestAutoRevokeSignals_ExactList(t *testing.T) {
 		SignalFileIDsOverCap:       true,
 		SignalInvalidContentHash:   true,
 		SignalOversizedUploadFrame: true,
+		SignalNonMemberContext:     true,
+		SignalDownloadNotFound:     true,
+		SignalDownloadNoChannel:    true,
 	}
 	if len(AutoRevokeSignals) != len(want) {
 		t.Errorf("AutoRevokeSignals len = %d, want %d", len(AutoRevokeSignals), len(want))

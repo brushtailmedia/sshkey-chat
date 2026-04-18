@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 )
 
@@ -280,11 +281,12 @@ func (s *Server) findRetiredMember(members []string) string {
 func (s *Server) handleRetireMe(c *Client, raw json.RawMessage) {
 	var msg protocol.RetireMe
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    "invalid_message",
-			Message: "malformed retire_me",
-		})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "retire_me", "malformed retire_me frame",
+			&protocol.Error{
+				Type:    "error",
+				Code:    "invalid_message",
+				Message: "malformed retire_me",
+			})
 		return
 	}
 

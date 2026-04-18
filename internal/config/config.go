@@ -56,6 +56,7 @@ type ServerConfig struct {
 	Sync       SyncSection       `toml:"sync"`
 	Files      FilesSection      `toml:"files"`
 	Devices    DevicesSection    `toml:"devices"`
+	Groups     GroupsSection     `toml:"groups"`
 	RateLimits RateLimitsSection `toml:"rate_limits"`
 	Shutdown   ShutdownSection   `toml:"shutdown"`
 	Logging    LoggingSection    `toml:"logging"`
@@ -100,10 +101,36 @@ type FilesSection struct {
 	MaxFileSize       string   `toml:"max_file_size"`
 	MaxAvatarSize     string   `toml:"max_avatar_size"`
 	AllowedAvatarTypes []string `toml:"allowed_avatar_types"`
+
+	// MaxFileIDsPerMessage bounds the envelope-level file_ids[] array
+	// at message-send time (handleSend / handleSendGroup / handleSendDM).
+	// Phase 17 Step 4c DoS defense; also fires SignalFileIDsOverCap for
+	// Phase 17b auto-revoke observability. Default 20 — matches the
+	// WhatsApp batch-send ceiling and sits comfortably above "here are
+	// today's photos" use cases for chat. Terminal clients today only
+	// exercise single-attach (/upload <path>), so this cap is primarily
+	// protocol-layer defense against hostile crafted envelopes; a
+	// deployment that grows a multi-attach UX may need to raise it.
+	MaxFileIDsPerMessage int `toml:"max_file_ids_per_message"`
 }
 
 type DevicesSection struct {
 	MaxPerUser int `toml:"max_per_user"`
+}
+
+// GroupsSection governs per-group policy knobs. Phase 17 Step 4d.
+//
+// MaxMembers is the hard cap on group-DM membership — enforced at
+// create_group and add_to_group, and is the upper bound on the
+// wrapped_keys envelope size (a 10M-entry map that passes the
+// per-member ECDH check would otherwise exhaust memory). Default 150
+// matches the pre-Phase-17 hardcoded value and PROTOCOL.md
+// documentation. At 150 members, each send costs ~12KB of wrapped-key
+// material on the wire and ~15ms of crypto. Operators running smaller
+// deployments may tune down; operators with hardware to match may
+// tune up.
+type GroupsSection struct {
+	MaxMembers int `toml:"max_members"`
 }
 
 type RateLimitsSection struct {
@@ -195,12 +222,16 @@ func DefaultServerConfig() ServerConfig {
 			HistoryPageSize: 100,
 		},
 		Files: FilesSection{
-			MaxFileSize:       "50MB",
-			MaxAvatarSize:     "256KB",
+			MaxFileSize:        "50MB",
+			MaxAvatarSize:      "256KB",
 			AllowedAvatarTypes: []string{"image/png", "image/jpeg"},
+			MaxFileIDsPerMessage: 20, // Phase 17 Step 4c: chat-app-appropriate ceiling
 		},
 		Devices: DevicesSection{
 			MaxPerUser: 10,
+		},
+		Groups: GroupsSection{
+			MaxMembers: 150, // Phase 17 Step 4d: matches pre-17 hardcoded cap + PROTOCOL.md
 		},
 		RateLimits: RateLimitsSection{
 			MessagesPerSecond:    5,

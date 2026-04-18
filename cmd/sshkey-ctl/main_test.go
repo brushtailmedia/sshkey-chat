@@ -1142,7 +1142,7 @@ func TestPurge_DryRunNoCrash(t *testing.T) {
 	}
 
 	// Create a room DB with an old message
-	db, err := st.RoomDB("general")
+	db, err := st.RoomDB(store.GenerateID("room_"))
 	if err != nil {
 		t.Fatalf("room db: %v", err)
 	}

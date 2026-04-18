@@ -81,11 +81,12 @@ func TestHandleReact_RejectsTombstonedRoomMessage(t *testing.T) {
 // TestHandleReact_RejectsTombstonedGroupMessage — group DM variant.
 func TestHandleReact_RejectsTombstonedGroupMessage(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("grp_react_rt", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	groupID := store.GenerateID("group_")
+	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	if err := s.store.InsertGroupMessage("grp_react_rt", store.StoredMessage{
+	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID:          "msg_grt",
 		Sender:      "alice",
 		TS:          100,
@@ -95,7 +96,7 @@ func TestHandleReact_RejectsTombstonedGroupMessage(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	if _, err := s.store.DeleteGroupMessage("grp_react_rt", "msg_grt", "alice"); err != nil {
+	if _, err := s.store.DeleteGroupMessage(groupID, "msg_grt", "alice"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
@@ -107,13 +108,13 @@ func TestHandleReact_RejectsTombstonedGroupMessage(t *testing.T) {
 	raw, _ := json.Marshal(protocol.React{
 		Type:        "react",
 		ID:          "msg_grt",
-		Group:       "grp_react_rt",
+		Group:       groupID,
 		Payload:     "enc",
 		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
 	})
 	s.handleReact(bob.Client, raw)
 
-	db, err := s.store.GroupDB("grp_react_rt")
+	db, err := s.store.GroupDB(groupID)
 	if err != nil {
 		t.Fatalf("GroupDB: %v", err)
 	}
@@ -130,7 +131,7 @@ func TestHandleReact_RejectsTombstonedGroupMessage(t *testing.T) {
 // TestHandleReact_RejectsTombstonedDMMessage — 1:1 DM variant.
 func TestHandleReact_RejectsTombstonedDMMessage(t *testing.T) {
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage("dm_react_rt", "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}

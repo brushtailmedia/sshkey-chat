@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 
+	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 )
 
@@ -10,12 +11,14 @@ import (
 func (s *Server) handlePushRegister(c *Client, raw json.RawMessage) {
 	var msg protocol.PushRegister
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed push_register"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "push_register", "malformed push_register frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed push_register"})
 		return
 	}
 
 	if msg.Platform != "ios" && msg.Platform != "android" {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "platform must be ios or android"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "push_register", "platform must be ios or android",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "platform must be ios or android"})
 		return
 	}
 

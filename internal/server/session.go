@@ -12,6 +12,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
+	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
@@ -801,7 +802,12 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 	case "read":
 		s.handleRead(c, raw)
 	default:
-		s.logger.Debug("unhandled message type", "user", c.UserID, "type", msgType)
+		// Phase 17 Step 4e: warn + count unknown verbs. clientErr = nil
+		// preserves the pre-Phase-17 "silent default" on the wire —
+		// responding with a typed error would leak the valid-verb list.
+		// Server-side log + counter give us Phase 17b's substrate without
+		// changing the client surface.
+		s.rejectAndLog(c, counters.SignalUnknownVerb, msgType, "unknown verb", nil)
 	}
 }
 
@@ -815,13 +821,21 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 
 	// Check payload size (raw JSON includes overhead, but payload is the bulk)
 	if len(raw) > maxPayloadBytes {
+		// Phase 17 Step 4c gap-closure: count Channel 1 oversized-body
+		// rejections so Phase 17b sees density across all send/edit
+		// verbs (was only fired at handleUploadStart). 16KB envelope
+		// cap is a hard protocol bound — no legitimate client produces
+		// >16KB per message.
+		s.rejectAndLog(c, counters.SignalOversizedBody, "send",
+			fmt.Sprintf("raw=%d bytes exceeds maxPayloadBytes=%d", len(raw), maxPayloadBytes), nil)
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrMessageTooLarge, Message: "Message exceeds 16KB limit"})
 		return
 	}
 
 	var msg protocol.Send
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed send"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "send", "malformed send frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed send"})
 		return
 	}
 
@@ -883,6 +897,14 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 		}
 	}
 
+	// Phase 17 Step 4c: envelope cap + per-element nanoid shape on
+	// file_ids. Cheaper than the per-element DB lookup in
+	// validateFileIDsForContext below — catches over-cap / malformed
+	// shapes before we hit storage.
+	if !s.checkFileIDsCapAndShape(c, msg.FileIDs, "send") {
+		return
+	}
+
 	// Phase 17 Step 4.f: every file_id referenced in this send must be
 	// bound to this room. Blocks a wire-level attacker from smuggling
 	// an attachment from context X into context Y. Legitimate clients
@@ -934,13 +956,33 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 // handleSendGroup processes a group DM message.
 func (s *Server) handleSendGroup(c *Client, raw json.RawMessage) {
 	if len(raw) > maxPayloadBytes {
+		// Phase 17 Step 4c gap-closure: count Channel 1 oversized-body
+		// rejections so Phase 17b sees density across all send/edit
+		// verbs (was only fired at handleUploadStart). 16KB envelope
+		// cap is a hard protocol bound — no legitimate client produces
+		// >16KB per message.
+		s.rejectAndLog(c, counters.SignalOversizedBody, "send_group",
+			fmt.Sprintf("raw=%d bytes exceeds maxPayloadBytes=%d", len(raw), maxPayloadBytes), nil)
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrMessageTooLarge, Message: "Message exceeds 16KB limit"})
 		return
 	}
 
 	var msg protocol.SendGroup
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed send_group"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "send_group", "malformed send_group frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed send_group"})
+		return
+	}
+
+	// Phase 17 Step 4c: envelope caps — wrapped_keys length bounded
+	// by max_members, file_ids bounded by [files].max_file_ids_per_message
+	// (config-driven) + per-element shape. These guard unbounded-
+	// allocation DoS on the two map/array fields in the group send
+	// envelope.
+	if !s.checkWrappedKeysCap(c, msg.WrappedKeys, "send_group") {
+		return
+	}
+	if !s.checkFileIDsCapAndShape(c, msg.FileIDs, "send_group") {
 		return
 	}
 
@@ -1155,7 +1197,18 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 
 	var msg protocol.React
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed react"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "react", "malformed react frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed react"})
+		return
+	}
+
+	// Phase 17 Step 4c: wrapped_keys envelope cap. Room-context reacts
+	// carry no wrapped_keys (epoch key shared across members) so the
+	// map is empty and the check is a no-op; group reacts carry one
+	// entry per group member, bounded by the same max_members cap;
+	// 1:1 DM reacts are naturally bounded by the pair (== 2 enforced
+	// downstream in the DM branch).
+	if !s.checkWrappedKeysCap(c, msg.WrappedKeys, "react") {
 		return
 	}
 
@@ -1527,7 +1580,8 @@ func (s *Server) handleCreateGroup(c *Client, raw json.RawMessage) {
 
 	var msg protocol.CreateGroup
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed create_group"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "create_group", "malformed create_group frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed create_group"})
 		return
 	}
 
@@ -1544,18 +1598,25 @@ func (s *Server) handleCreateGroup(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Max group size: 150 members. Per-message wrapped keys scale linearly
-	// with member count (~80 bytes per member per message on the wire, plus
-	// one ECDH+HKDF+AES-GCM wrapping op per member per send). At 150
-	// members this is ~12KB of key material per message and ~15ms of crypto
+	// Max group size is operator-configurable via [server.groups].max_members
+	// (default 150). Per-message wrapped keys scale linearly with member
+	// count (~80 bytes per member per message on the wire, plus one
+	// ECDH+HKDF+AES-GCM wrapping op per member per send). At the 150-member
+	// default this is ~12KB of key material per message and ~15ms of crypto
 	// per send — acceptable for most use cases but noticeably heavier than
 	// rooms (which use a shared epoch key). The client shows a soft warning
 	// at 50 members suggesting a room for high-traffic conversations.
-	if len(allMembers) > 150 {
+	s.cfg.RLock()
+	maxMembers := s.cfg.Server.Groups.MaxMembers
+	s.cfg.RUnlock()
+	if maxMembers <= 0 {
+		maxMembers = 150 // defensive fallback if config load elided the section
+	}
+	if len(allMembers) > maxMembers {
 		c.Encoder.Encode(protocol.Error{
 			Type:    "error",
 			Code:    "too_many_members",
-			Message: "Group DMs are limited to 150 members. Use a room for larger groups.",
+			Message: fmt.Sprintf("Group DMs are limited to %d members. Use a room for larger groups.", maxMembers),
 		})
 		return
 	}
@@ -1785,6 +1846,91 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 		s.fanOut("deleted", deleted, targets)
 		return
 	}
+}
+
+// defaultFileIDsCap is the fallback when [files].max_file_ids_per_message
+// is unset or non-positive in server.toml. Operators who want a different
+// ceiling set it in config; this constant exists only so the handler
+// stays safe if the config section was elided entirely.
+const defaultFileIDsCap = 20
+
+// checkFileIDsCapAndShape enforces the Phase 17 Step 4c envelope cap
+// on file_ids plus per-element nanoid shape validation. Returns true
+// if the slice is OK; returns false after emitting rejection + client
+// error. Caller MUST return on false to short-circuit the handler.
+//
+// The cap itself is operator-configurable via
+// [files].max_file_ids_per_message in server.toml (default 20). Phase
+// 17's design philosophy is that DoS bounds are operator-tunable; this
+// follows the same pattern as [server.groups].max_members,
+// [files].max_file_size, and the [rate_limits] values.
+//
+// Two distinct rejection kinds, separate counter signals so Phase 17b
+// can threshold them independently:
+//   - over-cap → SignalFileIDsOverCap (unbounded-collection DoS)
+//   - bad shape → SignalInvalidNanoID (malformed ID smuggling)
+func (s *Server) checkFileIDsCapAndShape(c *Client, fileIDs []string, verb string) bool {
+	s.cfg.RLock()
+	cap := s.cfg.Server.Files.MaxFileIDsPerMessage
+	s.cfg.RUnlock()
+	if cap <= 0 {
+		cap = defaultFileIDsCap
+	}
+	if len(fileIDs) > cap {
+		s.rejectAndLog(c, counters.SignalFileIDsOverCap, verb,
+			fmt.Sprintf("file_ids has %d entries, max %d", len(fileIDs), cap),
+			&protocol.Error{
+				Type:    "error",
+				Code:    "file_ids_over_cap",
+				Message: fmt.Sprintf("file_ids exceeds maximum (%d)", cap),
+			})
+		return false
+	}
+	for _, fid := range fileIDs {
+		if err := store.ValidateNanoID(fid, "file_"); err != nil {
+			s.rejectAndLog(c, counters.SignalInvalidNanoID, verb,
+				fmt.Sprintf("invalid file_id in envelope: %v", err),
+				&protocol.Error{
+					Type:    "error",
+					Code:    "invalid_file_id",
+					Message: "invalid file_id",
+				})
+			return false
+		}
+	}
+	return true
+}
+
+// checkWrappedKeysCap enforces the Phase 17 Step 4c envelope cap on
+// wrapped_keys — bounded by [server.groups].max_members from Step 4d.
+// Returns true if within limit; returns false after emitting rejection
+// + client error. Caller MUST return on false.
+//
+// DM context is already bounded by the `len(wrapped_keys) == 2`
+// equality check in handleSendDM/handleEditDM — this helper is the
+// unified cap for group-context handlers (handleSendGroup,
+// handleEditGroup, handleEpochRotate, handleCreateGroup) where the
+// current membership check was the only bound (membership == exact
+// set match) but short-circuit semantics don't actually bound the
+// map entry count on the wire.
+func (s *Server) checkWrappedKeysCap(c *Client, wrappedKeys map[string]string, verb string) bool {
+	s.cfg.RLock()
+	maxMembers := s.cfg.Server.Groups.MaxMembers
+	s.cfg.RUnlock()
+	if maxMembers <= 0 {
+		maxMembers = 150 // defensive fallback; see handleCreateGroup comment
+	}
+	if len(wrappedKeys) > maxMembers {
+		s.rejectAndLog(c, counters.SignalWrappedKeysOverCap, verb,
+			fmt.Sprintf("wrapped_keys map has %d entries, max %d", len(wrappedKeys), maxMembers),
+			&protocol.Error{
+				Type:    "error",
+				Code:    "wrapped_keys_over_cap",
+				Message: fmt.Sprintf("wrapped_keys exceeds maximum (%d)", maxMembers),
+			})
+		return false
+	}
+	return true
 }
 
 // validateFileIDsForContext verifies every file_id in the slice is
@@ -2635,12 +2781,14 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 
 	var msg protocol.CreateDM
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed create_dm"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "create_dm", "malformed create_dm frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed create_dm"})
 		return
 	}
 
 	if msg.Other == c.UserID {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "Cannot create a DM with yourself"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "create_dm", "create_dm with self",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "Cannot create a DM with yourself"})
 		return
 	}
 
@@ -2711,13 +2859,37 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 // handleSendDM processes a 1:1 DM message.
 func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 	if len(raw) > maxPayloadBytes {
+		// Phase 17 Step 4c gap-closure: count Channel 1 oversized-body
+		// rejections so Phase 17b sees density across all send/edit
+		// verbs (was only fired at handleUploadStart). 16KB envelope
+		// cap is a hard protocol bound — no legitimate client produces
+		// >16KB per message.
+		s.rejectAndLog(c, counters.SignalOversizedBody, "send_dm",
+			fmt.Sprintf("raw=%d bytes exceeds maxPayloadBytes=%d", len(raw), maxPayloadBytes), nil)
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrMessageTooLarge, Message: "Message exceeds 16KB limit"})
 		return
 	}
 
 	var msg protocol.SendDM
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed send_dm"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "send_dm", "malformed send_dm frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed send_dm"})
+		return
+	}
+
+	// Phase 17 Step 4c: wrapped_keys envelope cap. The len==2
+	// equality check below is the correctness gate; the cap check
+	// here is the OBSERVABILITY signal for Phase 17b. A hostile
+	// client sending 10M entries trips the equality check either
+	// way, but only via this call does SignalWrappedKeysOverCap
+	// fire — giving Phase 17b a DM-context misbehavior signal it
+	// otherwise wouldn't see.
+	if !s.checkWrappedKeysCap(c, msg.WrappedKeys, "send_dm") {
+		return
+	}
+
+	// Phase 17 Step 4c: file_ids envelope cap + per-element shape.
+	if !s.checkFileIDsCapAndShape(c, msg.FileIDs, "send_dm") {
 		return
 	}
 
@@ -2949,6 +3121,25 @@ func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
 		return
 	}
 	msg.DisplayName = cleaned
+
+	// Phase 17 Step 4c: strict shape check on avatar_id if present.
+	// avatar_id is a file reference (file_ prefix) that gets stored
+	// on the profile row and served to any client viewing the user.
+	// Empty is valid ("no avatar"); non-empty must match the nanoid
+	// shape so we don't persist garbage that would blow up downstream
+	// rendering / downloading paths.
+	if msg.AvatarID != "" {
+		if err := store.ValidateNanoID(msg.AvatarID, "file_"); err != nil {
+			s.rejectAndLog(c, counters.SignalInvalidNanoID, "set_profile",
+				fmt.Sprintf("invalid avatar_id: %v", err), nil)
+			c.Encoder.Encode(protocol.Error{
+				Type:    "error",
+				Code:    "invalid_profile",
+				Message: "invalid avatar_id",
+			})
+			return
+		}
+	}
 
 	// Check for duplicate display name across all users (case-insensitive)
 	if s.store.IsDisplayNameTaken(msg.DisplayName, c.UserID) {

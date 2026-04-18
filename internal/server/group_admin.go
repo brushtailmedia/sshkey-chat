@@ -25,8 +25,10 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
+	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 )
 
@@ -107,7 +109,8 @@ func (s *Server) checkAdminActionRateLimit(c *Client, groupID string) bool {
 func (s *Server) handleAddToGroup(c *Client, raw json.RawMessage) {
 	var msg protocol.AddToGroup
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed add_to_group"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "add_to_group", "malformed add_to_group frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed add_to_group"})
 		return
 	}
 
@@ -144,6 +147,35 @@ func (s *Server) handleAddToGroup(c *Client, raw json.RawMessage) {
 			Type:    "error",
 			Code:    protocol.ErrAlreadyMember,
 			Message: "User is already a member of this group",
+		})
+		return
+	}
+
+	// Phase 17 Step 4d: enforce the group member cap on this path too.
+	// Pre-17 handleCreateGroup checked a hardcoded 150 but handleAddToGroup
+	// had no cap check — an admin could grow a group past the limit via
+	// repeated add_to_group, producing a group whose sends then fail the
+	// wrapped_keys envelope cap on every message. Same config value, same
+	// error shape (`too_many_members`) as handleCreateGroup for caller
+	// consistency.
+	currentMembers, err := s.store.GetGroupMembers(msg.Group)
+	if err != nil {
+		s.logger.Error("failed to load group members for cap check",
+			"group", msg.Group, "error", err)
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: "internal", Message: "failed to add member"})
+		return
+	}
+	s.cfg.RLock()
+	maxMembers := s.cfg.Server.Groups.MaxMembers
+	s.cfg.RUnlock()
+	if maxMembers <= 0 {
+		maxMembers = 150 // defensive fallback if config load elided the section
+	}
+	if len(currentMembers) >= maxMembers {
+		c.Encoder.Encode(protocol.Error{
+			Type:    "error",
+			Code:    "too_many_members",
+			Message: fmt.Sprintf("Group DMs are limited to %d members. Use a room for larger groups.", maxMembers),
 		})
 		return
 	}
@@ -251,7 +283,8 @@ func (s *Server) handleAddToGroup(c *Client, raw json.RawMessage) {
 func (s *Server) handleRemoveFromGroup(c *Client, raw json.RawMessage) {
 	var msg protocol.RemoveFromGroup
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed remove_from_group"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "remove_from_group", "malformed remove_from_group frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed remove_from_group"})
 		return
 	}
 
@@ -330,7 +363,8 @@ func (s *Server) handleRemoveFromGroup(c *Client, raw json.RawMessage) {
 func (s *Server) handlePromoteGroupAdmin(c *Client, raw json.RawMessage) {
 	var msg protocol.PromoteGroupAdmin
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed promote_group_admin"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "promote_group_admin", "malformed promote_group_admin frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed promote_group_admin"})
 		return
 	}
 
@@ -411,7 +445,8 @@ func (s *Server) handlePromoteGroupAdmin(c *Client, raw json.RawMessage) {
 func (s *Server) handleDemoteGroupAdmin(c *Client, raw json.RawMessage) {
 	var msg protocol.DemoteGroupAdmin
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed demote_group_admin"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "demote_group_admin", "malformed demote_group_admin frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed demote_group_admin"})
 		return
 	}
 

@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 
+	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 )
 
@@ -61,11 +62,12 @@ func (s *Server) handleListDevices(c *Client, raw json.RawMessage) {
 func (s *Server) handleRevokeDevice(c *Client, raw json.RawMessage) {
 	var msg protocol.RevokeDevice
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    "invalid_message",
-			Message: "malformed revoke_device",
-		})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "revoke_device", "malformed revoke_device frame",
+			&protocol.Error{
+				Type:    "error",
+				Code:    "invalid_message",
+				Message: "malformed revoke_device",
+			})
 		return
 	}
 

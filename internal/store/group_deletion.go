@@ -114,6 +114,11 @@ func (s *Store) PruneOldGroupDeletions(maxAgeSeconds int64) (int, error) {
 // they reference. The opportunistic age-based prune below is the only
 // thing that ever removes deleted_groups rows automatically.
 func (s *Store) DeleteGroupConversation(groupID string) error {
+	// Phase 17 Step 4a: path-traversal defense. See DeleteRoomRecord.
+	if err := ValidateNanoID(groupID, "group_"); err != nil {
+		return fmt.Errorf("DeleteGroupConversation: %w", err)
+	}
+
 	// Close and evict any cached handle so the file is not held open
 	// when we unlink it. WAL mode keeps -wal/-shm files alive while the
 	// connection is open; close-then-unlink is the safe order.

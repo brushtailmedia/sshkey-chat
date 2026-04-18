@@ -355,12 +355,13 @@ func TestHandleEdit_ClearsReactions(t *testing.T) {
 // non-author all return byte-identical ErrUnknownGroup.
 func TestHandleEditGroup_PrivacyResponsesIdentical(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_priv", "alice", []string{"alice", "bob"}, "Priv"); err != nil {
+	groupPriv := store.GenerateID("group_")
+	if err := s.store.CreateGroup(groupPriv, "alice", []string{"alice", "bob"}, "Priv"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
 	// Insert alice's message.
-	if err := s.store.InsertGroupMessage("group_priv", store.StoredMessage{
+	if err := s.store.InsertGroupMessage(groupPriv, store.StoredMessage{
 		ID: "msg_alice_g", Sender: "alice", TS: 1000, Payload: "p", Signature: "s",
 		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
 	}); err != nil {
@@ -370,15 +371,15 @@ func TestHandleEditGroup_PrivacyResponsesIdentical(t *testing.T) {
 	// Case 1: unknown group.
 	probe1 := testClientFor("alice", "dev_alice_1")
 	raw1, _ := json.Marshal(protocol.EditGroup{
-		Type: "edit_group", ID: "msg_x", Group: "group_does_not_exist",
+		Type: "edit_group", ID: "msg_x", Group: store.GenerateID("group_"),
 		WrappedKeys: map[string]string{"alice": "wa"}, Payload: "p", Signature: "s",
 	})
 	s.handleEditGroup(probe1.Client, raw1)
 
-	// Case 2: non-member (carol is not in group_priv).
+	// Case 2: non-member (carol is not in groupPriv).
 	probe2 := testClientFor("carol", "dev_carol_1")
 	raw2, _ := json.Marshal(protocol.EditGroup{
-		Type: "edit_group", ID: "msg_alice_g", Group: "group_priv",
+		Type: "edit_group", ID: "msg_alice_g", Group: groupPriv,
 		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"}, Payload: "p", Signature: "s",
 	})
 	s.handleEditGroup(probe2.Client, raw2)
@@ -386,7 +387,7 @@ func TestHandleEditGroup_PrivacyResponsesIdentical(t *testing.T) {
 	// Case 3: member, unknown row.
 	probe3 := testClientFor("bob", "dev_bob_1")
 	raw3, _ := json.Marshal(protocol.EditGroup{
-		Type: "edit_group", ID: "msg_nonexistent", Group: "group_priv",
+		Type: "edit_group", ID: "msg_nonexistent", Group: groupPriv,
 		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"}, Payload: "p", Signature: "s",
 	})
 	s.handleEditGroup(probe3.Client, raw3)
@@ -394,7 +395,7 @@ func TestHandleEditGroup_PrivacyResponsesIdentical(t *testing.T) {
 	// Case 4: member, row exists, wrong author.
 	probe4 := testClientFor("bob", "dev_bob_2")
 	raw4, _ := json.Marshal(protocol.EditGroup{
-		Type: "edit_group", ID: "msg_alice_g", Group: "group_priv",
+		Type: "edit_group", ID: "msg_alice_g", Group: groupPriv,
 		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"}, Payload: "p", Signature: "s",
 	})
 	s.handleEditGroup(probe4.Client, raw4)
@@ -421,10 +422,11 @@ func TestHandleEditGroup_PrivacyResponsesIdentical(t *testing.T) {
 // replaces the payload, rewraps keys, sets edited_at, and broadcasts.
 func TestHandleEditGroup_HappyPath(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_happy", "alice", []string{"alice", "bob"}, "Happy"); err != nil {
+	groupHappy := store.GenerateID("group_")
+	if err := s.store.CreateGroup(groupHappy, "alice", []string{"alice", "bob"}, "Happy"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if err := s.store.InsertGroupMessage("group_happy", store.StoredMessage{
+	if err := s.store.InsertGroupMessage(groupHappy, store.StoredMessage{
 		ID: "msg_gh", Sender: "alice", TS: 500, Payload: "orig", Signature: "orig_sig",
 		WrappedKeys: map[string]string{"alice": "v1a", "bob": "v1b"},
 	}); err != nil {
@@ -437,13 +439,13 @@ func TestHandleEditGroup_HappyPath(t *testing.T) {
 	s.mu.Unlock()
 
 	raw, _ := json.Marshal(protocol.EditGroup{
-		Type: "edit_group", ID: "msg_gh", Group: "group_happy",
+		Type: "edit_group", ID: "msg_gh", Group: groupHappy,
 		WrappedKeys: map[string]string{"alice": "v2a", "bob": "v2b"},
 		Payload:     "new_payload", Signature: "new_sig",
 	})
 	s.handleEditGroup(alice.Client, raw)
 
-	got, err := s.store.GetGroupMessageByID("group_happy", "msg_gh")
+	got, err := s.store.GetGroupMessageByID(groupHappy, "msg_gh")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -466,7 +468,7 @@ func TestHandleEditGroup_HappyPath(t *testing.T) {
 // all return byte-identical ErrUnknownDM.
 func TestHandleEditDM_PrivacyResponsesIdentical(t *testing.T) {
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage("dm_alice_bob", "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
@@ -481,7 +483,7 @@ func TestHandleEditDM_PrivacyResponsesIdentical(t *testing.T) {
 	// Case 1: unknown DM.
 	probe1 := testClientFor("alice", "dev_alice_1")
 	raw1, _ := json.Marshal(protocol.EditDM{
-		Type: "edit_dm", ID: "msg_x", DM: "dm_does_not_exist",
+		Type: "edit_dm", ID: "msg_x", DM: store.GenerateID("dm_"),
 		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"}, Payload: "p", Signature: "s",
 	})
 	s.handleEditDM(probe1.Client, raw1)

@@ -17,7 +17,7 @@ func TestDeleteDirectMessage_RemovesRowAndFile(t *testing.T) {
 	}
 	defer s.Close()
 
-	dm, err := s.CreateOrGetDirectMessage("dm_test", "alice", "bob")
+	dm, err := s.CreateOrGetDirectMessage(GenerateID("dm_"), "alice", "bob")
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
@@ -78,12 +78,12 @@ func TestDeleteDirectMessage_Idempotent(t *testing.T) {
 	defer s.Close()
 
 	// Delete a DM that never existed.
-	if err := s.DeleteDirectMessage("dm_never_existed"); err != nil {
+	if err := s.DeleteDirectMessage(GenerateID("dm_")); err != nil {
 		t.Errorf("delete of nonexistent DM should be no-op, got: %v", err)
 	}
 
 	// Create, delete, then delete again.
-	dm, _ := s.CreateOrGetDirectMessage("dm_double", "alice", "bob")
+	dm, _ := s.CreateOrGetDirectMessage(GenerateID("dm_"), "alice", "bob")
 	if err := s.DeleteDirectMessage(dm.ID); err != nil {
 		t.Fatalf("first delete: %v", err)
 	}

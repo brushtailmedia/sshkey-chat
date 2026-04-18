@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
@@ -370,7 +371,8 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 
 	var req protocol.History
 	if err := json.Unmarshal(raw, &req); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed history"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "history", "malformed history frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed history"})
 		return
 	}
 

@@ -1265,7 +1265,7 @@ func TestDeleteGroup_LastMemberCleanupAndOfflineCatchup(t *testing.T) {
 	deviceA := env.connect("/tmp/sshkey-test-key", "dev_alice_solo_A")
 
 	// alice solo in a group
-	groupID := "group_solo"
+	groupID := store.GenerateID("group_")
 	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test"}, "Solo"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}

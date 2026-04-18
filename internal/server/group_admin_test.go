@@ -182,6 +182,160 @@ func TestHandleAddToGroup_AlreadyMemberRejected(t *testing.T) {
 	}
 }
 
+// --- Phase 17 Step 4d: group cap enforcement ---
+
+// TestHandleAddToGroup_GroupAtCapRejected closes the pre-Phase-17 gap:
+// handleAddToGroup had no cap check, so an admin could grow a group
+// past MaxMembers via repeated add_to_group, producing a group whose
+// sends would then fail the wrapped_keys envelope cap on every message.
+// With the fix, add_to_group enforces the same `too_many_members` cap
+// as handleCreateGroup.
+func TestHandleAddToGroup_GroupAtCapRejected(t *testing.T) {
+	s := newTestServer(t)
+	// Lower the cap to 2 so we can exercise it with the seeded user set
+	// (alice, bob, carol). Must hold the config write lock.
+	s.cfg.Lock()
+	s.cfg.Server.Groups.MaxMembers = 2
+	s.cfg.Unlock()
+
+	// Group is already at cap (alice + bob = 2). Adding carol should fail.
+	if err := s.store.CreateGroup("group_cap", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+
+	alice := testClientFor("alice", "dev_alice_1")
+	s.mu.Lock()
+	s.clients["dev_alice_1"] = alice.Client
+	s.mu.Unlock()
+
+	raw, _ := json.Marshal(protocol.AddToGroup{
+		Type: "add_to_group", Group: "group_cap", User: "carol",
+	})
+	s.handleAddToGroup(alice.Client, raw)
+
+	msgs := alice.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(msgs))
+	}
+	var errResp protocol.Error
+	json.Unmarshal(msgs[0], &errResp)
+	if errResp.Code != "too_many_members" {
+		t.Errorf("expected too_many_members, got %q (message: %q)", errResp.Code, errResp.Message)
+	}
+	// Error message should include the configured cap for operator clarity.
+	if errResp.Message == "" || !bytes.Contains([]byte(errResp.Message), []byte("2 members")) {
+		t.Errorf("error message should reference configured cap (2), got %q", errResp.Message)
+	}
+
+	// Confirm carol was NOT added.
+	if isMember, _ := s.store.IsGroupMember("group_cap", "carol"); isMember {
+		t.Error("carol should NOT be a member after cap rejection")
+	}
+}
+
+// TestHandleAddToGroup_BelowCapSucceeds verifies the happy path after
+// the cap check: group size < maxMembers → add succeeds.
+func TestHandleAddToGroup_BelowCapSucceeds(t *testing.T) {
+	s := newTestServer(t)
+	s.cfg.Lock()
+	s.cfg.Server.Groups.MaxMembers = 3
+	s.cfg.Unlock()
+
+	// Group has 2 members; cap is 3; one seat remaining.
+	if err := s.store.CreateGroup("group_below_cap", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+
+	alice := testClientFor("alice", "dev_alice_1")
+	carol := testClientFor("carol", "dev_carol_1")
+	s.mu.Lock()
+	s.clients["dev_alice_1"] = alice.Client
+	s.clients["dev_carol_1"] = carol.Client
+	s.mu.Unlock()
+
+	raw, _ := json.Marshal(protocol.AddToGroup{
+		Type: "add_to_group", Group: "group_below_cap", User: "carol",
+	})
+	s.handleAddToGroup(alice.Client, raw)
+
+	if isMember, _ := s.store.IsGroupMember("group_below_cap", "carol"); !isMember {
+		t.Error("carol should have been added (under cap)")
+	}
+}
+
+// TestHandleCreateGroup_CapIsConfigurable verifies handleCreateGroup
+// reads the cap from config rather than the pre-Phase-17 hardcoded
+// literal. With cap lowered to 2, creating a 3-person group must be
+// rejected.
+func TestHandleCreateGroup_CapIsConfigurable(t *testing.T) {
+	s := newTestServer(t)
+	s.cfg.Lock()
+	s.cfg.Server.Groups.MaxMembers = 2
+	s.cfg.Unlock()
+
+	alice := testClientFor("alice", "dev_alice_1")
+	s.mu.Lock()
+	s.clients["dev_alice_1"] = alice.Client
+	s.mu.Unlock()
+
+	// Caller is implicitly added, so Members = [bob, carol] produces
+	// allMembers = [alice, bob, carol] = 3 > cap(2).
+	raw, _ := json.Marshal(protocol.CreateGroup{
+		Type:    "create_group",
+		Members: []string{"bob", "carol"},
+		Name:    "Too Big",
+	})
+	s.handleCreateGroup(alice.Client, raw)
+
+	msgs := alice.messages()
+	if len(msgs) < 1 {
+		t.Fatalf("expected at least 1 reply, got %d", len(msgs))
+	}
+	var errResp protocol.Error
+	json.Unmarshal(msgs[0], &errResp)
+	if errResp.Code != "too_many_members" {
+		t.Errorf("expected too_many_members with configured cap, got %q (message: %q)", errResp.Code, errResp.Message)
+	}
+	// Confirm the message reflects the *configured* cap (2), not the
+	// hardcoded legacy value (150).
+	if !bytes.Contains([]byte(errResp.Message), []byte("2 members")) {
+		t.Errorf("error message should reference configured cap (2), got %q", errResp.Message)
+	}
+}
+
+// TestHandleAddToGroup_CapDefaultsTo150WhenZero covers the defensive
+// fallback in the handler: if config load somehow produces a zero or
+// negative MaxMembers (operator wrote `max_members = 0`, for example),
+// the handler treats it as 150 rather than allowing unlimited growth
+// or rejecting every add. Parser test (in config package) verifies
+// the zero isn't coerced there; this test verifies the handler catches it.
+func TestHandleAddToGroup_CapDefaultsTo150WhenZero(t *testing.T) {
+	s := newTestServer(t)
+	s.cfg.Lock()
+	s.cfg.Server.Groups.MaxMembers = 0
+	s.cfg.Unlock()
+
+	if err := s.store.CreateGroup("group_zero_cap", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+
+	alice := testClientFor("alice", "dev_alice_1")
+	s.mu.Lock()
+	s.clients["dev_alice_1"] = alice.Client
+	s.mu.Unlock()
+
+	// With MaxMembers = 0 and the defensive fallback kicking in (150),
+	// adding carol to a 2-person group must succeed.
+	raw, _ := json.Marshal(protocol.AddToGroup{
+		Type: "add_to_group", Group: "group_zero_cap", User: "carol",
+	})
+	s.handleAddToGroup(alice.Client, raw)
+
+	if isMember, _ := s.store.IsGroupMember("group_zero_cap", "carol"); !isMember {
+		t.Error("carol should have been added — zero cap should trigger 150 fallback, not block")
+	}
+}
+
 // --- handleRemoveFromGroup ---
 
 func TestHandleRemoveFromGroup_AdminCanRemove(t *testing.T) {
@@ -378,7 +532,8 @@ func TestPerformGroupLeave_RemovedReason(t *testing.T) {
 // file survive because alice is still in it.
 func TestHandleRemoveFromGroup_LastMemberCleanupOnKickedSoleMember(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_last_kick", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	groupID := store.GenerateID("group_")
+	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -391,18 +546,18 @@ func TestHandleRemoveFromGroup_LastMemberCleanupOnKickedSoleMember(t *testing.T)
 	// so the full pipeline runs: admin check + self-kick check +
 	// last-admin check + performGroupLeave.
 	raw, _ := json.Marshal(protocol.RemoveFromGroup{
-		Type: "remove_from_group", Group: "group_last_kick", User: "bob",
+		Type: "remove_from_group", Group: groupID, User: "bob",
 	})
 	s.handleRemoveFromGroup(alice.Client, raw)
 
 	// bob is no longer a member
-	isBobMember, _ := s.store.IsGroupMember("group_last_kick", "bob")
+	isBobMember, _ := s.store.IsGroupMember(groupID, "bob")
 	if isBobMember {
 		t.Error("bob should be removed after kick")
 	}
 
 	// alice is still a member — group row should survive
-	isAliceMember, _ := s.store.IsGroupMember("group_last_kick", "alice")
+	isAliceMember, _ := s.store.IsGroupMember(groupID, "alice")
 	if !isAliceMember {
 		t.Error("alice should still be a member")
 	}
@@ -412,7 +567,7 @@ func TestHandleRemoveFromGroup_LastMemberCleanupOnKickedSoleMember(t *testing.T)
 	groups, _ := s.store.GetUserGroups("alice")
 	found := false
 	for _, g := range groups {
-		if g.ID == "group_last_kick" {
+		if g.ID == groupID {
 			found = true
 			break
 		}
@@ -422,7 +577,7 @@ func TestHandleRemoveFromGroup_LastMemberCleanupOnKickedSoleMember(t *testing.T)
 	}
 
 	// Audit: one "leave" row for bob's kick with by=alice, reason=removed
-	events, _ := s.store.GetGroupEventsSince("group_last_kick", 0)
+	events, _ := s.store.GetGroupEventsSince(groupID, 0)
 	var foundKickEvent bool
 	for _, e := range events {
 		if e.Event == "leave" && e.User == "bob" && e.By == "alice" && e.Reason == "removed" {

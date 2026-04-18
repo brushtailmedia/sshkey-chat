@@ -41,8 +41,10 @@ package server
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"time"
 
+	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
@@ -50,13 +52,19 @@ import (
 // handleEdit — rooms.
 func (s *Server) handleEdit(c *Client, raw json.RawMessage) {
 	if len(raw) > maxPayloadBytes {
+		// Phase 17 Step 4c gap-closure: fires SignalOversizedBody for
+		// Phase 17b density on the edit-path (matches the send-path
+		// wiring in session.go).
+		s.rejectAndLog(c, counters.SignalOversizedBody, "edit",
+			fmt.Sprintf("raw=%d bytes exceeds maxPayloadBytes=%d", len(raw), maxPayloadBytes), nil)
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrMessageTooLarge, Message: "Message exceeds 16KB limit"})
 		return
 	}
 
 	var msg protocol.Edit
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed edit"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "edit", "malformed edit frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed edit"})
 		return
 	}
 
@@ -171,13 +179,23 @@ func (s *Server) handleEdit(c *Client, raw json.RawMessage) {
 // handleEditGroup — group DMs.
 func (s *Server) handleEditGroup(c *Client, raw json.RawMessage) {
 	if len(raw) > maxPayloadBytes {
+		s.rejectAndLog(c, counters.SignalOversizedBody, "edit_group",
+			fmt.Sprintf("raw=%d bytes exceeds maxPayloadBytes=%d", len(raw), maxPayloadBytes), nil)
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrMessageTooLarge, Message: "Message exceeds 16KB limit"})
 		return
 	}
 
 	var msg protocol.EditGroup
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed edit_group"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "edit_group", "malformed edit_group frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed edit_group"})
+		return
+	}
+
+	// Phase 17 Step 4c: wrapped_keys envelope cap. Applied before any
+	// DB round-trip — cheap O(1) check that blocks the "10M-entry map"
+	// DoS before membership validation tries to walk it.
+	if !s.checkWrappedKeysCap(c, msg.WrappedKeys, "edit_group") {
 		return
 	}
 
@@ -279,13 +297,23 @@ func (s *Server) handleEditGroup(c *Client, raw json.RawMessage) {
 // handleEditDM — 1:1 DMs.
 func (s *Server) handleEditDM(c *Client, raw json.RawMessage) {
 	if len(raw) > maxPayloadBytes {
+		s.rejectAndLog(c, counters.SignalOversizedBody, "edit_dm",
+			fmt.Sprintf("raw=%d bytes exceeds maxPayloadBytes=%d", len(raw), maxPayloadBytes), nil)
 		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrMessageTooLarge, Message: "Message exceeds 16KB limit"})
 		return
 	}
 
 	var msg protocol.EditDM
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed edit_dm"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "edit_dm", "malformed edit_dm frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed edit_dm"})
+		return
+	}
+
+	// Phase 17 Step 4c: wrapped_keys observability cap. Same rationale
+	// as handleSendDM — len==2 below is the correctness gate; this
+	// fires SignalWrappedKeysOverCap for Phase 17b density on DMs.
+	if !s.checkWrappedKeysCap(c, msg.WrappedKeys, "edit_dm") {
 		return
 	}
 

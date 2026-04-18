@@ -16,13 +16,14 @@ func TestRecordRoomEvent_RoundTrip(t *testing.T) {
 	}
 	defer st.Close()
 
+	roomID := GenerateID("room_")
 	if err := st.RecordRoomEvent(
-		"rm_general", "leave", "usr_alice", "usr_admin", "removed", "", false, 1000,
+		roomID, "leave", "usr_alice", "usr_admin", "removed", "", false, 1000,
 	); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
-	events, err := st.GetRoomEventsSince("rm_general", 0)
+	events, err := st.GetRoomEventsSince(roomID, 0)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -57,12 +58,13 @@ func TestGetRoomEventsSince_Ordered(t *testing.T) {
 	}
 	defer st.Close()
 
+	roomID := GenerateID("room_")
 	// Record out of order.
-	st.RecordRoomEvent("rm_a", "join", "usr_bob", "usr_admin", "", "", false, 3000)
-	st.RecordRoomEvent("rm_a", "leave", "usr_alice", "usr_admin", "removed", "", false, 1000)
-	st.RecordRoomEvent("rm_a", "topic", "", "usr_admin", "", "new topic", false, 2000)
+	st.RecordRoomEvent(roomID, "join", "usr_bob", "usr_admin", "", "", false, 3000)
+	st.RecordRoomEvent(roomID, "leave", "usr_alice", "usr_admin", "removed", "", false, 1000)
+	st.RecordRoomEvent(roomID, "topic", "", "usr_admin", "", "new topic", false, 2000)
 
-	events, err := st.GetRoomEventsSince("rm_a", 0)
+	events, err := st.GetRoomEventsSince(roomID, 0)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -85,10 +87,11 @@ func TestGetRoomEventsSince_RespectsSinceTS(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.RecordRoomEvent("rm_a", "leave", "usr_a", "usr_admin", "", "", false, 500)
-	st.RecordRoomEvent("rm_a", "leave", "usr_b", "usr_admin", "", "", false, 1500)
+	roomID := GenerateID("room_")
+	st.RecordRoomEvent(roomID, "leave", "usr_a", "usr_admin", "", "", false, 500)
+	st.RecordRoomEvent(roomID, "leave", "usr_b", "usr_admin", "", "", false, 1500)
 
-	events, _ := st.GetRoomEventsSince("rm_a", 1000)
+	events, _ := st.GetRoomEventsSince(roomID, 1000)
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event with ts >= 1000, got %d", len(events))
 	}
@@ -107,15 +110,16 @@ func TestRecordRoomEvent_AllVocabulary(t *testing.T) {
 	}
 	defer st.Close()
 
+	roomID := GenerateID("room_")
 	for _, event := range []string{"leave", "join", "topic", "rename", "retire"} {
 		if err := st.RecordRoomEvent(
-			"rm_a", event, "usr_x", "usr_admin", "", "value", false, 1000,
+			roomID, event, "usr_x", "usr_admin", "", "value", false, 1000,
 		); err != nil {
 			t.Errorf("RecordRoomEvent(%q): %v", event, err)
 		}
 	}
 
-	events, _ := st.GetRoomEventsSince("rm_a", 0)
+	events, _ := st.GetRoomEventsSince(roomID, 0)
 	if len(events) != 5 {
 		t.Errorf("expected 5 events (one per vocabulary type), got %d", len(events))
 	}

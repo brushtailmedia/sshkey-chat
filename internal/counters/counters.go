@@ -42,6 +42,44 @@ const (
 	SignalFileIDsOverCap       = "file_ids_over_cap"
 	SignalInvalidContentHash   = "invalid_content_hash"
 	SignalOversizedUploadFrame = "oversized_upload_frame"
+
+	// SignalNonMemberContext fires when a client sends a well-formed
+	// frame referencing a context (room / group / dm) they are not a
+	// member of. Byte-identical privacy response on the wire
+	// (Phase 14 invariant); this signal distinguishes the cases
+	// server-side so Phase 17b threshold analysis can discriminate
+	// one-shot legit races (membership-change, stale reconnect state)
+	// from sustained probing or buggy-client loops. Added Phase 17
+	// Step 4c follow-up.
+	SignalNonMemberContext = "non_member_context"
+
+	// SignalDownloadNotFound fires on handleDownload rejection for
+	// every path that produces a byte-identical `not_found` wire
+	// response to the client:
+	//   (1) ACL-deny — forward-secrecy gate or post-leave cached message
+	//   (2) file missing on disk — cascade-cleanup race, admin purge
+	//   (3) server-side I/O error — os.Open failure after os.Stat
+	//       succeeded (rare race or degraded disk)
+	//
+	// Merged to match Phase 17c Category D (privacy-identical rejection
+	// = one signal). Server logs preserve the per-path reason via
+	// rejectAndLog's logReason field; forensics remain intact.
+	//
+	// Circuit-breaker behavior on server disk faults: by including path
+	// (3) here as an AutoRevoke-eligible signal, a degrading disk that
+	// affects every active user cascades to mass auto-revoke, stopping
+	// further writes against compromised storage. Admin recovery is
+	// structural (OS-SSH + sshkey-ctl approve-device); Phase 17b's
+	// operator-manual cascade-disable (enabled = false + restart) is
+	// the documented response if the breaker over-fires.
+	SignalDownloadNotFound = "download_not_found"
+
+	// SignalDownloadNoChannel fires when a client sends a `download`
+	// verb on Channel 1 without having opened the download channel
+	// (Channel 2) during session setup within the 500ms grace period.
+	// A buggy client hits this on every download; a legit client
+	// should never hit it.
+	SignalDownloadNoChannel = "download_no_channel"
 )
 
 // Load signals — counted but NEVER auto-revoke inputs.
@@ -72,6 +110,9 @@ var AutoRevokeSignals = []string{
 	SignalFileIDsOverCap,
 	SignalInvalidContentHash,
 	SignalOversizedUploadFrame,
+	SignalNonMemberContext,
+	SignalDownloadNotFound,
+	SignalDownloadNoChannel,
 }
 
 // key identifies a single counter — (signal, deviceID). Unexported so callers

@@ -296,6 +296,11 @@ func (s *Store) GetDMUnreadCount(dmID, user, deviceID string) (int, string, erro
 // against concurrent CreateOrGetDirectMessage. The store-level mutex
 // (s.mu) is acquired internally only to mutate the dmDBs cache.
 func (s *Store) DeleteDirectMessage(dmID string) error {
+	// Phase 17 Step 4a: path-traversal defense. See DeleteRoomRecord.
+	if err := ValidateNanoID(dmID, "dm_"); err != nil {
+		return fmt.Errorf("DeleteDirectMessage: %w", err)
+	}
+
 	// Close and evict any cached handle so the file is not held open
 	// when we unlink it. WAL mode keeps -wal/-shm files alive while
 	// the connection is open; close-then-unlink is the safe order.

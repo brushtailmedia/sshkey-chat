@@ -199,30 +199,31 @@ func TestDeleteGroupConversation(t *testing.T) {
 	}
 	defer s.Close()
 
+	groupID := GenerateID("group_")
 	// Create a group with two members
-	if err := s.CreateGroup("group_x", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
 	// Insert a message so the per-group db file actually exists on disk
-	if err := s.InsertGroupMessage("group_x", StoredMessage{
+	if err := s.InsertGroupMessage(groupID, StoredMessage{
 		ID: "m1", Sender: "alice", TS: 100, Payload: "hi",
 	}); err != nil {
 		t.Fatalf("insert msg: %v", err)
 	}
 
-	dbPath := filepath.Join(s.dir, "group-group_x.db")
+	dbPath := filepath.Join(s.dir, "group-"+groupID+".db")
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Fatalf("group db file should exist before delete: %v", err)
 	}
 
-	if err := s.DeleteGroupConversation("group_x"); err != nil {
+	if err := s.DeleteGroupConversation(groupID); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
 	// Cache evicted
 	s.mu.RLock()
-	_, cached := s.groupDBs["group_x"]
+	_, cached := s.groupDBs[groupID]
 	s.mu.RUnlock()
 	if cached {
 		t.Error("groupDBs cache still holds the deleted group")
@@ -236,7 +237,7 @@ func TestDeleteGroupConversation(t *testing.T) {
 	}
 
 	// Members gone
-	members, _ := s.GetGroupMembers("group_x")
+	members, _ := s.GetGroupMembers(groupID)
 	if len(members) != 0 {
 		t.Errorf("group_members should be empty after delete, got %v", members)
 	}
@@ -252,13 +253,14 @@ func TestDeleteGroupConversation_Idempotent(t *testing.T) {
 	}
 	defer s.Close()
 
-	if err := s.DeleteGroupConversation("never_existed"); err != nil {
+	if err := s.DeleteGroupConversation(GenerateID("group_")); err != nil {
 		t.Errorf("delete of nonexistent group should be no-op, got: %v", err)
 	}
 
-	s.CreateGroup("group_x", "alice", []string{"alice"}, "")
-	s.DeleteGroupConversation("group_x")
-	if err := s.DeleteGroupConversation("group_x"); err != nil {
+	groupID := GenerateID("group_")
+	s.CreateGroup(groupID, "alice", []string{"alice"}, "")
+	s.DeleteGroupConversation(groupID)
+	if err := s.DeleteGroupConversation(groupID); err != nil {
 		t.Errorf("second delete should be no-op, got: %v", err)
 	}
 }
@@ -276,21 +278,22 @@ func TestDeleteGroupConversation_PreservesDeletedGroupsRows(t *testing.T) {
 	}
 	defer s.Close()
 
-	// alice records a deletion against group_x
-	if err := s.RecordGroupDeletion("alice", "group_x"); err != nil {
+	groupID := GenerateID("group_")
+	// alice records a deletion against the group
+	if err := s.RecordGroupDeletion("alice", groupID); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
 	// Create the group then immediately fully clean it up
-	s.CreateGroup("group_x", "alice", []string{"alice"}, "")
-	if err := s.DeleteGroupConversation("group_x"); err != nil {
+	s.CreateGroup(groupID, "alice", []string{"alice"}, "")
+	if err := s.DeleteGroupConversation(groupID); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
 	// alice's deletion record must still be there — this is the catchup
 	// signal for any offline device of alice that comes online later.
 	got, _ := s.GetDeletedGroupsForUser("alice")
-	if len(got) != 1 || got[0] != "group_x" {
+	if len(got) != 1 || got[0] != groupID {
 		t.Errorf("deletion record must survive group cleanup; got %v", got)
 	}
 }
@@ -315,8 +318,9 @@ func TestDeleteGroupConversation_OpportunisticPrune(t *testing.T) {
 	s.RecordGroupDeletion("alice", "fresh_group")
 
 	// Trigger a cleanup of an unrelated group — the prune piggybacks
-	s.CreateGroup("unrelated", "bob", []string{"bob"}, "")
-	if err := s.DeleteGroupConversation("unrelated"); err != nil {
+	unrelatedID := GenerateID("group_")
+	s.CreateGroup(unrelatedID, "bob", []string{"bob"}, "")
+	if err := s.DeleteGroupConversation(unrelatedID); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
