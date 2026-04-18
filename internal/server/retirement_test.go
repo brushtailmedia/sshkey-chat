@@ -30,6 +30,14 @@ func newTestServer(t *testing.T) *Server {
 port = 2222
 bind = "127.0.0.1"
 admins = ["alice"]
+
+# Phase 17b: explicitly disable auto-revoke for tests that don't
+# exercise it — keeps log output clean (no "enabled=true with zero
+# thresholds" startup warnings) and matches the intent of most server
+# tests, which aren't auto-revoke scenarios. Specific auto-revoke
+# tests override this via s.cfg after construction.
+[server.auto_revoke]
+enabled = false
 `), 0644)
 
 	// Phase 16 Gap 4: users.toml is no longer supported. The test

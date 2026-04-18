@@ -10,6 +10,7 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -81,6 +82,12 @@ type ServerSection struct {
 	// preserve, just sidebar housekeeping. Inert until Phase 12 introduces
 	// room retirement. Hot-reloadable.
 	AllowSelfLeaveRetiredRooms bool `toml:"allow_self_leave_retired_rooms"`
+
+	// AutoRevoke configures Phase 17b auto-revoke on sustained
+	// misbehavior. See internal/config/autorevoke.go for the full
+	// schema + validation rules. Nested as [server.auto_revoke] in
+	// server.toml.
+	AutoRevoke AutoRevokeSection `toml:"auto_revoke"`
 }
 
 type MessagesSection struct {
@@ -223,6 +230,19 @@ func DefaultServerConfig() ServerConfig {
 			Bind:                       "0.0.0.0",
 			AllowSelfLeaveRooms:        false, // explicit: admin-managed by default
 			AllowSelfLeaveRetiredRooms: true,  // explicit: retired-room cleanup allowed
+			AutoRevoke: AutoRevokeSection{
+				// Phase 17b default-on. See refactor_plan.md
+				// §Phase 17b for the "Single-stage shipping,
+				// default-on" rationale — every auto-revoke
+				// signal has a zero legitimate baseline so
+				// enabling by default does not false-positive
+				// legitimate clients. Operators disable via
+				// enabled = false + restart if unusual
+				// behavior occurs.
+				Enabled:         true,
+				PruneAfterHours: 168, // 7 days — comfortably exceeds the typical 60s window
+				Thresholds:      nil, // operator populates via [server.auto_revoke.thresholds]
+			},
 		},
 		Messages: MessagesSection{
 			MaxBodySize: "16KB",
@@ -281,12 +301,39 @@ func DefaultServerConfig() ServerConfig {
 }
 
 // LoadServerConfig reads and parses server.toml, applying defaults for missing fields.
+//
+// Phase 17b Step 1: calls ServerConfig.Validate() after decode. Validation
+// failures abort startup with a descriptive error; non-fatal warnings are
+// emitted via slog.Warn so operators see misconfigurations without hard-
+// failing startup.
 func LoadServerConfig(path string) (ServerConfig, error) {
 	cfg := DefaultServerConfig()
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
 		return cfg, fmt.Errorf("load server.toml: %w", err)
 	}
+	warnings, err := cfg.Validate()
+	if err != nil {
+		return cfg, fmt.Errorf("validate server.toml: %w", err)
+	}
+	for _, w := range warnings {
+		slog.Warn("server.toml validation warning", "message", w)
+	}
 	return cfg, nil
+}
+
+// Validate runs cross-section validation on a loaded ServerConfig.
+// Returns startup warnings (non-fatal; caller should surface to
+// operator) and hard errors (abort startup).
+//
+// Phase 17b Step 1 adds [server.auto_revoke] validation. Future
+// cross-section checks land here too.
+func (c ServerConfig) Validate() (warnings []string, err error) {
+	_, warn, err := c.Server.AutoRevoke.ParseAndValidate()
+	if err != nil {
+		return nil, err
+	}
+	warnings = append(warnings, warn...)
+	return warnings, nil
 }
 
 // LoadRooms reads and parses rooms.toml. Returns a map of room name -> Room.

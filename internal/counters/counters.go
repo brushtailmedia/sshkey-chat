@@ -122,12 +122,32 @@ type key struct {
 	deviceID string
 }
 
+// defaultRingCap is the per-entry sliding-window ring buffer size. Phase
+// 17b's Check method reads timestamps from this ring; configured
+// thresholds drive the actual windowing. 64 covers any realistic
+// threshold count (practical tight thresholds live in the 2-10 range),
+// and the ring is lazy-allocated — idle entries carry a nil slice and
+// the full 512 bytes materialize only for entries that actually
+// sustain Inc pressure.
+const defaultRingCap = 64
+
 // entry holds a counter value plus the unix-seconds timestamp of the most
-// recent Inc. Both fields use atomic access so concurrent Inc/Get on an
-// existing entry does not need the map's RWMutex.
+// recent Inc, plus (Phase 17b) a per-entry sliding-window ring of event
+// timestamps. value and lastInc use atomic access; ring is protected by
+// ringMu. The atomic fields are the hot path; ringMu is only taken on
+// Inc (to append) and on Check (to read), never on Get/Snapshot/Has.
 type entry struct {
 	value   atomic.Int64
 	lastInc atomic.Int64 // unix seconds; updated on every Inc
+
+	// Phase 17b sliding-window state. Protected by ringMu.
+	//
+	// ring stores event timestamps (unix seconds) append-only up to
+	// ringCap (from the owning Counters), after which it becomes
+	// circular — oldest timestamp overwritten by newest.
+	ringMu  sync.Mutex
+	ring    []int64
+	ringPos int // next write index once ring fills; ignored until len == cap
 }
 
 // Counters tracks per-(signal, device) counts. Zero-value is not usable;
@@ -136,18 +156,48 @@ type entry struct {
 type Counters struct {
 	mu   sync.RWMutex
 	data map[key]*entry
+
+	// ringCap bounds each entry's sliding-window ring. Set at
+	// construction; immutable after New.
+	ringCap int
+
+	// nowFn returns the current unix second. Replaceable for tests
+	// (see setNowFn). Never nil after New.
+	nowFn func() int64
 }
 
-// New returns an initialized Counters.
+// New returns an initialized Counters with the default sliding-window
+// ring capacity (64 timestamps per entry).
 func New() *Counters {
-	return &Counters{
-		data: make(map[key]*entry),
+	return NewWithRingCap(defaultRingCap)
+}
+
+// NewWithRingCap is New with an explicit ring capacity. Passing n <= 0
+// falls back to the default. Reserved for operator tuning if a
+// deployment configures thresholds above the default ring size.
+func NewWithRingCap(n int) *Counters {
+	if n <= 0 {
+		n = defaultRingCap
 	}
+	return &Counters{
+		data:    make(map[key]*entry),
+		ringCap: n,
+		nowFn:   func() int64 { return time.Now().Unix() },
+	}
+}
+
+// setNowFn replaces the clock used for timestamps. Test-only (unexported);
+// lets sliding-window tests assert deterministic aging behavior without
+// real-time sleeps.
+func (c *Counters) setNowFn(fn func() int64) {
+	c.nowFn = fn
 }
 
 // Inc increments the counter for (signal, deviceID) and returns the new
 // count. Thread-safe. Updates the entry's lastInc timestamp on every call
-// (Phase 17b consumes this for write-path opportunistic pruning).
+// and appends the timestamp to the entry's sliding-window ring (Phase
+// 17b consumes lastInc for write-path opportunistic pruning and the ring
+// for Check).
 //
 // deviceID == "" is accepted but indicates a caller bug (in the current
 // architecture every rejection site runs post-auth, so the device should
@@ -157,7 +207,7 @@ func (c *Counters) Inc(signal, deviceID string) int64 {
 	if deviceID == "" {
 		slog.Warn("counters: Inc called with empty deviceID", "signal", signal)
 	}
-	now := time.Now().Unix()
+	now := c.nowFn()
 	k := key{signal: signal, deviceID: deviceID}
 
 	// Fast path: entry exists.
@@ -166,6 +216,7 @@ func (c *Counters) Inc(signal, deviceID string) int64 {
 	c.mu.RUnlock()
 	if ok {
 		e.lastInc.Store(now)
+		e.appendTimestamp(now, c.ringCap)
 		return e.value.Add(1)
 	}
 
@@ -176,13 +227,77 @@ func (c *Counters) Inc(signal, deviceID string) int64 {
 	// Re-check under write lock — another goroutine may have created it.
 	if e, ok := c.data[k]; ok {
 		e.lastInc.Store(now)
+		e.appendTimestamp(now, c.ringCap)
 		return e.value.Add(1)
 	}
 
 	e = &entry{}
 	e.lastInc.Store(now)
+	e.appendTimestamp(now, c.ringCap)
 	c.data[k] = e
 	return e.value.Add(1)
+}
+
+// appendTimestamp appends ts to the entry's sliding-window ring.
+// Append-until-full then circular. Must not be called with ringMu held
+// — it acquires the lock itself.
+func (e *entry) appendTimestamp(ts int64, cap int) {
+	e.ringMu.Lock()
+	defer e.ringMu.Unlock()
+	if len(e.ring) < cap {
+		e.ring = append(e.ring, ts)
+		return
+	}
+	// Ring is full; overwrite the oldest entry (at ringPos).
+	e.ring[e.ringPos] = ts
+	e.ringPos++
+	if e.ringPos == cap {
+		e.ringPos = 0
+	}
+}
+
+// Check reports whether the (signal, deviceID) entry has at least
+// `threshold` events recorded within the past `windowSec` seconds.
+// Used by Phase 17b's auto-revoke goroutine.
+//
+// Defensive: threshold <= 0 or windowSec <= 0 returns false (the config
+// loader treats an omitted threshold as "disable check for this signal",
+// and a zero-valued call reaching this method through any path should
+// likewise not fire).
+//
+// Unknown (signal, deviceID) returns false (no events).
+//
+// Bounded counting: the ring holds at most ringCap timestamps, so a
+// sustained spammer that crosses the ring cap will have older events
+// aged off the ring before Check sees them. If the configured threshold
+// is ≤ ringCap (the practical case — tight thresholds of 2-10 against
+// a 64-entry ring), this has no impact. Operators pushing thresholds
+// above ringCap should use NewWithRingCap to enlarge the ring at
+// construction.
+func (c *Counters) Check(signal, deviceID string, threshold, windowSec int) bool {
+	if threshold <= 0 || windowSec <= 0 {
+		return false
+	}
+	c.mu.RLock()
+	e, ok := c.data[key{signal: signal, deviceID: deviceID}]
+	c.mu.RUnlock()
+	if !ok {
+		return false
+	}
+
+	since := c.nowFn() - int64(windowSec)
+	e.ringMu.Lock()
+	defer e.ringMu.Unlock()
+	var n int
+	for _, ts := range e.ring {
+		if ts >= since {
+			n++
+			if n >= threshold {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Get returns the current count for (signal, deviceID). Returns 0 if the key
