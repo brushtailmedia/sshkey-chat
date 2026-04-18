@@ -912,12 +912,20 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 		// Reject epochs older than the grace window (current - 1)
 		if msg.Epoch < currentEpoch-1 {
 			s.respondError(c, msg.CorrID, protocol.ErrInvalidEpoch, "Epoch too old (outside two-epoch grace window)", 0)
+			// Phase 17c Step 4 Category B: preemptively push the fresh
+			// epoch_key so the client can resend with the correct epoch
+			// without reconnecting. Throttled per (device, verb).
+			s.pushEpochKeyFix(c, "send", msg.Room)
 			return
 		}
 		// Reject epochs beyond what's been confirmed and distributed.
 		// Prevents a client from sending with a pending key that might get rejected.
 		if confirmedEpoch > 0 && msg.Epoch > confirmedEpoch {
 			s.respondError(c, msg.CorrID, protocol.ErrInvalidEpoch, "Epoch not yet confirmed. Wait for epoch_confirmed before sending.", 0)
+			// Phase 17c Step 4 Category B: client was ahead of the
+			// confirmed epoch; push the currently-confirmed key so
+			// they resend against it.
+			s.pushEpochKeyFix(c, "send", msg.Room)
 			return
 		}
 	}
@@ -964,7 +972,15 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 			Signature: outMsg.Signature,
 		})
 		if err != nil {
+			// Phase 17c Step 4 bug #2 fix: InsertRoomMessage failure
+			// must abort — NO broadcast, respond internal_error so
+			// the client retries rather than assuming the message
+			// landed. Prior behavior silently dropped to DB but
+			// broadcast the message, leaving recipients seeing an
+			// ephemeral message missing on reconnect.
 			s.logger.Error("failed to store message", "room", msg.Room, "error", err)
+			s.respondError(c, msg.CorrID, protocol.CodeInternal, "", 0)
+			return
 		}
 	}
 
@@ -1103,6 +1119,9 @@ func (s *Server) handleTyping(c *Client, raw json.RawMessage) {
 
 	var msg protocol.Typing
 	if err := json.Unmarshal(raw, &msg); err != nil {
+		// Phase 17c Step 3: silent-drop fixed — fire SignalMalformedFrame
+		// counter; no client response because typing is fire-and-forget.
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "typing", "malformed typing frame", nil)
 		return
 	}
 
@@ -1148,6 +1167,10 @@ func (s *Server) handleTyping(c *Client, raw json.RawMessage) {
 func (s *Server) handleRead(c *Client, raw json.RawMessage) {
 	var msg protocol.Read
 	if err := json.Unmarshal(raw, &msg); err != nil {
+		// Phase 17c Step 3: silent-drop fixed — read receipts are
+		// fire-and-forget (no client response), but counter should
+		// fire on malformed input.
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "read", "malformed read frame", nil)
 		return
 	}
 
@@ -1294,9 +1317,15 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 			if !s.isReactableMessage(db, msg.ID) {
 				return
 			}
-			db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, epoch, payload, signature)
+			// Phase 17c Step 4 bug #4 fix: check INSERT error, abort
+			// on failure so the broadcast matches DB state.
+			if _, err := db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, epoch, payload, signature)
 				VALUES (?, ?, ?, ?, ?, ?, ?)`,
-				reactionID, msg.ID, c.UserID, reaction.TS, msg.Epoch, msg.Payload, msg.Signature)
+				reactionID, msg.ID, c.UserID, reaction.TS, msg.Epoch, msg.Payload, msg.Signature); err != nil {
+				s.logger.Error("failed to insert reaction (room)", "room", msg.Room, "id", msg.ID, "error", err)
+				s.respondError(c, msg.CorrID, protocol.CodeInternal, "", 0)
+				return
+			}
 		} else if msg.Group != "" {
 			db, err := s.store.GroupDB(msg.Group)
 			if err != nil {
@@ -1310,9 +1339,14 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 				data, _ := json.Marshal(msg.WrappedKeys)
 				wrappedKeys = string(data)
 			}
-			db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, epoch, payload, signature, wrapped_keys)
+			// Phase 17c Step 4 bug #4 fix: same as room branch.
+			if _, err := db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, epoch, payload, signature, wrapped_keys)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-				reactionID, msg.ID, c.UserID, reaction.TS, msg.Epoch, msg.Payload, msg.Signature, wrappedKeys)
+				reactionID, msg.ID, c.UserID, reaction.TS, msg.Epoch, msg.Payload, msg.Signature, wrappedKeys); err != nil {
+				s.logger.Error("failed to insert reaction (group)", "group", msg.Group, "id", msg.ID, "error", err)
+				s.respondError(c, msg.CorrID, protocol.CodeInternal, "", 0)
+				return
+			}
 		} else if msg.DM != "" {
 			db, err := s.store.DMDB(msg.DM)
 			if err != nil {
@@ -1326,9 +1360,14 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 				data, _ := json.Marshal(msg.WrappedKeys)
 				wrappedKeys = string(data)
 			}
-			db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, epoch, payload, signature, wrapped_keys)
+			// Phase 17c Step 4 bug #4 fix: same as room/group branches.
+			if _, err := db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, epoch, payload, signature, wrapped_keys)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-				reactionID, msg.ID, c.UserID, reaction.TS, msg.Epoch, msg.Payload, msg.Signature, wrappedKeys)
+				reactionID, msg.ID, c.UserID, reaction.TS, msg.Epoch, msg.Payload, msg.Signature, wrappedKeys); err != nil {
+				s.logger.Error("failed to insert reaction (dm)", "dm", msg.DM, "id", msg.ID, "error", err)
+				s.respondError(c, msg.CorrID, protocol.CodeInternal, "", 0)
+				return
+			}
 		}
 	}
 	// If s.store is nil (unusual, only hit in in-memory tests without
@@ -1375,6 +1414,9 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 
 	var msg protocol.Unreact
 	if err := json.Unmarshal(raw, &msg); err != nil {
+		// Phase 17c Step 3: silent-drop fixed.
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "unreact", "malformed unreact frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed unreact"})
 		return
 	}
 	if !s.validateCorrIDOrReject(c, "unreact", msg.CorrID) {
@@ -1412,8 +1454,13 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 			Scan(&targetID, &user)
 		if err == nil && user == c.UserID {
 			room = r
+			// Phase 17c Step 4 bug #5 fix: abort on DELETE failure.
+			if _, err := db.Exec(`DELETE FROM reactions WHERE reaction_id = ?`, msg.ReactionID); err != nil {
+				s.logger.Error("failed to delete reaction (room)", "room", r, "reaction_id", msg.ReactionID, "error", err)
+				s.respondError(c, msg.CorrID, protocol.CodeInternal, "", 0)
+				return
+			}
 			found = true
-			db.Exec(`DELETE FROM reactions WHERE reaction_id = ?`, msg.ReactionID)
 			break
 		}
 	}
@@ -1430,8 +1477,13 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 					Scan(&targetID, &user)
 				if err == nil && user == c.UserID {
 					group = g.ID
+					// Phase 17c Step 4 bug #5 fix.
+					if _, err := db.Exec(`DELETE FROM reactions WHERE reaction_id = ?`, msg.ReactionID); err != nil {
+						s.logger.Error("failed to delete reaction (group)", "group", g.ID, "reaction_id", msg.ReactionID, "error", err)
+						s.respondError(c, msg.CorrID, protocol.CodeInternal, "", 0)
+						return
+					}
 					found = true
-					db.Exec(`DELETE FROM reactions WHERE reaction_id = ?`, msg.ReactionID)
 					break
 				}
 			}
@@ -1450,8 +1502,13 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 					Scan(&targetID, &user)
 				if err == nil && user == c.UserID {
 					dmID = dm.ID
+					// Phase 17c Step 4 bug #5 fix.
+					if _, err := db.Exec(`DELETE FROM reactions WHERE reaction_id = ?`, msg.ReactionID); err != nil {
+						s.logger.Error("failed to delete reaction (dm)", "dm", dm.ID, "reaction_id", msg.ReactionID, "error", err)
+						s.respondError(c, msg.CorrID, protocol.CodeInternal, "", 0)
+						return
+					}
 					found = true
-					db.Exec(`DELETE FROM reactions WHERE reaction_id = ?`, msg.ReactionID)
 					break
 				}
 			}
@@ -1502,6 +1559,9 @@ func (s *Server) handlePin(c *Client, raw json.RawMessage) {
 
 	var msg protocol.Pin
 	if err := json.Unmarshal(raw, &msg); err != nil {
+		// Phase 17c Step 3: silent-drop fixed.
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "pin", "malformed pin frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed pin"})
 		return
 	}
 	if !s.validateCorrIDOrReject(c, "pin", msg.CorrID) {
@@ -1549,6 +1609,9 @@ func (s *Server) handleUnpin(c *Client, raw json.RawMessage) {
 
 	var msg protocol.Unpin
 	if err := json.Unmarshal(raw, &msg); err != nil {
+		// Phase 17c Step 3: silent-drop fixed.
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "unpin", "malformed unpin frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed unpin"})
 		return
 	}
 	if !s.validateCorrIDOrReject(c, "unpin", msg.CorrID) {
@@ -1698,6 +1761,9 @@ func (s *Server) handleCreateGroup(c *Client, raw json.RawMessage) {
 func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 	var msg protocol.Delete
 	if err := json.Unmarshal(raw, &msg); err != nil {
+		// Phase 17c Step 3: silent-drop fixed.
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "delete", "malformed delete frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed delete"})
 		return
 	}
 	if !s.validateCorrIDOrReject(c, "delete", msg.CorrID) {
@@ -2024,6 +2090,9 @@ func (s *Server) cleanupFiles(fileIDs []string) {
 func (s *Server) handleLeaveGroup(c *Client, raw json.RawMessage) {
 	var msg protocol.LeaveGroup
 	if err := json.Unmarshal(raw, &msg); err != nil {
+		// Phase 17c Step 3: silent-drop fixed.
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "leave_group", "malformed leave_group frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed leave_group"})
 		return
 	}
 
@@ -2209,6 +2278,9 @@ func (s *Server) performGroupLeave(groupID, userID, reason, by, initiatedBy stri
 func (s *Server) handleDeleteGroup(c *Client, raw json.RawMessage) {
 	var msg protocol.DeleteGroup
 	if err := json.Unmarshal(raw, &msg); err != nil {
+		// Phase 17c Step 3: silent-drop fixed.
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "delete_group", "malformed delete_group frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed delete_group"})
 		return
 	}
 
@@ -2357,6 +2429,9 @@ func (s *Server) handleDeleteGroup(c *Client, raw json.RawMessage) {
 func (s *Server) handleLeaveRoom(c *Client, raw json.RawMessage) {
 	var msg protocol.LeaveRoom
 	if err := json.Unmarshal(raw, &msg); err != nil {
+		// Phase 17c Step 3: silent-drop fixed.
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "leave_room", "malformed leave_room frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed leave_room"})
 		return
 	}
 
@@ -2544,6 +2619,9 @@ func (s *Server) performRoomLeave(roomID, userID, reason, initiatedBy string) {
 func (s *Server) handleDeleteRoom(c *Client, raw json.RawMessage) {
 	var msg protocol.DeleteRoom
 	if err := json.Unmarshal(raw, &msg); err != nil {
+		// Phase 17c Step 3: silent-drop fixed.
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "delete_room", "malformed delete_room frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed delete_room"})
 		return
 	}
 
@@ -2687,6 +2765,9 @@ func (s *Server) handleDeleteRoom(c *Client, raw json.RawMessage) {
 func (s *Server) handleRenameGroup(c *Client, raw json.RawMessage) {
 	var msg protocol.RenameGroup
 	if err := json.Unmarshal(raw, &msg); err != nil {
+		// Phase 17c Step 3: silent-drop fixed.
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "rename_group", "malformed rename_group frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed rename_group"})
 		return
 	}
 
@@ -2955,6 +3036,9 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 func (s *Server) handleLeaveDM(c *Client, raw json.RawMessage) {
 	var msg protocol.LeaveDM
 	if err := json.Unmarshal(raw, &msg); err != nil {
+		// Phase 17c Step 3: silent-drop fixed.
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "leave_dm", "malformed leave_dm frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed leave_dm"})
 		return
 	}
 
@@ -3064,6 +3148,9 @@ func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
 
 	var msg protocol.SetProfile
 	if err := json.Unmarshal(raw, &msg); err != nil {
+		// Phase 17c Step 3: silent-drop fixed.
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "set_profile", "malformed set_profile frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed set_profile"})
 		return
 	}
 
@@ -3142,6 +3229,9 @@ func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
 func (s *Server) handleSetStatus(c *Client, raw json.RawMessage) {
 	var msg protocol.SetStatus
 	if err := json.Unmarshal(raw, &msg); err != nil {
+		// Phase 17c Step 3: silent-drop fixed. Status is broadcast-only
+		// (no client response), counter fires on malformed input.
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "set_status", "malformed set_status frame", nil)
 		return
 	}
 

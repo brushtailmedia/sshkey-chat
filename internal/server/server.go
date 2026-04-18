@@ -129,6 +129,17 @@ type Server struct {
 	// processors: this one WRITES into an existing queue rather
 	// than draining a dedicated one. Phase 17b.
 	autoRevokeStop chan struct{}
+
+	// stateFixMu guards stateFixLast.
+	stateFixMu sync.Mutex
+
+	// stateFixLast (Phase 17c Step 4 Category B) tracks the last
+	// state-fix push time per (deviceID, verb) key. Prevents a
+	// client from DoS'ing the server via invalid_epoch spam that
+	// would elicit a fresh epoch_key push on every error. 1s TTL:
+	// repeated pushes within 1s are no-ops; the client's retry
+	// logic applies the previous push.
+	stateFixLast map[string]int64
 }
 
 // roomRetirementPollInterval is how often the room retirement
@@ -162,6 +173,7 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		deviceRevocationStop: make(chan struct{}),
 		removeFromRoomStop:   make(chan struct{}),
 		autoRevokeStop:       make(chan struct{}),
+		stateFixLast:         make(map[string]int64),
 	}
 
 	// Phase 17b Step 4: propagate prune_after_hours from config to

@@ -779,7 +779,30 @@ func (s *Server) handleBinaryChannel(userID string, ch ssh.Channel) {
 		// startup sweep reconciles; no intermediate state is queryable
 		// in a way that matters for correctness or security.
 		if s.store != nil {
-			s.store.StoreFileHash(pending.fileID, pending.contentHash, int64(size))
+			// Phase 17c Step 4 bug #1 fix: StoreFileHash failure must
+			// abort the upload — without a hash row, future downloads
+			// GetFileHash returns no rows and the file is unreachable.
+			// Broadcasting upload_complete on hash-missing is the
+			// lie this fix closes.
+			if err := s.store.StoreFileHash(pending.fileID, pending.contentHash, int64(size)); err != nil {
+				s.logger.Error("failed to store file hash",
+					"file_id", pending.fileID, "error", err)
+				s.failUpload(uploadID, filePath)
+				// Notify the originating client via upload_error.
+				s.mu.RLock()
+				var errTargets []*Client
+				for _, client := range s.clients {
+					if client.UserID == userID {
+						errTargets = []*Client{client}
+						break
+					}
+				}
+				s.mu.RUnlock()
+				if len(errTargets) > 0 {
+					s.respondUploadError(errTargets[0], "", uploadID, protocol.CodeInternal, "upload failed — please retry", 0)
+				}
+				continue
+			}
 
 			var ctxType, ctxID string
 			switch {

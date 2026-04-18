@@ -311,12 +311,19 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 		}
 	}
 
-	// Store wrapped keys for all members
-	for userID, wrappedKey := range msg.WrappedKeys {
-		if err := s.store.StoreEpochKey(msg.Room, msg.Epoch, userID, wrappedKey); err != nil {
-			s.logger.Error("failed to store epoch key",
-				"room", msg.Room, "epoch", msg.Epoch, "user", userID, "error", err)
-		}
+	// Store wrapped keys for all members. Phase 17c Step 4 bug #3
+	// fix: pre-17c looped StoreEpochKey per-member with logged-but-
+	// ignored errors, which could leave partial state if the DB
+	// failed mid-batch. StoreEpochKeysBatch wraps the whole set in
+	// one transaction — either all keys land or the rotation aborts
+	// with internal_error, preserving the invariant that every
+	// confirmed rotation has keys for every member.
+	if err := s.store.StoreEpochKeysBatch(msg.Room, msg.Epoch, msg.WrappedKeys); err != nil {
+		s.logger.Error("failed to store epoch keys batch",
+			"room", msg.Room, "epoch", msg.Epoch, "members", len(msg.WrappedKeys), "error", err)
+		s.epochs.cancelRotation(msg.Room)
+		s.respondError(c, "", protocol.CodeInternal, "", 0)
+		return
 	}
 
 	// Complete the rotation

@@ -130,6 +130,15 @@ func (s *Store) Close() error {
 	return firstErr
 }
 
+// ExecRaw runs a raw SQL statement against the primary data DB.
+// Intended for test-harness use (schema manipulation for
+// failure-injection tests in Phase 17c Step 4). Production callers
+// should use one of the operation-specific methods instead.
+func (s *Store) ExecRaw(sql string, args ...any) error {
+	_, err := s.dataDB.Exec(sql, args...)
+	return err
+}
+
 // StoreFileHash saves the content hash for a file_id.
 func (s *Store) StoreFileHash(fileID, contentHash string, size int64) error {
 	_, err := s.dataDB.Exec(`
