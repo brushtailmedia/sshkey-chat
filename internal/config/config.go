@@ -146,6 +146,20 @@ type RateLimitsSection struct {
 	DMCreatesPerMinute   int `toml:"dm_creates_per_minute"`
 	ProfilesPerMinute    int `toml:"profiles_per_minute"`
 	PinsPerMinute        int `toml:"pins_per_minute"`
+	// Phase 17 Step 5: rate-limit coverage for 4 previously-unlimited
+	// handlers.
+	// RoomMembersPerMinute bounds info-panel room_members refreshes.
+	// Default 6 (one per 10s) matches refresh-UX cadence; mashing
+	// refresh is rate-limited.
+	RoomMembersPerMinute int `toml:"room_members_per_minute"`
+	// DeviceListPerMinute bounds settings-panel device_list refreshes.
+	// Same 6/min default rationale as RoomMembersPerMinute.
+	DeviceListPerMinute int `toml:"device_list_per_minute"`
+	// DownloadRequestsPerMinute bounds per-user download verbs.
+	// Default 60/min (1/sec) — higher than other refresh verbs
+	// because attachment-heavy chat views legitimately fire many
+	// requests when opened.
+	DownloadRequestsPerMinute int `toml:"download_requests_per_minute"`
 	// AdminActionsPerMinute caps the rate at which a single user can issue
 	// in-group admin verbs (add_to_group, remove_from_group, promote_group_admin,
 	// demote_group_admin, rename_group) against a single group. Scoped per
@@ -248,6 +262,10 @@ func DefaultServerConfig() ServerConfig {
 			PinsPerMinute:          10,
 			AdminActionsPerMinute:  20, // Phase 14: per user per group
 			EditsPerMinute:         10, // Phase 15: shared bucket per user across edit/edit_group/edit_dm
+			// Phase 17 Step 5: new rate-limit coverage
+			RoomMembersPerMinute:      6,  // info-panel refresh cadence
+			DeviceListPerMinute:       6,  // settings-panel refresh cadence
+			DownloadRequestsPerMinute: 60, // attachment-heavy chat tolerance
 		},
 		Shutdown: ShutdownSection{
 			GracePeriod: "10s",

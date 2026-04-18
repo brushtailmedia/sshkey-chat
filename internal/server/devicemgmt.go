@@ -11,6 +11,16 @@ import (
 // authenticated user. Revocation status is included so the UI can render
 // previously-revoked devices separately.
 func (s *Server) handleListDevices(c *Client, raw json.RawMessage) {
+	// Phase 17 Step 5: rate-limit refresh cadence. Default 6/min
+	// (one per 10s) — settings-panel open is the legitimate use,
+	// mashing refresh is rate-limited.
+	if !s.limiter.allowPerMinute("list_devices:"+c.UserID, s.cfg.Server.RateLimits.DeviceListPerMinute) {
+		s.rejectAndLog(c, counters.SignalRateLimited, "list_devices",
+			"list_devices rate limit exceeded", nil)
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many device list requests — wait a moment"})
+		return
+	}
+
 	if s.store == nil {
 		c.Encoder.Encode(protocol.Error{
 			Type:    "error",

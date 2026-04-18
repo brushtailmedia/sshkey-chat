@@ -534,6 +534,17 @@ func (s *Server) authorizeDownload(userID, fileID string) bool {
 // distinguish "the file exists but you can't read it" from "the file
 // doesn't exist" from "you haven't opened a download channel".
 func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
+	// Phase 17 Step 5: rate-limit per-user download verbs. Default
+	// 60/min (1/sec) is higher than other refresh verbs because
+	// attachment-heavy chat views (photo gallery, multi-image threads)
+	// legitimately fire bursts of download requests when opened.
+	if !s.limiter.allowPerMinute("download:"+c.UserID, s.cfg.Server.RateLimits.DownloadRequestsPerMinute) {
+		s.rejectAndLog(c, counters.SignalRateLimited, "download",
+			"download rate limit exceeded", nil)
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many download requests — wait a moment"})
+		return
+	}
+
 	var msg protocol.Download
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		s.rejectAndLog(c, counters.SignalMalformedFrame, "download", "malformed download frame",
@@ -546,9 +557,14 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 
 	// Path-traversal defense: file_id flows into filepath.Join below.
 	// Strict nanoid shape check catches "../../etc/passwd" and other
-	// filesystem-escape attempts at the wire boundary.
+	// filesystem-escape attempts at the wire boundary. Phase 17 Step 5
+	// amendment: route through rejectAndLog (was direct counters.Inc,
+	// legacy from Step 4.f) for the structured Warn log. Wire response
+	// is a DownloadError (not the generic Error that rejectAndLog's
+	// clientErr param encodes), so we pass nil and Encode separately.
 	if err := store.ValidateNanoID(msg.FileID, "file_"); err != nil {
-		s.counters.Inc(counters.SignalInvalidNanoID, c.DeviceID)
+		s.rejectAndLog(c, counters.SignalInvalidNanoID, "download",
+			fmt.Sprintf("invalid file_id: %v", err), nil)
 		c.Encoder.Encode(protocol.DownloadError{
 			Type:    "download_error",
 			FileID:  msg.FileID,

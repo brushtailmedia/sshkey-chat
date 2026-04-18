@@ -1344,6 +1344,18 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 
 // handleUnreact processes a reaction removal.
 func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
+	// Phase 17 Step 5: share the ReactionsPerMinute bucket with
+	// handleReact via the same "react:" key — react + unreact are
+	// mirror operations; a user legitimately can't need 30 react
+	// PLUS 30 unreact per minute, so one shared pool is the right
+	// shape.
+	if !s.limiter.allowPerMinute("react:"+c.UserID, s.cfg.Server.RateLimits.ReactionsPerMinute) {
+		s.rejectAndLog(c, counters.SignalRateLimited, "unreact",
+			"react/unreact rate limit exceeded (shared bucket)", nil)
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many reactions — wait a moment"})
+		return
+	}
+
 	var msg protocol.Unreact
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
@@ -3351,13 +3363,31 @@ func (s *Server) handleListPendingKeys(c *Client) {
 }
 
 func (s *Server) handleRoomMembers(c *Client, raw json.RawMessage) {
+	// Phase 17 Step 5: rate-limit refresh cadence. Default 6/min
+	// (one per 10s) — legitimate info-panel refresh is slow.
+	if !s.limiter.allowPerMinute("room_members:"+c.UserID, s.cfg.Server.RateLimits.RoomMembersPerMinute) {
+		s.rejectAndLog(c, counters.SignalRateLimited, "room_members",
+			"room_members rate limit exceeded", nil)
+		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many room_members requests — wait a moment"})
+		return
+	}
+
 	var req protocol.RoomMembers
 	if err := json.Unmarshal(raw, &req); err != nil || req.Room == "" {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUnknownRoom,
-			Message: "Invalid room_members request",
-		})
+		// Phase 17 Step 5 amendment: the malformed-parse + empty-room
+		// path uses Phase 14's byte-identical privacy code
+		// (ErrUnknownRoom), but it's still a protocol violation.
+		// Fire SignalMalformedFrame so Phase 17b sees it — preserves
+		// wire response while gaining the counter signal. This path
+		// was missed by Phase 17 Step 4c's JSON-parse sweep because
+		// it uses ErrUnknownRoom instead of "invalid_message".
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "room_members",
+			"malformed room_members frame or empty room",
+			&protocol.Error{
+				Type:    "error",
+				Code:    protocol.ErrUnknownRoom,
+				Message: "Invalid room_members request",
+			})
 		return
 	}
 
