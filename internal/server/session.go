@@ -866,7 +866,7 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 		// >16KB per message.
 		s.rejectAndLog(c, counters.SignalOversizedBody, "send",
 			fmt.Sprintf("raw=%d bytes exceeds maxPayloadBytes=%d", len(raw), maxPayloadBytes), nil)
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrMessageTooLarge, Message: "Message exceeds 16KB limit"})
+		s.respondError(c, "", protocol.ErrMessageTooLarge, "Message exceeds 16KB limit", 0)
 		return
 	}
 
@@ -874,6 +874,9 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		s.rejectAndLog(c, counters.SignalMalformedFrame, "send", "malformed send frame",
 			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed send"})
+		return
+	}
+	if !s.validateCorrIDOrReject(c, "send", msg.CorrID) {
 		return
 	}
 
@@ -886,11 +889,7 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 	// no room ID embedded in the wire response.
 	inRoom := s.store != nil && s.store.IsRoomMemberByID(msg.Room, c.UserID)
 	if !inRoom {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUnknownRoom,
-			Message: "You are not a member of this room",
-		})
+		s.respondError(c, msg.CorrID, protocol.ErrUnknownRoom, "You are not a member of this room", 0)
 		return
 	}
 
@@ -901,11 +900,7 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 	// retirement broadcast already told them), so revealing it via this
 	// rejection is not a probing vector.
 	if s.store.IsRoomRetired(msg.Room) {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrRoomRetired,
-			Message: "This room has been archived and is read-only",
-		})
+		s.respondError(c, msg.CorrID, protocol.ErrRoomRetired, "This room has been archived and is read-only", 0)
 		return
 	}
 
@@ -916,21 +911,13 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 	if currentEpoch > 0 {
 		// Reject epochs older than the grace window (current - 1)
 		if msg.Epoch < currentEpoch-1 {
-			c.Encoder.Encode(protocol.Error{
-				Type:    "error",
-				Code:    protocol.ErrInvalidEpoch,
-				Message: "Epoch too old (outside two-epoch grace window)",
-			})
+			s.respondError(c, msg.CorrID, protocol.ErrInvalidEpoch, "Epoch too old (outside two-epoch grace window)", 0)
 			return
 		}
 		// Reject epochs beyond what's been confirmed and distributed.
 		// Prevents a client from sending with a pending key that might get rejected.
 		if confirmedEpoch > 0 && msg.Epoch > confirmedEpoch {
-			c.Encoder.Encode(protocol.Error{
-				Type:    "error",
-				Code:    protocol.ErrInvalidEpoch,
-				Message: "Epoch not yet confirmed. Wait for epoch_confirmed before sending.",
-			})
+			s.respondError(c, msg.CorrID, protocol.ErrInvalidEpoch, "Epoch not yet confirmed. Wait for epoch_confirmed before sending.", 0)
 			return
 		}
 	}
@@ -1001,7 +988,7 @@ func (s *Server) handleSendGroup(c *Client, raw json.RawMessage) {
 		// >16KB per message.
 		s.rejectAndLog(c, counters.SignalOversizedBody, "send_group",
 			fmt.Sprintf("raw=%d bytes exceeds maxPayloadBytes=%d", len(raw), maxPayloadBytes), nil)
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrMessageTooLarge, Message: "Message exceeds 16KB limit"})
+		s.respondError(c, "", protocol.ErrMessageTooLarge, "Message exceeds 16KB limit", 0)
 		return
 	}
 
@@ -1009,6 +996,9 @@ func (s *Server) handleSendGroup(c *Client, raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		s.rejectAndLog(c, counters.SignalMalformedFrame, "send_group", "malformed send_group frame",
 			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed send_group"})
+		return
+	}
+	if !s.validateCorrIDOrReject(c, "send_group", msg.CorrID) {
 		return
 	}
 
@@ -1028,11 +1018,7 @@ func (s *Server) handleSendGroup(c *Client, raw json.RawMessage) {
 	if s.store != nil {
 		isMember, err := s.store.IsGroupMember(msg.Group, c.UserID)
 		if err != nil || !isMember {
-			c.Encoder.Encode(protocol.Error{
-				Type:    "error",
-				Code:    protocol.ErrUnknownGroup,
-				Message: "You are not a member of this group",
-			})
+			s.respondError(c, msg.CorrID, protocol.ErrUnknownGroup, "You are not a member of this group", 0)
 			return
 		}
 
@@ -1048,20 +1034,12 @@ func (s *Server) handleSendGroup(c *Client, raw json.RawMessage) {
 				wrappedSet[k] = true
 			}
 			if len(memberSet) != len(wrappedSet) {
-				c.Encoder.Encode(protocol.Error{
-					Type:    "error",
-					Code:    protocol.ErrInvalidWrappedKeys,
-					Message: "wrapped_keys must match group member list",
-				})
+				s.respondError(c, msg.CorrID, protocol.ErrInvalidWrappedKeys, "wrapped_keys must match group member list", 0)
 				return
 			}
 			for m := range memberSet {
 				if !wrappedSet[m] {
-					c.Encoder.Encode(protocol.Error{
-						Type:    "error",
-						Code:    protocol.ErrInvalidWrappedKeys,
-						Message: "wrapped_keys must match group member list",
-					})
+					s.respondError(c, msg.CorrID, protocol.ErrInvalidWrappedKeys, "wrapped_keys must match group member list", 0)
 					return
 				}
 			}
@@ -1244,6 +1222,9 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed react"})
 		return
 	}
+	if !s.validateCorrIDOrReject(c, "react", msg.CorrID) {
+		return
+	}
 
 	// Phase 17 Step 4c: wrapped_keys envelope cap. Room-context reacts
 	// carry no wrapped_keys (epoch key shared across members) so the
@@ -1262,19 +1243,11 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 	// verification paths inside the store layer.
 	if msg.Room != "" && s.store != nil {
 		if !s.store.IsRoomMemberByID(msg.Room, c.UserID) {
-			c.Encoder.Encode(protocol.Error{
-				Type:    "error",
-				Code:    protocol.ErrUnknownRoom,
-				Message: "You are not a member of this room",
-			})
+			s.respondError(c, msg.CorrID, protocol.ErrUnknownRoom, "You are not a member of this room", 0)
 			return
 		}
 		if s.store.IsRoomRetired(msg.Room) {
-			c.Encoder.Encode(protocol.Error{
-				Type:    "error",
-				Code:    protocol.ErrRoomRetired,
-				Message: "This room has been archived and is read-only",
-			})
+			s.respondError(c, msg.CorrID, protocol.ErrRoomRetired, "This room has been archived and is read-only", 0)
 			return
 		}
 	}
@@ -1404,6 +1377,9 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
 	}
+	if !s.validateCorrIDOrReject(c, "unreact", msg.CorrID) {
+		return
+	}
 
 	// Look up the reaction to find its target and room/conversation
 	if s.store == nil {
@@ -1528,6 +1504,9 @@ func (s *Server) handlePin(c *Client, raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
 	}
+	if !s.validateCorrIDOrReject(c, "pin", msg.CorrID) {
+		return
+	}
 
 	// Verify membership (byte-identical privacy) and reject writes to
 	// retired rooms. Ordered so non-members get ErrUnknownRoom and
@@ -1537,19 +1516,11 @@ func (s *Server) handlePin(c *Client, raw json.RawMessage) {
 		return
 	}
 	if !s.store.IsRoomMemberByID(msg.Room, c.UserID) {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUnknownRoom,
-			Message: "You are not a member of this room",
-		})
+		s.respondError(c, msg.CorrID, protocol.ErrUnknownRoom, "You are not a member of this room", 0)
 		return
 	}
 	if s.store.IsRoomRetired(msg.Room) {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrRoomRetired,
-			Message: "This room has been archived and is read-only",
-		})
+		s.respondError(c, msg.CorrID, protocol.ErrRoomRetired, "This room has been archived and is read-only", 0)
 		return
 	}
 
@@ -1580,6 +1551,9 @@ func (s *Server) handleUnpin(c *Client, raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
 	}
+	if !s.validateCorrIDOrReject(c, "unpin", msg.CorrID) {
+		return
+	}
 
 	// Verify membership (byte-identical privacy) and reject writes to
 	// retired rooms. Same pattern as handlePin.
@@ -1587,19 +1561,11 @@ func (s *Server) handleUnpin(c *Client, raw json.RawMessage) {
 		return
 	}
 	if !s.store.IsRoomMemberByID(msg.Room, c.UserID) {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUnknownRoom,
-			Message: "You are not a member of this room",
-		})
+		s.respondError(c, msg.CorrID, protocol.ErrUnknownRoom, "You are not a member of this room", 0)
 		return
 	}
 	if s.store.IsRoomRetired(msg.Room) {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrRoomRetired,
-			Message: "This room has been archived and is read-only",
-		})
+		s.respondError(c, msg.CorrID, protocol.ErrRoomRetired, "This room has been archived and is read-only", 0)
 		return
 	}
 
@@ -1649,11 +1615,8 @@ func (s *Server) handleCreateGroup(c *Client, raw json.RawMessage) {
 
 	// Reject if any proposed member is retired
 	if retired := s.findRetiredMember(msg.Members); retired != "" {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUserRetired,
-			Message: fmt.Sprintf("Cannot create group — %s's account has been retired", retired),
-		})
+		s.respondError(c, "", protocol.ErrUserRetired,
+			fmt.Sprintf("Cannot create group — %s's account has been retired", retired), 0)
 		return
 	}
 
@@ -1672,11 +1635,8 @@ func (s *Server) handleCreateGroup(c *Client, raw json.RawMessage) {
 		maxMembers = 150 // defensive fallback if config load elided the section
 	}
 	if len(allMembers) > maxMembers {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    "too_many_members",
-			Message: fmt.Sprintf("Group DMs are limited to %d members. Use a room for larger groups.", maxMembers),
-		})
+		s.respondError(c, "", "too_many_members",
+			fmt.Sprintf("Group DMs are limited to %d members. Use a room for larger groups.", maxMembers), 0)
 		return
 	}
 
@@ -1688,7 +1648,7 @@ func (s *Server) handleCreateGroup(c *Client, raw json.RawMessage) {
 		// inside CreateGroup will pass.
 		if err := s.store.CreateGroup(groupID, c.UserID, allMembers, msg.Name); err != nil {
 			s.logger.Error("failed to create group", "error", err)
-			c.Encoder.Encode(protocol.Error{Type: "error", Code: "internal", Message: "failed to create group"})
+			s.respondError(c, "", protocol.CodeInternal, "failed to create group", 0)
 			return
 		}
 	}
@@ -1740,6 +1700,9 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
 	}
+	if !s.validateCorrIDOrReject(c, "delete", msg.CorrID) {
+		return
+	}
 
 	if s.store == nil {
 		return
@@ -1780,12 +1743,7 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 
 		// Permission check: own messages or admin
 		if sender != c.UserID && !isAdmin {
-			c.Encoder.Encode(protocol.Error{
-				Type:    "error",
-				Code:    protocol.ErrNotAuthorized,
-				Message: "You can only delete your own messages",
-				Ref:     msg.ID,
-			})
+			s.respondErrorRef(c, msg.CorrID, protocol.ErrNotAuthorized, "You can only delete your own messages", msg.ID, 0)
 			return
 		}
 
@@ -1825,12 +1783,7 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 
 		// DMs: own messages only, no admin override
 		if sender != c.UserID {
-			c.Encoder.Encode(protocol.Error{
-				Type:    "error",
-				Code:    protocol.ErrNotAuthorized,
-				Message: "You can only delete your own messages in DMs",
-				Ref:     msg.ID,
-			})
+			s.respondErrorRef(c, msg.CorrID, protocol.ErrNotAuthorized, "You can only delete your own messages in DMs", msg.ID, 0)
 			return
 		}
 
@@ -1870,12 +1823,7 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 
 		// DMs: own messages only, no admin override
 		if sender != c.UserID {
-			c.Encoder.Encode(protocol.Error{
-				Type:    "error",
-				Code:    protocol.ErrNotAuthorized,
-				Message: "You can only delete your own messages in DMs",
-				Ref:     msg.ID,
-			})
+			s.respondErrorRef(c, msg.CorrID, protocol.ErrNotAuthorized, "You can only delete your own messages in DMs", msg.ID, 0)
 			return
 		}
 
@@ -2024,20 +1972,14 @@ func (s *Server) validateFileIDsForContext(c *Client, fileIDs []string, expected
 		if err != nil {
 			s.logger.Error("file_context lookup failed on send",
 				"file_id", fid, "error", err)
-			c.Encoder.Encode(protocol.Error{
-				Type: "error", Code: "internal",
-				Message: "file lookup failed",
-			})
+			s.respondError(c, "", protocol.CodeInternal, "file lookup failed", 0)
 			return false
 		}
 		if binding == nil || binding.ContextType != expectedType || binding.ContextID != expectedID {
 			// Unknown or wrong-context file_id. Privacy-identical
 			// response regardless of which — don't reveal whether the
 			// file exists or where it's bound.
-			c.Encoder.Encode(protocol.Error{
-				Type: "error", Code: "unknown_file",
-				Message: "file not found or not accessible in this context",
-			})
+			s.respondError(c, "", "unknown_file", "file not found or not accessible in this context", 0)
 			return false
 		}
 	}
@@ -2095,11 +2037,7 @@ func (s *Server) handleLeaveGroup(c *Client, raw json.RawMessage) {
 		// rather than ErrNotAuthorized to align with handleSendGroup.
 		isMember, err := s.store.IsGroupMember(msg.Group, c.UserID)
 		if err != nil || !isMember {
-			c.Encoder.Encode(protocol.Error{
-				Type:    "error",
-				Code:    protocol.ErrUnknownGroup,
-				Message: "You are not a member of this group",
-			})
+			s.respondError(c, "", protocol.ErrUnknownGroup, "You are not a member of this group", 0)
 			return
 		}
 	}
@@ -2116,11 +2054,8 @@ func (s *Server) handleLeaveGroup(c *Client, raw json.RawMessage) {
 		if isAdmin, _ := s.store.IsGroupAdmin(msg.Group, c.UserID); isAdmin {
 			if count, _ := s.store.CountGroupAdmins(msg.Group); count == 1 {
 				if members, _ := s.store.GetGroupMembers(msg.Group); len(members) > 1 {
-					c.Encoder.Encode(protocol.Error{
-						Type:    "error",
-						Code:    protocol.ErrForbidden,
-						Message: "Cannot leave — you are the last admin. Promote another member first, or use /delete to dissolve the group.",
-					})
+					s.respondError(c, "", protocol.ErrForbidden,
+						"Cannot leave — you are the last admin. Promote another member first, or use /delete to dissolve the group.", 0)
 					return
 				}
 			}
@@ -2312,11 +2247,8 @@ func (s *Server) handleDeleteGroup(c *Client, raw json.RawMessage) {
 				// equivalent to "dissolve the group entirely" and the
 				// last-admin rule doesn't apply (nobody to be ungoverned).
 				if members, _ := s.store.GetGroupMembers(msg.Group); len(members) > 1 {
-					c.Encoder.Encode(protocol.Error{
-						Type:    "error",
-						Code:    protocol.ErrForbidden,
-						Message: "Cannot leave — you are the last admin. Promote another member first, or use /delete to dissolve the group.",
-					})
+					s.respondError(c, "", protocol.ErrForbidden,
+						"Cannot leave — you are the last admin. Promote another member first, or use /delete to dissolve the group.", 0)
 					return
 				}
 			}
@@ -2445,11 +2377,7 @@ func (s *Server) handleLeaveRoom(c *Client, raw json.RawMessage) {
 	// fine — a user who is a member of a room already knows they are,
 	// so the disclosure is a no-op.
 	if !s.store.IsRoomMemberByID(msg.Room, c.UserID) {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUnknownRoom,
-			Message: "You are not a member of this room",
-		})
+		s.respondError(c, "", protocol.ErrUnknownRoom, "You are not a member of this room", 0)
 		return
 	}
 
@@ -2472,11 +2400,7 @@ func (s *Server) handleLeaveRoom(c *Client, raw json.RawMessage) {
 	}
 	s.cfg.RUnlock()
 	if !allowed {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrForbidden,
-			Message: "Forbidden — please contact an admin to leave this room",
-		})
+		s.respondError(c, "", protocol.ErrForbidden, "Forbidden — please contact an admin to leave this room", 0)
 		return
 	}
 
@@ -2638,11 +2562,7 @@ func (s *Server) handleDeleteRoom(c *Client, raw json.RawMessage) {
 	// membership (distinct from unknown-room), but the user already
 	// knows they're a member, so the disclosure is a no-op.
 	if !s.store.IsRoomMemberByID(msg.Room, c.UserID) {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUnknownRoom,
-			Message: "You are not a member of this room",
-		})
+		s.respondError(c, "", protocol.ErrUnknownRoom, "You are not a member of this room", 0)
 		return
 	}
 
@@ -2659,11 +2579,7 @@ func (s *Server) handleDeleteRoom(c *Client, raw json.RawMessage) {
 	}
 	s.cfg.RUnlock()
 	if !allowed {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrForbidden,
-			Message: "Forbidden — please contact an admin to delete this room",
-		})
+		s.respondError(c, "", protocol.ErrForbidden, "Forbidden — please contact an admin to delete this room", 0)
 		return
 	}
 
@@ -2783,7 +2699,7 @@ func (s *Server) handleRenameGroup(c *Client, raw json.RawMessage) {
 
 	if err := s.store.RenameGroup(msg.Group, msg.Name); err != nil {
 		s.logger.Error("failed to rename group", "group", msg.Group, "error", err)
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "internal", Message: "failed to rename group"})
+		s.respondError(c, "", protocol.CodeInternal, "failed to rename group", 0)
 		return
 	}
 
@@ -2855,11 +2771,8 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 
 	// Reject if the other user is retired
 	if retired := s.findRetiredMember([]string{msg.Other}); retired != "" {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUserRetired,
-			Message: fmt.Sprintf("Cannot create DM — %s's account has been retired", retired),
-		})
+		s.respondError(c, "", protocol.ErrUserRetired,
+			fmt.Sprintf("Cannot create DM — %s's account has been retired", retired), 0)
 		return
 	}
 
@@ -2875,11 +2788,8 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 	// DM the user is reconnecting to. Holding the lock across the create
 	// guarantees we never dedup to a row that is about to be deleted.
 	if !s.dmCleanupMu.TryLock() {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrServerBusy,
-			Message: "Server is processing another DM operation, please try again",
-		})
+		s.respondError(c, "", protocol.ErrServerBusy,
+			"Server is processing another DM operation, please try again", 0)
 		return
 	}
 	defer s.dmCleanupMu.Unlock()
@@ -2888,7 +2798,7 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 	dm, err := s.store.CreateOrGetDirectMessage(dmID, c.UserID, msg.Other)
 	if err != nil {
 		s.logger.Error("failed to create DM", "error", err)
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "internal", Message: "failed to create DM"})
+		s.respondError(c, "", protocol.CodeInternal, "failed to create DM", 0)
 		return
 	}
 
@@ -2927,7 +2837,7 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 		// >16KB per message.
 		s.rejectAndLog(c, counters.SignalOversizedBody, "send_dm",
 			fmt.Sprintf("raw=%d bytes exceeds maxPayloadBytes=%d", len(raw), maxPayloadBytes), nil)
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrMessageTooLarge, Message: "Message exceeds 16KB limit"})
+		s.respondError(c, "", protocol.ErrMessageTooLarge, "Message exceeds 16KB limit", 0)
 		return
 	}
 
@@ -2935,6 +2845,9 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		s.rejectAndLog(c, counters.SignalMalformedFrame, "send_dm", "malformed send_dm frame",
 			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed send_dm"})
+		return
+	}
+	if !s.validateCorrIDOrReject(c, "send_dm", msg.CorrID) {
 		return
 	}
 
@@ -2961,40 +2874,30 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 	// Validate DM exists and caller is a party
 	dm, err := s.store.GetDirectMessage(msg.DM)
 	if err != nil || dm == nil || (dm.UserA != c.UserID && dm.UserB != c.UserID) {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUnknownDM,
-			Message: "You are not a party to this DM",
-		})
+		s.respondError(c, msg.CorrID, protocol.ErrUnknownDM, "You are not a party to this DM", 0)
 		return
 	}
 
 	// Reject sends to a retired recipient
 	other := dm.OtherUser(c.UserID)
 	if s.store.IsUserRetired(other) {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUserRetired,
-			Message: fmt.Sprintf("Cannot send — %s's account has been retired", other),
-		})
+		s.respondError(c, msg.CorrID, protocol.ErrUserRetired,
+			fmt.Sprintf("Cannot send — %s's account has been retired", other), 0)
 		return
 	}
 
 	// Validate wrapped_keys has exactly 2 entries matching the pair
 	if len(msg.WrappedKeys) != 2 {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrInvalidWrappedKeys,
-			Message: "wrapped_keys must have exactly 2 entries for a 1:1 DM",
-		})
+		s.respondError(c, msg.CorrID, protocol.ErrInvalidWrappedKeys,
+			"wrapped_keys must have exactly 2 entries for a 1:1 DM", 0)
 		return
 	}
 	if _, ok := msg.WrappedKeys[dm.UserA]; !ok {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrInvalidWrappedKeys, Message: "wrapped_keys must include both DM members"})
+		s.respondError(c, msg.CorrID, protocol.ErrInvalidWrappedKeys, "wrapped_keys must include both DM members", 0)
 		return
 	}
 	if _, ok := msg.WrappedKeys[dm.UserB]; !ok {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrInvalidWrappedKeys, Message: "wrapped_keys must include both DM members"})
+		s.respondError(c, msg.CorrID, protocol.ErrInvalidWrappedKeys, "wrapped_keys must include both DM members", 0)
 		return
 	}
 
@@ -3069,11 +2972,7 @@ func (s *Server) handleLeaveDM(c *Client, raw json.RawMessage) {
 		if err != nil {
 			s.logger.Error("failed to load DM", "user", c.UserID, "dm", msg.DM, "error", err)
 		}
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUnknownDM,
-			Message: "You are not a party to this DM",
-		})
+		s.respondError(c, "", protocol.ErrUnknownDM, "You are not a party to this DM", 0)
 		return
 	}
 
@@ -3081,11 +2980,7 @@ func (s *Server) handleLeaveDM(c *Client, raw json.RawMessage) {
 		// Reaching this branch requires having already passed the membership
 		// gate above, so a more specific error here does not leak existence.
 		s.logger.Error("failed to leave DM", "user", c.UserID, "dm", msg.DM, "error", err)
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUnknownDM,
-			Message: "Failed to leave DM",
-		})
+		s.respondError(c, "", protocol.ErrUnknownDM, "Failed to leave DM", 0)
 		return
 	}
 
@@ -3175,11 +3070,7 @@ func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
 	// Validate display name (trim, length, printable characters)
 	cleaned, err := config.ValidateDisplayName(msg.DisplayName)
 	if err != nil {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    "invalid_profile",
-			Message: err.Error(),
-		})
+		s.respondError(c, "", "invalid_profile", err.Error(), 0)
 		return
 	}
 	msg.DisplayName = cleaned
@@ -3194,22 +3085,15 @@ func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
 		if err := store.ValidateNanoID(msg.AvatarID, "file_"); err != nil {
 			s.rejectAndLog(c, counters.SignalInvalidNanoID, "set_profile",
 				fmt.Sprintf("invalid avatar_id: %v", err), nil)
-			c.Encoder.Encode(protocol.Error{
-				Type:    "error",
-				Code:    "invalid_profile",
-				Message: "invalid avatar_id",
-			})
+			s.respondError(c, "", "invalid_profile", "invalid avatar_id", 0)
 			return
 		}
 	}
 
 	// Check for duplicate display name across all users (case-insensitive)
 	if s.store.IsDisplayNameTaken(msg.DisplayName, c.UserID) {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    "username_taken",
-			Message: fmt.Sprintf("Display name %q is already in use", msg.DisplayName),
-		})
+		s.respondError(c, "", "username_taken",
+			fmt.Sprintf("Display name %q is already in use", msg.DisplayName), 0)
 		return
 	}
 
@@ -3382,11 +3266,7 @@ func (s *Server) broadcastToGroupExcept(groupID, excludeDevice string, msg any) 
 // Admin-only — non-admin clients receive an error.
 func (s *Server) handleListPendingKeys(c *Client) {
 	if !s.store.IsAdmin(c.UserID) {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrNotAuthorized,
-			Message: "Only admins can list pending keys",
-		})
+		s.respondError(c, "", protocol.ErrNotAuthorized, "Only admins can list pending keys", 0)
 		return
 	}
 
@@ -3440,14 +3320,14 @@ func (s *Server) handleRoomMembers(c *Client, raw json.RawMessage) {
 			})
 		return
 	}
+	if !s.validateCorrIDOrReject(c, "room_members", req.CorrID) {
+		return
+	}
 
 	// Check membership via rooms.db (req.Room is a nanoid)
 	if s.store == nil || !s.store.IsRoomMemberByID(req.Room, c.UserID) {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrNotAuthorized,
-			Message: "You are not a member of room: " + req.Room,
-		})
+		s.respondError(c, req.CorrID, protocol.ErrNotAuthorized,
+			"You are not a member of room: "+req.Room, 0)
 		return
 	}
 

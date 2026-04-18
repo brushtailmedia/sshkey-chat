@@ -232,6 +232,9 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed upload_start"})
 		return
 	}
+	if !s.validateCorrIDOrReject(c, "upload_start", msg.CorrID) {
+		return
+	}
 
 	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("upload:"+c.UserID, s.cfg.Server.RateLimits.UploadsPerMinute); !allowed {
 		// Phase 17 Step 4c Part 3 + Step 6: count the rejection AND
@@ -241,13 +244,7 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 		// this during bursty catchup).
 		s.rejectAndLog(c, counters.SignalRateLimited, "upload_start",
 			"upload rate limit exceeded", nil)
-		c.Encoder.Encode(protocol.UploadError{
-			Type:         "upload_error",
-			UploadID:     msg.UploadID,
-			Code:         protocol.ErrRateLimited,
-			Message:      "Too many uploads — wait a moment",
-			RetryAfterMs: retryMs,
-		})
+		s.respondUploadError(c, msg.CorrID, msg.UploadID, protocol.ErrRateLimited, "Too many uploads — wait a moment", retryMs)
 		return
 	}
 
@@ -260,11 +257,9 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 	if err := store.ValidateNanoID(msg.UploadID, "up_"); err != nil {
 		s.rejectAndLog(c, counters.SignalInvalidNanoID, "upload_start",
 			fmt.Sprintf("invalid upload_id: %v", err), nil)
-		c.Encoder.Encode(protocol.UploadError{
-			Type:    "upload_error",
-			Code:    "invalid_upload_id",
-			Message: "invalid upload_id",
-		})
+		// Do NOT echo the malformed upload_id — avoids log-injection via
+		// buggy clients shipping control characters.
+		s.respondUploadError(c, msg.CorrID, "", "invalid_upload_id", "invalid upload_id", 0)
 		return
 	}
 
@@ -285,12 +280,8 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 		// threshold on sustained rate.
 		s.rejectAndLog(c, counters.SignalOversizedBody, "upload_start",
 			fmt.Sprintf("declared size=%d exceeds max=%d", msg.Size, maxSize), nil)
-		c.Encoder.Encode(protocol.UploadError{
-			Type:     "upload_error",
-			UploadID: msg.UploadID,
-			Code:     protocol.ErrUploadTooLarge,
-			Message:  fmt.Sprintf("File exceeds maximum size (%d bytes)", maxSize),
-		})
+		s.respondUploadError(c, msg.CorrID, msg.UploadID, protocol.ErrUploadTooLarge,
+			fmt.Sprintf("File exceeds maximum size (%d bytes)", maxSize), 0)
 		return
 	}
 
@@ -301,12 +292,7 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 		// can threshold on sustained rate.
 		s.rejectAndLog(c, counters.SignalMalformedFrame, "upload_start",
 			"missing required content_hash field", nil)
-		c.Encoder.Encode(protocol.UploadError{
-			Type:     "upload_error",
-			UploadID: msg.UploadID,
-			Code:     "missing_hash",
-			Message:  "content_hash is required",
-		})
+		s.respondUploadError(c, msg.CorrID, msg.UploadID, "missing_hash", "content_hash is required", 0)
 		return
 	}
 
@@ -319,12 +305,8 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 	if !validContentHash(msg.ContentHash) {
 		s.rejectAndLog(c, counters.SignalInvalidContentHash, "upload_start",
 			"content_hash fails blake2b-256:<hex64> format", nil)
-		c.Encoder.Encode(protocol.UploadError{
-			Type:     "upload_error",
-			UploadID: msg.UploadID,
-			Code:     "invalid_content_hash",
-			Message:  "content_hash must match blake2b-256:<64 lowercase hex chars>",
-		})
+		s.respondUploadError(c, msg.CorrID, msg.UploadID, "invalid_content_hash",
+			"content_hash must match blake2b-256:<64 lowercase hex chars>", 0)
 		return
 	}
 
@@ -359,22 +341,13 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 		// SignalMalformedFrame fires for Phase 17b observability.
 		s.rejectAndLog(c, counters.SignalMalformedFrame, "upload_start",
 			fmt.Sprintf("contextCount=%d (want exactly 1 of room/group/dm)", contextCount), nil)
-		c.Encoder.Encode(protocol.UploadError{
-			Type:     "upload_error",
-			UploadID: msg.UploadID,
-			Code:     "invalid_context",
-			Message:  "upload_start requires exactly one of room, group, or dm",
-		})
+		s.respondUploadError(c, msg.CorrID, msg.UploadID, "invalid_context",
+			"upload_start requires exactly one of room, group, or dm", 0)
 		return
 	}
 
 	if s.store == nil {
-		c.Encoder.Encode(protocol.UploadError{
-			Type:     "upload_error",
-			UploadID: msg.UploadID,
-			Code:     "internal",
-			Message:  "storage not available",
-		})
+		s.respondUploadError(c, msg.CorrID, msg.UploadID, protocol.CodeInternal, "storage not available", 0)
 		return
 	}
 
@@ -389,12 +362,8 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 		if !s.store.IsRoomMemberByID(msg.Room, c.UserID) {
 			s.rejectAndLog(c, counters.SignalNonMemberContext, "upload_start",
 				fmt.Sprintf("not-a-member of room=%s", msg.Room), nil)
-			c.Encoder.Encode(protocol.UploadError{
-				Type:     "upload_error",
-				UploadID: msg.UploadID,
-				Code:     protocol.ErrUnknownRoom,
-				Message:  "You are not a member of this room",
-			})
+			s.respondUploadError(c, msg.CorrID, msg.UploadID, protocol.ErrUnknownRoom,
+				"You are not a member of this room", 0)
 			return
 		}
 	case msg.Group != "":
@@ -402,12 +371,8 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 		if err != nil || !isMember {
 			s.rejectAndLog(c, counters.SignalNonMemberContext, "upload_start",
 				fmt.Sprintf("not-a-member of group=%s", msg.Group), nil)
-			c.Encoder.Encode(protocol.UploadError{
-				Type:     "upload_error",
-				UploadID: msg.UploadID,
-				Code:     protocol.ErrUnknownGroup,
-				Message:  "You are not a member of this group",
-			})
+			s.respondUploadError(c, msg.CorrID, msg.UploadID, protocol.ErrUnknownGroup,
+				"You are not a member of this group", 0)
 			return
 		}
 	case msg.DM != "":
@@ -415,12 +380,8 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 		if err != nil || dm == nil || (dm.UserA != c.UserID && dm.UserB != c.UserID) {
 			s.rejectAndLog(c, counters.SignalNonMemberContext, "upload_start",
 				fmt.Sprintf("not-a-party of dm=%s", msg.DM), nil)
-			c.Encoder.Encode(protocol.UploadError{
-				Type:     "upload_error",
-				UploadID: msg.UploadID,
-				Code:     protocol.ErrUnknownDM,
-				Message:  "You are not a party to this DM",
-			})
+			s.respondUploadError(c, msg.CorrID, msg.UploadID, protocol.ErrUnknownDM,
+				"You are not a party to this DM", 0)
 			return
 		}
 	}
@@ -555,6 +516,9 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 			})
 		return
 	}
+	if !s.validateCorrIDOrReject(c, "download", msg.CorrID) {
+		return
+	}
 
 	// Path-traversal defense: file_id flows into filepath.Join below.
 	// Strict nanoid shape check catches "../../etc/passwd" and other
@@ -566,12 +530,7 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 	if err := store.ValidateNanoID(msg.FileID, "file_"); err != nil {
 		s.rejectAndLog(c, counters.SignalInvalidNanoID, "download",
 			fmt.Sprintf("invalid file_id: %v", err), nil)
-		c.Encoder.Encode(protocol.DownloadError{
-			Type:    "download_error",
-			FileID:  msg.FileID,
-			Code:    "invalid_file_id",
-			Message: "invalid file_id",
-		})
+		s.respondDownloadError(c, msg.CorrID, msg.FileID, "invalid_file_id", "invalid file_id")
 		return
 	}
 
@@ -587,12 +546,7 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 	if !s.authorizeDownload(c.UserID, msg.FileID) {
 		s.rejectAndLog(c, counters.SignalDownloadNotFound, "download",
 			fmt.Sprintf("ACL deny for file_id=%s", msg.FileID), nil)
-		c.Encoder.Encode(protocol.DownloadError{
-			Type:    "download_error",
-			FileID:  msg.FileID,
-			Code:    "not_found",
-			Message: "File not found: " + msg.FileID,
-		})
+		s.respondDownloadError(c, msg.CorrID, msg.FileID, "not_found", "File not found: "+msg.FileID)
 		return
 	}
 
@@ -609,12 +563,7 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 	if c.DownloadChannel == nil {
 		s.rejectAndLog(c, counters.SignalDownloadNoChannel, "download",
 			fmt.Sprintf("download request without Channel 2 open for file_id=%s", msg.FileID), nil)
-		c.Encoder.Encode(protocol.DownloadError{
-			Type:    "download_error",
-			FileID:  msg.FileID,
-			Code:    "not_found",
-			Message: "File not found: " + msg.FileID,
-		})
+		s.respondDownloadError(c, msg.CorrID, msg.FileID, "not_found", "File not found: "+msg.FileID)
 		return
 	}
 
@@ -627,12 +576,7 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 		// post-launch data tells us if we need to split).
 		s.rejectAndLog(c, counters.SignalDownloadNotFound, "download",
 			fmt.Sprintf("file missing on disk for file_id=%s", msg.FileID), nil)
-		c.Encoder.Encode(protocol.DownloadError{
-			Type:    "download_error",
-			FileID:  msg.FileID,
-			Code:    "not_found",
-			Message: "File not found: " + msg.FileID,
-		})
+		s.respondDownloadError(c, msg.CorrID, msg.FileID, "not_found", "File not found: "+msg.FileID)
 		return
 	}
 
@@ -651,12 +595,7 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 		// `sshkey-ctl approve-device`).
 		s.rejectAndLog(c, counters.SignalDownloadNotFound, "download",
 			fmt.Sprintf("os.Open failed for file_id=%s: %v", msg.FileID, err), nil)
-		c.Encoder.Encode(protocol.DownloadError{
-			Type:    "download_error",
-			FileID:  msg.FileID,
-			Code:    "not_found",
-			Message: "File not found: " + msg.FileID,
-		})
+		s.respondDownloadError(c, msg.CorrID, msg.FileID, "not_found", "File not found: "+msg.FileID)
 		return
 	}
 	defer f.Close()

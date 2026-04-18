@@ -288,11 +288,7 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 	state := s.epochs.rooms[msg.Room]
 	if state == nil || !state.pendingRotation || state.pendingEpoch != msg.Epoch {
 		s.epochs.mu.Unlock()
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrEpochConflict,
-			Message: "Conflict detected — please try again",
-		})
+		s.respondError(c, "", protocol.ErrEpochConflict, "Conflict detected — please try again", 0)
 		return
 	}
 	s.epochs.mu.Unlock()
@@ -308,11 +304,7 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 	for _, m := range currentMembers {
 		if !wrappedSet[m] {
 			s.epochs.cancelRotation(msg.Room)
-			c.Encoder.Encode(protocol.Error{
-				Type:    "error",
-				Code:    protocol.ErrStaleMemberList,
-				Message: "Member list changed during rotation",
-			})
+			s.respondError(c, "", protocol.ErrStaleMemberList, "Member list changed during rotation", 0)
 			// Re-trigger with updated member list
 			s.triggerEpochRotation(c, msg.Room, "stale_member_list_retry")
 			return
@@ -329,11 +321,7 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 
 	// Complete the rotation
 	if !s.epochs.completeRotation(msg.Room, msg.Epoch) {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrEpochConflict,
-			Message: "Conflict detected — please try again",
-		})
+		s.respondError(c, "", protocol.ErrEpochConflict, "Conflict detected — please try again", 0)
 		return
 	}
 

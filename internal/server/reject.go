@@ -198,28 +198,35 @@ func (s *Server) respondError(c *Client, corrID, code, message string, retryAfte
 	if c == nil {
 		return
 	}
-
-	// Per-device error-response rate limit. 0 disables.
-	limit := s.cfg.Server.RateLimits.ErrorResponsesPerMinute
-	if limit > 0 {
-		if allowed, _ := s.limiter.allowPerMinuteWithRetry("errors:"+c.DeviceID, limit); !allowed {
-			// Silent drop: count the rate-limit rejection as a
-			// SignalErrorFlood event so Phase 17b can escalate
-			// cross-connection abusers. NO wire response, no
-			// client-visible log (the drop IS the enforcement).
-			s.counters.Inc(counters.SignalErrorFlood, c.DeviceID)
-			s.logger.Debug("error response silently dropped (rate limit)",
-				"device", c.DeviceID,
-				"code", code,
-			)
-			return
-		}
+	if !s.checkErrorRateLimit(c, code) {
+		return
 	}
-
 	_ = c.Encoder.Encode(protocol.Error{
 		Type:         "error",
 		Code:         code,
 		Message:      message,
+		RetryAfterMs: retryAfterMs,
+		CorrID:       corrID,
+	})
+}
+
+// respondErrorRef is respondError + a Ref field. Used by edit handlers
+// where the client needs to know WHICH message failed (so the pending
+// edit entry in their send queue can be invalidated). Populates
+// protocol.Error.Ref with the message ID; everything else matches
+// respondError's semantics (rate-limit check + safeEncoder emit).
+func (s *Server) respondErrorRef(c *Client, corrID, code, message, ref string, retryAfterMs int64) {
+	if c == nil {
+		return
+	}
+	if !s.checkErrorRateLimit(c, code) {
+		return
+	}
+	_ = c.Encoder.Encode(protocol.Error{
+		Type:         "error",
+		Code:         code,
+		Message:      message,
+		Ref:          ref,
 		RetryAfterMs: retryAfterMs,
 		CorrID:       corrID,
 	})
@@ -238,4 +245,89 @@ func (s *Server) respondError(c *Client, corrID, code, message string, retryAfte
 // uniformly.
 func (s *Server) respondOpaque(c *Client, corrID string) {
 	s.respondError(c, corrID, protocol.CodeDenied, "operation rejected", 0)
+}
+
+// checkErrorRateLimit is the shared gate used by respondError,
+// respondUploadError, and respondDownloadError. Returns true if the
+// error is allowed to go out; false if it was rate-limit-rejected
+// (the caller must silently drop). On rejection, fires
+// SignalErrorFlood so Phase 17b auto-revoke can escalate
+// cross-connection abusers.
+//
+// c must be non-nil.
+func (s *Server) checkErrorRateLimit(c *Client, code string) bool {
+	limit := s.cfg.Server.RateLimits.ErrorResponsesPerMinute
+	if limit <= 0 {
+		return true
+	}
+	if allowed, _ := s.limiter.allowPerMinuteWithRetry("errors:"+c.DeviceID, limit); !allowed {
+		s.counters.Inc(counters.SignalErrorFlood, c.DeviceID)
+		s.logger.Debug("error response silently dropped (rate limit)",
+			"device", c.DeviceID,
+			"code", code,
+		)
+		return false
+	}
+	return true
+}
+
+// respondUploadError is the upload-specific sibling of respondError.
+// Same rate-limit + SignalErrorFlood discipline, but emits
+// protocol.UploadError instead of protocol.Error. Use this at upload
+// rejection sites — clients match on UploadID to fail the pending
+// upload.
+func (s *Server) respondUploadError(c *Client, corrID, uploadID, code, message string, retryAfterMs int64) {
+	if c == nil {
+		return
+	}
+	if !s.checkErrorRateLimit(c, code) {
+		return
+	}
+	_ = c.Encoder.Encode(protocol.UploadError{
+		Type:         "upload_error",
+		UploadID:     uploadID,
+		Code:         code,
+		Message:      message,
+		RetryAfterMs: retryAfterMs,
+		CorrID:       corrID,
+	})
+}
+
+// validateCorrIDOrReject enforces the corr_id shape rule at handler
+// unmarshal sites. On violation, fires counters.SignalMalformedFrame,
+// logs via rejectAndLog, and returns false — caller must immediately
+// return. Empty corr_id is valid (omitempty convention).
+//
+// Phase 17c Step 2 D9 wiring: applied to the 15 CorrID-carrying verb
+// handlers (send, send_group, send_dm, edit, edit_group, edit_dm,
+// react, unreact, delete, pin, unpin, room_members, history, download,
+// upload_start).
+func (s *Server) validateCorrIDOrReject(c *Client, verb, corrID string) bool {
+	if err := protocol.ValidateCorrID(corrID); err != nil {
+		s.rejectAndLog(c, counters.SignalMalformedFrame, verb,
+			"malformed corr_id: "+err.Error(), nil)
+		return false
+	}
+	return true
+}
+
+// respondDownloadError is the download-specific sibling of
+// respondError. Same rate-limit + SignalErrorFlood discipline, but
+// emits protocol.DownloadError with FileID. Use at download
+// rejection sites — clients match on FileID to fail the pending
+// download.
+func (s *Server) respondDownloadError(c *Client, corrID, fileID, code, message string) {
+	if c == nil {
+		return
+	}
+	if !s.checkErrorRateLimit(c, code) {
+		return
+	}
+	_ = c.Encoder.Encode(protocol.DownloadError{
+		Type:    "download_error",
+		FileID:  fileID,
+		Code:    code,
+		Message: message,
+		CorrID:  corrID,
+	})
 }

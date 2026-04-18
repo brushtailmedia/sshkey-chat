@@ -310,11 +310,7 @@ func (s *Server) handleRetireMe(c *Client, raw json.RawMessage) {
 			"user", c.UserID,
 			"error", err,
 		)
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    "internal",
-			Message: "retirement failed — contact an admin",
-		})
+		s.respondError(c, "", protocol.CodeInternal, "retirement failed — contact an admin", 0)
 		return
 	}
 

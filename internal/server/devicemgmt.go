@@ -21,22 +21,14 @@ func (s *Server) handleListDevices(c *Client, raw json.RawMessage) {
 	}
 
 	if s.store == nil {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    "internal",
-			Message: "storage not available",
-		})
+		s.respondError(c, "", protocol.CodeInternal, "storage not available", 0)
 		return
 	}
 
 	devices, err := s.store.GetDevices(c.UserID)
 	if err != nil {
 		s.logger.Error("list_devices: failed to fetch devices", "user", c.UserID, "error", err)
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    "internal",
-			Message: "failed to list devices",
-		})
+		s.respondError(c, "", protocol.CodeInternal, "failed to list devices", 0)
 		return
 	}
 

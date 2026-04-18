@@ -68,6 +68,7 @@ type Send struct {
 	Payload   string   `json:"payload"`             // base64 encrypted
 	FileIDs   []string `json:"file_ids,omitempty"`
 	Signature string   `json:"signature"`           // base64 Ed25519 signature
+	CorrID    string   `json:"corr_id,omitempty"`   // Phase 17c: client-generated correlation tag; server echoes on error/success
 }
 
 type Message struct {
@@ -92,12 +93,13 @@ type Message struct {
 // preserved by the client via the preserve-and-replace pattern before
 // re-encrypting (see message_editing.md Chunk 6).
 type Edit struct {
-	Type      string `json:"type"`      // "edit"
-	ID        string `json:"id"`        // msg ID of the message being edited
-	Room      string `json:"room"`      // room nanoid
-	Epoch     int64  `json:"epoch"`     // current epoch (grace window same as send)
-	Payload   string `json:"payload"`   // base64 encrypted new payload
-	Signature string `json:"signature"` // base64 Ed25519 signature over canonical form
+	Type      string `json:"type"`                // "edit"
+	ID        string `json:"id"`                  // msg ID of the message being edited
+	Room      string `json:"room"`                // room nanoid
+	Epoch     int64  `json:"epoch"`               // current epoch (grace window same as send)
+	Payload   string `json:"payload"`             // base64 encrypted new payload
+	Signature string `json:"signature"`           // base64 Ed25519 signature over canonical form
+	CorrID    string `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 // Edited is the server → client broadcast shape after a successful
@@ -161,6 +163,7 @@ type SendGroup struct {
 	Payload     string            `json:"payload"`               // base64 encrypted
 	FileIDs     []string          `json:"file_ids,omitempty"`
 	Signature   string            `json:"signature"`             // base64 Ed25519 signature
+	CorrID      string            `json:"corr_id,omitempty"`     // Phase 17c
 }
 
 type GroupMessage struct {
@@ -182,12 +185,13 @@ type GroupMessage struct {
 // server validates against GetGroupMembers at edit time). FileIDs is
 // omitted; the server preserves file_ids from the stored row.
 type EditGroup struct {
-	Type        string            `json:"type"`        // "edit_group"
+	Type        string            `json:"type"`                // "edit_group"
 	ID          string            `json:"id"`
 	Group       string            `json:"group"`
 	WrappedKeys map[string]string `json:"wrapped_keys"`
 	Payload     string            `json:"payload"`
 	Signature   string            `json:"signature"`
+	CorrID      string            `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 // GroupEdited is the server → client broadcast for a successful group
@@ -641,6 +645,7 @@ type SendDM struct {
 	Payload     string            `json:"payload"`               // base64 encrypted
 	FileIDs     []string          `json:"file_ids,omitempty"`
 	Signature   string            `json:"signature"`
+	CorrID      string            `json:"corr_id,omitempty"`     // Phase 17c
 }
 
 type DM struct {
@@ -662,12 +667,13 @@ type DM struct {
 // if the caller's per-user left_at ratchet is set (frozen view
 // can't be mutated).
 type EditDM struct {
-	Type        string            `json:"type"`        // "edit_dm"
+	Type        string            `json:"type"`                // "edit_dm"
 	ID          string            `json:"id"`
 	DM          string            `json:"dm"`
 	WrappedKeys map[string]string `json:"wrapped_keys"`
 	Payload     string            `json:"payload"`
 	Signature   string            `json:"signature"`
+	CorrID      string            `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 // DMEdited is the server → client broadcast for a successful 1:1 DM
@@ -721,8 +727,9 @@ type DMInfo struct {
 // Message deletion
 
 type Delete struct {
-	Type string `json:"type"` // "delete"
-	ID   string `json:"id"`  // message ID to delete
+	Type   string `json:"type"`                // "delete"
+	ID     string `json:"id"`                  // message ID to delete
+	CorrID string `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 type Deleted struct {
@@ -768,6 +775,7 @@ type React struct {
 	WrappedKeys map[string]string `json:"wrapped_keys,omitempty"` // DMs (group + 1:1)
 	Payload     string            `json:"payload"`                // base64 encrypted emoji
 	Signature   string            `json:"signature"`
+	CorrID      string            `json:"corr_id,omitempty"`      // Phase 17c
 }
 
 type Reaction struct {
@@ -786,8 +794,9 @@ type Reaction struct {
 }
 
 type Unreact struct {
-	Type       string `json:"type"`        // "unreact"
+	Type       string `json:"type"`                // "unreact"
 	ReactionID string `json:"reaction_id"`
+	CorrID     string `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 type ReactionRemoved struct {
@@ -803,9 +812,10 @@ type ReactionRemoved struct {
 // Pinned messages (rooms only)
 
 type Pin struct {
-	Type string `json:"type"` // "pin"
-	Room string `json:"room"`
-	ID   string `json:"id"`  // message ID
+	Type   string `json:"type"`                // "pin"
+	Room   string `json:"room"`
+	ID     string `json:"id"`                  // message ID
+	CorrID string `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 type Pinned struct {
@@ -817,9 +827,10 @@ type Pinned struct {
 }
 
 type Unpin struct {
-	Type string `json:"type"` // "unpin"
-	Room string `json:"room"`
-	ID   string `json:"id"`
+	Type   string `json:"type"`                // "unpin"
+	Room   string `json:"room"`
+	ID     string `json:"id"`
+	CorrID string `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 type Unpinned struct {
@@ -940,12 +951,13 @@ type GroupInfo struct {
 // History (lazy scroll-back)
 
 type History struct {
-	Type   string `json:"type"`            // "history"
+	Type   string `json:"type"`                // "history"
 	Room   string `json:"room,omitempty"`
 	Group  string `json:"group,omitempty"`
 	DM     string `json:"dm,omitempty"`
-	Before string `json:"before"`          // message ID
+	Before string `json:"before"`              // message ID
 	Limit  int    `json:"limit"`
+	CorrID string `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 type HistoryResult struct {
@@ -997,13 +1009,14 @@ type EpochConfirmed struct {
 // File transfer
 
 type UploadStart struct {
-	Type        string `json:"type"`             // "upload_start"
-	UploadID    string `json:"upload_id"`        // client-generated, up_ prefix
-	Size        int64  `json:"size"`             // bytes (encrypted)
-	ContentHash string `json:"content_hash"`     // "blake2b-256:<hex>" of encrypted bytes
+	Type        string `json:"type"`                // "upload_start"
+	UploadID    string `json:"upload_id"`           // client-generated, up_ prefix
+	Size        int64  `json:"size"`                // bytes (encrypted)
+	ContentHash string `json:"content_hash"`        // "blake2b-256:<hex>" of encrypted bytes
 	Room        string `json:"room,omitempty"`
 	Group       string `json:"group,omitempty"`
 	DM          string `json:"dm,omitempty"`
+	CorrID      string `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 type UploadReady struct {
@@ -1027,11 +1040,13 @@ type UploadError struct {
 	Code         string `json:"code"`
 	Message      string `json:"message"`
 	RetryAfterMs int64  `json:"retry_after_ms,omitempty"`  // Phase 17 Step 6: populated on rate-limit rejections
+	CorrID       string `json:"corr_id,omitempty"`         // Phase 17c
 }
 
 type Download struct {
-	Type   string `json:"type"`   // "download"
+	Type   string `json:"type"`                // "download"
 	FileID string `json:"file_id"`
+	CorrID string `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 type DownloadStart struct {
@@ -1051,10 +1066,11 @@ type DownloadComplete struct {
 // FileID to fail the pending download instead of waiting forever for
 // binary frames on Channel 2.
 type DownloadError struct {
-	Type    string `json:"type"`    // "download_error"
+	Type    string `json:"type"`                // "download_error"
 	FileID  string `json:"file_id"`
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	CorrID  string `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 // Message signatures (capability: signatures)
@@ -1072,7 +1088,8 @@ type DeviceRevoked struct {
 
 // ListDevices requests the list of devices registered for the authenticated user.
 type ListDevices struct {
-	Type string `json:"type"` // "list_devices"
+	Type   string `json:"type"`                // "list_devices"
+	CorrID string `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 // DeviceList is the server's response to ListDevices, listing all devices
@@ -1137,8 +1154,9 @@ type PendingKeysList struct {
 // Room membership
 
 type RoomMembers struct {
-	Type string `json:"type"` // "room_members"
-	Room string `json:"room"`
+	Type   string `json:"type"`                // "room_members"
+	Room   string `json:"room"`
+	CorrID string `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 type RoomMembersList struct {

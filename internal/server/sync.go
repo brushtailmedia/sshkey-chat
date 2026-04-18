@@ -376,6 +376,9 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed history"})
 		return
 	}
+	if !s.validateCorrIDOrReject(c, "history", req.CorrID) {
+		return
+	}
 
 	if s.store == nil {
 		return
@@ -393,10 +396,7 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 		// Verify access
 		inRoom := s.store != nil && s.store.IsRoomMemberByID(req.Room, c.UserID)
 		if !inRoom {
-			c.Encoder.Encode(protocol.Error{
-				Type: "error", Code: protocol.ErrNotAuthorized,
-				Message: "You don't have access to room: " + req.Room,
-			})
+			s.respondError(c, req.CorrID, protocol.ErrNotAuthorized, "You don't have access to room: "+req.Room, 0)
 			return
 		}
 
@@ -463,10 +463,7 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 		// Verify membership
 		isMember, err := s.store.IsGroupMember(req.Group, c.UserID)
 		if err != nil || !isMember {
-			c.Encoder.Encode(protocol.Error{
-				Type: "error", Code: protocol.ErrUnknownGroup,
-				Message: "You are not a member of this group",
-			})
+			s.respondError(c, req.CorrID, protocol.ErrUnknownGroup, "You are not a member of this group", 0)
 			return
 		}
 
@@ -517,10 +514,7 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 		// Verify caller is a party to this DM
 		dm, err := s.store.GetDirectMessage(req.DM)
 		if err != nil || dm == nil || (dm.UserA != c.UserID && dm.UserB != c.UserID) {
-			c.Encoder.Encode(protocol.Error{
-				Type: "error", Code: protocol.ErrUnknownDM,
-				Message: "You are not a party to this DM",
-			})
+			s.respondError(c, req.CorrID, protocol.ErrUnknownDM, "You are not a party to this DM", 0)
 			return
 		}
 

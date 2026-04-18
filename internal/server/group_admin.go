@@ -44,29 +44,17 @@ import (
 // ErrUnknownGroup response so a probing client cannot distinguish them.
 func (s *Server) checkGroupAdminAuth(c *Client, groupID string) bool {
 	if s.store == nil {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUnknownGroup,
-			Message: "You are not a member of this group",
-		})
+		s.respondError(c, "", protocol.ErrUnknownGroup, "You are not a member of this group", 0)
 		return false
 	}
 	isMember, err := s.store.IsGroupMember(groupID, c.UserID)
 	if err != nil || !isMember {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUnknownGroup,
-			Message: "You are not a member of this group",
-		})
+		s.respondError(c, "", protocol.ErrUnknownGroup, "You are not a member of this group", 0)
 		return false
 	}
 	isAdmin, err := s.store.IsGroupAdmin(groupID, c.UserID)
 	if err != nil || !isAdmin {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUnknownGroup,
-			Message: "You are not a member of this group",
-		})
+		s.respondError(c, "", protocol.ErrUnknownGroup, "You are not a member of this group", 0)
 		return false
 	}
 	return true
@@ -128,30 +116,18 @@ func (s *Server) handleAddToGroup(c *Client, raw json.RawMessage) {
 	// Caller is authorized — resolve target.
 	target := s.store.GetUserByID(msg.User)
 	if target == nil {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUnknownUser,
-			Message: "No such user",
-		})
+		s.respondError(c, "", protocol.ErrUnknownUser, "No such user", 0)
 		return
 	}
 	if s.store.IsUserRetired(msg.User) {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUnknownUser,
-			Message: "No such user",
-		})
+		s.respondError(c, "", protocol.ErrUnknownUser, "No such user", 0)
 		return
 	}
 
 	// Already a member?
 	alreadyMember, _ := s.store.IsGroupMember(msg.Group, msg.User)
 	if alreadyMember {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrAlreadyMember,
-			Message: "User is already a member of this group",
-		})
+		s.respondError(c, "", protocol.ErrAlreadyMember, "User is already a member of this group", 0)
 		return
 	}
 
@@ -166,7 +142,7 @@ func (s *Server) handleAddToGroup(c *Client, raw json.RawMessage) {
 	if err != nil {
 		s.logger.Error("failed to load group members for cap check",
 			"group", msg.Group, "error", err)
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "internal", Message: "failed to add member"})
+		s.respondError(c, "", protocol.CodeInternal, "failed to add member", 0)
 		return
 	}
 	s.cfg.RLock()
@@ -176,11 +152,8 @@ func (s *Server) handleAddToGroup(c *Client, raw json.RawMessage) {
 		maxMembers = 150 // defensive fallback if config load elided the section
 	}
 	if len(currentMembers) >= maxMembers {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    "too_many_members",
-			Message: fmt.Sprintf("Group DMs are limited to %d members. Use a room for larger groups.", maxMembers),
-		})
+		s.respondError(c, "", "too_many_members",
+			fmt.Sprintf("Group DMs are limited to %d members. Use a room for larger groups.", maxMembers), 0)
 		return
 	}
 
@@ -188,7 +161,7 @@ func (s *Server) handleAddToGroup(c *Client, raw json.RawMessage) {
 	if err := s.store.AddGroupMember(msg.Group, msg.User, false); err != nil {
 		s.logger.Error("failed to add group member",
 			"group", msg.Group, "user", msg.User, "by", c.UserID, "error", err)
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "internal", Message: "failed to add member"})
+		s.respondError(c, "", protocol.CodeInternal, "failed to add member", 0)
 		return
 	}
 
@@ -303,11 +276,7 @@ func (s *Server) handleRemoveFromGroup(c *Client, raw json.RawMessage) {
 	// a non-member target collapses to the same ErrUnknownGroup frame.
 	isMember, _ := s.store.IsGroupMember(msg.Group, msg.User)
 	if !isMember {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUnknownGroup,
-			Message: "You are not a member of this group",
-		})
+		s.respondError(c, "", protocol.ErrUnknownGroup, "You are not a member of this group", 0)
 		return
 	}
 
@@ -328,11 +297,7 @@ func (s *Server) handleRemoveFromGroup(c *Client, raw json.RawMessage) {
 	// first.
 	if isAdmin, _ := s.store.IsGroupAdmin(msg.Group, msg.User); isAdmin {
 		if count, _ := s.store.CountGroupAdmins(msg.Group); count == 1 {
-			c.Encoder.Encode(protocol.Error{
-				Type:    "error",
-				Code:    protocol.ErrForbidden,
-				Message: "Cannot remove last admin — promote another member first",
-			})
+			s.respondError(c, "", protocol.ErrForbidden, "Cannot remove last admin — promote another member first", 0)
 			return
 		}
 	}
@@ -381,27 +346,19 @@ func (s *Server) handlePromoteGroupAdmin(c *Client, raw json.RawMessage) {
 
 	isMember, _ := s.store.IsGroupMember(msg.Group, msg.User)
 	if !isMember {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUnknownGroup,
-			Message: "You are not a member of this group",
-		})
+		s.respondError(c, "", protocol.ErrUnknownGroup, "You are not a member of this group", 0)
 		return
 	}
 
 	if isAdmin, _ := s.store.IsGroupAdmin(msg.Group, msg.User); isAdmin {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrAlreadyAdmin,
-			Message: "User is already an admin of this group",
-		})
+		s.respondError(c, "", protocol.ErrAlreadyAdmin, "User is already an admin of this group", 0)
 		return
 	}
 
 	if err := s.store.SetGroupMemberAdmin(msg.Group, msg.User, true); err != nil {
 		s.logger.Error("failed to promote group member",
 			"group", msg.Group, "user", msg.User, "by", c.UserID, "error", err)
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "internal", Message: "failed to promote member"})
+		s.respondError(c, "", protocol.CodeInternal, "failed to promote member", 0)
 		return
 	}
 
@@ -463,39 +420,27 @@ func (s *Server) handleDemoteGroupAdmin(c *Client, raw json.RawMessage) {
 
 	isMember, _ := s.store.IsGroupMember(msg.Group, msg.User)
 	if !isMember {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUnknownGroup,
-			Message: "You are not a member of this group",
-		})
+		s.respondError(c, "", protocol.ErrUnknownGroup, "You are not a member of this group", 0)
 		return
 	}
 	isAdmin, _ := s.store.IsGroupAdmin(msg.Group, msg.User)
 	if !isAdmin {
 		// Byte-identical privacy: non-admin target response matches
 		// unknown-group / non-member frames.
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrUnknownGroup,
-			Message: "You are not a member of this group",
-		})
+		s.respondError(c, "", protocol.ErrUnknownGroup, "You are not a member of this group", 0)
 		return
 	}
 
 	// Last-admin check.
 	if count, _ := s.store.CountGroupAdmins(msg.Group); count <= 1 {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrForbidden,
-			Message: "Cannot demote last admin",
-		})
+		s.respondError(c, "", protocol.ErrForbidden, "Cannot demote last admin", 0)
 		return
 	}
 
 	if err := s.store.SetGroupMemberAdmin(msg.Group, msg.User, false); err != nil {
 		s.logger.Error("failed to demote group member",
 			"group", msg.Group, "user", msg.User, "by", c.UserID, "error", err)
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "internal", Message: "failed to demote member"})
+		s.respondError(c, "", protocol.CodeInternal, "failed to demote member", 0)
 		return
 	}
 

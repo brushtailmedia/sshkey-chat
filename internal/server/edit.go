@@ -57,7 +57,7 @@ func (s *Server) handleEdit(c *Client, raw json.RawMessage) {
 		// wiring in session.go).
 		s.rejectAndLog(c, counters.SignalOversizedBody, "edit",
 			fmt.Sprintf("raw=%d bytes exceeds maxPayloadBytes=%d", len(raw), maxPayloadBytes), nil)
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrMessageTooLarge, Message: "Message exceeds 16KB limit"})
+		s.respondError(c, "", protocol.ErrMessageTooLarge, "Message exceeds 16KB limit", 0)
 		return
 	}
 
@@ -65,6 +65,9 @@ func (s *Server) handleEdit(c *Client, raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		s.rejectAndLog(c, counters.SignalMalformedFrame, "edit", "malformed edit frame",
 			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed edit"})
+		return
+	}
+	if !s.validateCorrIDOrReject(c, "edit", msg.CorrID) {
 		return
 	}
 
@@ -84,11 +87,7 @@ func (s *Server) handleEdit(c *Client, raw json.RawMessage) {
 	// Ordered after the membership check so non-members still collapse
 	// into the unknown response — retired state is members-only info.
 	if s.store.IsRoomRetired(msg.Room) {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrRoomRetired,
-			Message: "This room has been archived and is read-only",
-		})
+		s.respondError(c, msg.CorrID, protocol.ErrRoomRetired, "This room has been archived and is read-only", 0)
 		return
 	}
 
@@ -121,12 +120,8 @@ func (s *Server) handleEdit(c *Client, raw json.RawMessage) {
 		return
 	}
 	if mostRecentID != msg.ID {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrEditNotMostRecent,
-			Message: "You can only edit your most recent message in this room",
-			Ref:     msg.ID,
-		})
+		s.respondErrorRef(c, msg.CorrID, protocol.ErrEditNotMostRecent,
+			"You can only edit your most recent message in this room", msg.ID, 0)
 		return
 	}
 
@@ -134,12 +129,8 @@ func (s *Server) handleEdit(c *Client, raw json.RawMessage) {
 	// edit is allowed in the current epoch or the previous one.
 	currentEpoch := s.epochs.currentEpochNum(msg.Room)
 	if currentEpoch > 0 && (msg.Epoch < currentEpoch-1 || msg.Epoch > currentEpoch) {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrEditWindowExpired,
-			Message: "Edit window expired — epoch has rotated past the grace window",
-			Ref:     msg.ID,
-		})
+		s.respondErrorRef(c, msg.CorrID, protocol.ErrEditWindowExpired,
+			"Edit window expired — epoch has rotated past the grace window", msg.ID, 0)
 		return
 	}
 
@@ -182,7 +173,7 @@ func (s *Server) handleEditGroup(c *Client, raw json.RawMessage) {
 	if len(raw) > maxPayloadBytes {
 		s.rejectAndLog(c, counters.SignalOversizedBody, "edit_group",
 			fmt.Sprintf("raw=%d bytes exceeds maxPayloadBytes=%d", len(raw), maxPayloadBytes), nil)
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrMessageTooLarge, Message: "Message exceeds 16KB limit"})
+		s.respondError(c, "", protocol.ErrMessageTooLarge, "Message exceeds 16KB limit", 0)
 		return
 	}
 
@@ -190,6 +181,9 @@ func (s *Server) handleEditGroup(c *Client, raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		s.rejectAndLog(c, counters.SignalMalformedFrame, "edit_group", "malformed edit_group frame",
 			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed edit_group"})
+		return
+	}
+	if !s.validateCorrIDOrReject(c, "edit_group", msg.CorrID) {
 		return
 	}
 
@@ -238,12 +232,8 @@ func (s *Server) handleEditGroup(c *Client, raw json.RawMessage) {
 		return
 	}
 	if mostRecentID != msg.ID {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrEditNotMostRecent,
-			Message: "You can only edit your most recent message in this group",
-			Ref:     msg.ID,
-		})
+		s.respondErrorRef(c, msg.CorrID, protocol.ErrEditNotMostRecent,
+			"You can only edit your most recent message in this group", msg.ID, 0)
 		return
 	}
 
@@ -258,11 +248,8 @@ func (s *Server) handleEditGroup(c *Client, raw json.RawMessage) {
 		return
 	}
 	if !wrappedKeysMatchMemberSet(msg.WrappedKeys, members) {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrInvalidWrappedKeys,
-			Message: "wrapped_keys must exactly match current group member set",
-		})
+		s.respondError(c, msg.CorrID, protocol.ErrInvalidWrappedKeys,
+			"wrapped_keys must exactly match current group member set", 0)
 		return
 	}
 
@@ -301,7 +288,7 @@ func (s *Server) handleEditDM(c *Client, raw json.RawMessage) {
 	if len(raw) > maxPayloadBytes {
 		s.rejectAndLog(c, counters.SignalOversizedBody, "edit_dm",
 			fmt.Sprintf("raw=%d bytes exceeds maxPayloadBytes=%d", len(raw), maxPayloadBytes), nil)
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrMessageTooLarge, Message: "Message exceeds 16KB limit"})
+		s.respondError(c, "", protocol.ErrMessageTooLarge, "Message exceeds 16KB limit", 0)
 		return
 	}
 
@@ -309,6 +296,9 @@ func (s *Server) handleEditDM(c *Client, raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		s.rejectAndLog(c, counters.SignalMalformedFrame, "edit_dm", "malformed edit_dm frame",
 			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed edit_dm"})
+		return
+	}
+	if !s.validateCorrIDOrReject(c, "edit_dm", msg.CorrID) {
 		return
 	}
 
@@ -367,31 +357,26 @@ func (s *Server) handleEditDM(c *Client, raw json.RawMessage) {
 		return
 	}
 	if mostRecentID != msg.ID {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrEditNotMostRecent,
-			Message: "You can only edit your most recent message in this DM",
-			Ref:     msg.ID,
-		})
+		s.respondErrorRef(c, msg.CorrID, protocol.ErrEditNotMostRecent,
+			"You can only edit your most recent message in this DM", msg.ID, 0)
 		return
 	}
 
 	// Step 9: wrapped_keys must have exactly 2 entries matching the DM's
 	// two parties.
 	if len(msg.WrappedKeys) != 2 {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrInvalidWrappedKeys,
-			Message: "wrapped_keys must have exactly 2 entries for a 1:1 DM",
-		})
+		s.respondError(c, msg.CorrID, protocol.ErrInvalidWrappedKeys,
+			"wrapped_keys must have exactly 2 entries for a 1:1 DM", 0)
 		return
 	}
 	if _, ok := msg.WrappedKeys[dm.UserA]; !ok {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrInvalidWrappedKeys, Message: "wrapped_keys must include both DM members"})
+		s.respondError(c, msg.CorrID, protocol.ErrInvalidWrappedKeys,
+			"wrapped_keys must include both DM members", 0)
 		return
 	}
 	if _, ok := msg.WrappedKeys[dm.UserB]; !ok {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrInvalidWrappedKeys, Message: "wrapped_keys must include both DM members"})
+		s.respondError(c, msg.CorrID, protocol.ErrInvalidWrappedKeys,
+			"wrapped_keys must include both DM members", 0)
 		return
 	}
 
@@ -441,28 +426,22 @@ func (s *Server) handleEditDM(c *Client, raw json.RawMessage) {
 // deleted row, row-gone-during-race). The test suite uses bytes.Equal
 // on the wire output to lock this in.
 
+// sendUnknown{Room,Group,DM} helpers carry no corrID (existing
+// signatures). Keep them for legacy call sites; new Phase 17c code
+// should prefer sendUnknownX(c, corrID) variants with corrID echoed.
+// Routed through respondError for rate-limit + SignalErrorFlood
+// discipline parity.
+
 func (s *Server) sendUnknownRoom(c *Client) {
-	c.Encoder.Encode(protocol.Error{
-		Type:    "error",
-		Code:    protocol.ErrUnknownRoom,
-		Message: "You are not a member of this room",
-	})
+	s.respondError(c, "", protocol.ErrUnknownRoom, "You are not a member of this room", 0)
 }
 
 func (s *Server) sendUnknownGroup(c *Client) {
-	c.Encoder.Encode(protocol.Error{
-		Type:    "error",
-		Code:    protocol.ErrUnknownGroup,
-		Message: "You are not a member of this group",
-	})
+	s.respondError(c, "", protocol.ErrUnknownGroup, "You are not a member of this group", 0)
 }
 
 func (s *Server) sendUnknownDM(c *Client) {
-	c.Encoder.Encode(protocol.Error{
-		Type:    "error",
-		Code:    protocol.ErrUnknownDM,
-		Message: "You are not a party to this DM",
-	})
+	s.respondError(c, "", protocol.ErrUnknownDM, "You are not a party to this DM", 0)
 }
 
 // wrappedKeysMatchMemberSet returns true when the keys in the wrapped
