@@ -49,6 +49,8 @@ docker/config/host_key
 refactor_plan.md
 performance_optimization.md
 business_edition.md
+download_fix.md
+upload_quota.md
 
 # OS
 .DS_Store
