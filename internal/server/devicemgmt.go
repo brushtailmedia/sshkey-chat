@@ -14,10 +14,9 @@ func (s *Server) handleListDevices(c *Client, raw json.RawMessage) {
 	// Phase 17 Step 5: rate-limit refresh cadence. Default 6/min
 	// (one per 10s) — settings-panel open is the legitimate use,
 	// mashing refresh is rate-limited.
-	if !s.limiter.allowPerMinute("list_devices:"+c.UserID, s.cfg.Server.RateLimits.DeviceListPerMinute) {
-		s.rejectAndLog(c, counters.SignalRateLimited, "list_devices",
-			"list_devices rate limit exceeded", nil)
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many device list requests — wait a moment"})
+	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("list_devices:"+c.UserID, s.cfg.Server.RateLimits.DeviceListPerMinute); !allowed {
+		s.rejectAndLog(c, counters.SignalRateLimited, "list_devices", "list_devices rate limit exceeded",
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many device list requests — wait a moment", RetryAfterMs: retryMs})
 		return
 	}
 

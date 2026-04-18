@@ -814,8 +814,9 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 // handleSend processes a room message.
 func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 	// Rate limit
-	if !s.limiter.allow("msg:"+c.UserID, float64(s.cfg.Server.RateLimits.MessagesPerSecond)) {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Slow down — too many messages. Try again in a moment"})
+	if allowed, retryMs := s.limiter.allowWithRetry("msg:"+c.UserID, float64(s.cfg.Server.RateLimits.MessagesPerSecond)); !allowed {
+		s.rejectAndLog(c, counters.SignalRateLimited, "send", "message rate limit exceeded",
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Slow down — too many messages. Try again in a moment", RetryAfterMs: retryMs})
 		return
 	}
 
@@ -1077,8 +1078,12 @@ func (s *Server) handleSendGroup(c *Client, raw json.RawMessage) {
 
 // handleTyping broadcasts a typing indicator to others (not the sender).
 func (s *Server) handleTyping(c *Client, raw json.RawMessage) {
-	if !s.limiter.allow("typing:"+c.UserID, float64(s.cfg.Server.RateLimits.TypingPerSecond)) {
-		return // silently dropped per spec
+	if allowed, _ := s.limiter.allowWithRetry("typing:"+c.UserID, float64(s.cfg.Server.RateLimits.TypingPerSecond)); !allowed {
+		// Phase 17 Step 6: fire the counter but keep the silent-drop
+		// wire behavior per spec. retry_after_ms isn't encoded — no
+		// wire response to carry it.
+		s.rejectAndLog(c, counters.SignalRateLimited, "typing", "typing rate limit exceeded (silent-drop)", nil)
+		return
 	}
 
 	var msg protocol.Typing
@@ -1190,8 +1195,9 @@ func (s *Server) isReactableMessage(db *sql.DB, msgID string) bool {
 
 // handleReact processes a reaction.
 func (s *Server) handleReact(c *Client, raw json.RawMessage) {
-	if !s.limiter.allowPerMinute("react:"+c.UserID, s.cfg.Server.RateLimits.ReactionsPerMinute) {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many reactions — wait a moment"})
+	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("react:"+c.UserID, s.cfg.Server.RateLimits.ReactionsPerMinute); !allowed {
+		s.rejectAndLog(c, counters.SignalRateLimited, "react", "react rate limit exceeded",
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many reactions — wait a moment", RetryAfterMs: retryMs})
 		return
 	}
 
@@ -1348,11 +1354,12 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 	// handleReact via the same "react:" key — react + unreact are
 	// mirror operations; a user legitimately can't need 30 react
 	// PLUS 30 unreact per minute, so one shared pool is the right
-	// shape.
-	if !s.limiter.allowPerMinute("react:"+c.UserID, s.cfg.Server.RateLimits.ReactionsPerMinute) {
+	// shape. Phase 17 Step 6: use the retry-aware API and populate
+	// RetryAfterMs.
+	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("react:"+c.UserID, s.cfg.Server.RateLimits.ReactionsPerMinute); !allowed {
 		s.rejectAndLog(c, counters.SignalRateLimited, "unreact",
-			"react/unreact rate limit exceeded (shared bucket)", nil)
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many reactions — wait a moment"})
+			"react/unreact rate limit exceeded (shared bucket)",
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many reactions — wait a moment", RetryAfterMs: retryMs})
 		return
 	}
 
@@ -1474,8 +1481,9 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 
 // handlePin processes a pin request.
 func (s *Server) handlePin(c *Client, raw json.RawMessage) {
-	if !s.limiter.allowPerMinute("pin:"+c.UserID, s.cfg.Server.RateLimits.PinsPerMinute) {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many pins — wait a moment"})
+	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("pin:"+c.UserID, s.cfg.Server.RateLimits.PinsPerMinute); !allowed {
+		s.rejectAndLog(c, counters.SignalRateLimited, "pin", "pin rate limit exceeded",
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many pins — wait a moment", RetryAfterMs: retryMs})
 		return
 	}
 
@@ -1525,8 +1533,9 @@ func (s *Server) handlePin(c *Client, raw json.RawMessage) {
 
 // handleUnpin processes an unpin request.
 func (s *Server) handleUnpin(c *Client, raw json.RawMessage) {
-	if !s.limiter.allowPerMinute("pin:"+c.UserID, s.cfg.Server.RateLimits.PinsPerMinute) {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many pins — wait a moment"})
+	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("pin:"+c.UserID, s.cfg.Server.RateLimits.PinsPerMinute); !allowed {
+		s.rejectAndLog(c, counters.SignalRateLimited, "unpin", "pin/unpin rate limit exceeded (shared bucket)",
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many pins — wait a moment", RetryAfterMs: retryMs})
 		return
 	}
 
@@ -1585,8 +1594,9 @@ func (s *Server) handleUnpin(c *Client, raw json.RawMessage) {
 // DMs work — the parties to a private conversation control who can be
 // in it, not an admin role. Admins manage rooms, not groups.
 func (s *Server) handleCreateGroup(c *Client, raw json.RawMessage) {
-	if !s.limiter.allowPerMinute("group_create:"+c.UserID, s.cfg.Server.RateLimits.DMCreatesPerMinute) {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many groups — wait a moment"})
+	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("group_create:"+c.UserID, s.cfg.Server.RateLimits.DMCreatesPerMinute); !allowed {
+		s.rejectAndLog(c, counters.SignalRateLimited, "create_group", "group create rate limit exceeded",
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many groups — wait a moment", RetryAfterMs: retryMs})
 		return
 	}
 
@@ -1713,8 +1723,9 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 	if isAdmin {
 		limit = s.cfg.Server.RateLimits.AdminDeletesPerMinute
 	}
-	if !s.limiter.allowPerMinute("delete:"+c.UserID, limit) {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many deletes — wait a moment"})
+	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("delete:"+c.UserID, limit); !allowed {
+		s.rejectAndLog(c, counters.SignalRateLimited, "delete", "delete rate limit exceeded",
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many deletes — wait a moment", RetryAfterMs: retryMs})
 		return
 	}
 
@@ -2786,8 +2797,9 @@ func (s *Server) handleRenameGroup(c *Client, raw json.RawMessage) {
 // and a single other user. The pair is canonicalized alphabetically and
 // deduplicates: calling twice for the same pair returns the same row.
 func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
-	if !s.limiter.allowPerMinute("dm_create:"+c.UserID, s.cfg.Server.RateLimits.DMCreatesPerMinute) {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many DMs — wait a moment"})
+	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("dm_create:"+c.UserID, s.cfg.Server.RateLimits.DMCreatesPerMinute); !allowed {
+		s.rejectAndLog(c, counters.SignalRateLimited, "create_dm", "dm create rate limit exceeded",
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many DMs — wait a moment", RetryAfterMs: retryMs})
 		return
 	}
 
@@ -3112,8 +3124,9 @@ func (s *Server) cleanupDormantDM(dmID string) {
 
 // handleSetProfile updates a user's profile and broadcasts.
 func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
-	if !s.limiter.allowPerMinute("profile:"+c.UserID, s.cfg.Server.RateLimits.ProfilesPerMinute) {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Profile updated too often — wait a moment"})
+	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("profile:"+c.UserID, s.cfg.Server.RateLimits.ProfilesPerMinute); !allowed {
+		s.rejectAndLog(c, counters.SignalRateLimited, "set_profile", "profile rate limit exceeded",
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Profile updated too often — wait a moment", RetryAfterMs: retryMs})
 		return
 	}
 
@@ -3365,10 +3378,10 @@ func (s *Server) handleListPendingKeys(c *Client) {
 func (s *Server) handleRoomMembers(c *Client, raw json.RawMessage) {
 	// Phase 17 Step 5: rate-limit refresh cadence. Default 6/min
 	// (one per 10s) — legitimate info-panel refresh is slow.
-	if !s.limiter.allowPerMinute("room_members:"+c.UserID, s.cfg.Server.RateLimits.RoomMembersPerMinute) {
-		s.rejectAndLog(c, counters.SignalRateLimited, "room_members",
-			"room_members rate limit exceeded", nil)
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many room_members requests — wait a moment"})
+	// Phase 17 Step 6: use retry-aware API and populate RetryAfterMs.
+	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("room_members:"+c.UserID, s.cfg.Server.RateLimits.RoomMembersPerMinute); !allowed {
+		s.rejectAndLog(c, counters.SignalRateLimited, "room_members", "room_members rate limit exceeded",
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many room_members requests — wait a moment", RetryAfterMs: retryMs})
 		return
 	}
 

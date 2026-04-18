@@ -364,8 +364,9 @@ func storedToRawDMMessages(msgs []store.StoredMessage, dmID string) []json.RawMe
 
 // handleHistory processes a history (scroll-back) request.
 func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
-	if !s.limiter.allowPerMinute("history:"+c.UserID, s.cfg.Server.RateLimits.HistoryPerMinute) {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many requests — wait a moment"})
+	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("history:"+c.UserID, s.cfg.Server.RateLimits.HistoryPerMinute); !allowed {
+		s.rejectAndLog(c, counters.SignalRateLimited, "history", "history rate limit exceeded",
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many requests — wait a moment", RetryAfterMs: retryMs})
 		return
 	}
 

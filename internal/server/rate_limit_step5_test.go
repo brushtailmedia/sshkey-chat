@@ -165,6 +165,107 @@ func TestHandleRoomMembers_EmptyRoomFiresMalformedFrame(t *testing.T) {
 	}
 }
 
+// --- Phase 17 end-of-arc test polish (Step 7) ---
+
+// TestHandleReact_UnderBurstStaysAllowed locks in the positive case:
+// a single react call with default rate limits succeeds, doesn't
+// produce a rate-limit rejection, and doesn't fire SignalRateLimited.
+// Implicit in the drain-and-reject tests but worth an explicit smoke.
+func TestHandleReact_UnderBurstStaysAllowed(t *testing.T) {
+	s := newTestServer(t)
+	alice := testClientFor("alice", "dev_alice_underburst")
+
+	// Default ReactionsPerMinute = 30; one call is well under burst.
+	raw, _ := json.Marshal(protocol.React{Type: "react", ID: "msg_xxx", Payload: "hi"})
+	s.handleReact(alice.Client, raw)
+
+	if got := s.counters.Get(counters.SignalRateLimited, "dev_alice_underburst"); got != 0 {
+		t.Errorf("SignalRateLimited on single allowed call = %d, want 0", got)
+	}
+
+	// Check no rate-limit error went to the wire either. The react
+	// might produce other responses (broadcasts, etc.) but NOT a
+	// rate-limit error.
+	for _, m := range alice.messages() {
+		var e protocol.Error
+		if err := json.Unmarshal(m, &e); err == nil && e.Code == protocol.ErrRateLimited {
+			t.Errorf("unexpected rate-limit error on allowed call: %s", m)
+		}
+	}
+}
+
+// TestHandleUnreact_SharesBucketWithReact rigorously proves the
+// react + unreact shared-bucket semantics. The weaker
+// TestRateLimitsSection_Step5DefaultsSet below just asserts "some
+// counter fired after 6 mixed calls" — which passes even if the two
+// verbs had SEPARATE 5-token buckets (each would allow 5 before
+// rejecting). This test drains with react alone then verifies unreact
+// is rate-limited, which can only be true if the bucket is actually
+// shared.
+func TestHandleUnreact_SharesBucketWithReact(t *testing.T) {
+	s := newTestServer(t)
+	s.cfg.Lock()
+	s.cfg.Server.RateLimits.ReactionsPerMinute = 1 // burst clamped to 5
+	s.cfg.Unlock()
+
+	alice := testClientFor("alice", "dev_alice_sharedbucket")
+
+	// Step 1: drain the entire 5-token burst using react ONLY.
+	reactRaw, _ := json.Marshal(protocol.React{Type: "react", ID: "msg_xxx", Payload: "hi"})
+	for i := 0; i < 5; i++ {
+		s.handleReact(alice.Client, reactRaw)
+	}
+	// After 5 reacts, bucket should be dry.
+
+	// Step 2: first unreact should be rate-limited — can only be true
+	// if the unreact call uses the SAME "react:" bucket that we just
+	// drained.
+	initialCount := s.counters.Get(counters.SignalRateLimited, "dev_alice_sharedbucket")
+	unreactRaw := json.RawMessage(`{"type":"unreact","reaction_id":"react_xxx"}`)
+	s.handleUnreact(alice.Client, unreactRaw)
+	afterCount := s.counters.Get(counters.SignalRateLimited, "dev_alice_sharedbucket")
+
+	if afterCount <= initialCount {
+		t.Errorf("unreact after 5-react drain should be rate-limited (shared bucket). "+
+			"counter before=%d after=%d (want after > before)", initialCount, afterCount)
+	}
+}
+
+// TestHandleTyping_SilentDropFiresCounterOnly locks in the odd
+// handleTyping behavior: rate-limit rejection is silent per spec
+// (no wire response) but the counter still fires for Phase 17b
+// observability. No retry_after_ms because there's no wire response
+// to carry it.
+func TestHandleTyping_SilentDropFiresCounterOnly(t *testing.T) {
+	s := newTestServer(t)
+	s.cfg.Lock()
+	s.cfg.Server.RateLimits.TypingPerSecond = 1 // burst of 5
+	s.cfg.Unlock()
+
+	alice := testClientFor("alice", "dev_alice_typing_silent")
+	raw, _ := json.Marshal(protocol.Typing{Type: "typing", Room: "room_xxx"})
+	for i := 0; i < 10; i++ {
+		s.handleTyping(alice.Client, raw)
+	}
+
+	// Counter fires on rejections — after 10 rapid calls at rate=1/sec,
+	// some rejections should have occurred.
+	if got := s.counters.Get(counters.SignalRateLimited, "dev_alice_typing_silent"); got < 1 {
+		t.Errorf("SignalRateLimited on handleTyping = %d, want >= 1", got)
+	}
+
+	// Silent-drop: NO rate-limit error written to the wire regardless
+	// of how many rejections fired. Some messages may go to the wire
+	// from successful typing broadcasts, but none with
+	// code=rate_limited.
+	for _, m := range alice.messages() {
+		var e protocol.Error
+		if err := json.Unmarshal(m, &e); err == nil && e.Code == protocol.ErrRateLimited {
+			t.Errorf("handleTyping silent-drop leaked rate-limit error to wire: %s", m)
+		}
+	}
+}
+
 // --- Config sanity ---
 
 func TestRateLimitsSection_Step5DefaultsSet(t *testing.T) {

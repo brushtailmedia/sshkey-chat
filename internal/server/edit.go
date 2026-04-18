@@ -93,8 +93,9 @@ func (s *Server) handleEdit(c *Client, raw json.RawMessage) {
 	}
 
 	// Step 3: rate limit.
-	if !s.limiter.allowPerMinute("edit:"+c.UserID, s.cfg.Server.RateLimits.EditsPerMinute) {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many edits — wait a moment"})
+	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("edit:"+c.UserID, s.cfg.Server.RateLimits.EditsPerMinute); !allowed {
+		s.rejectAndLog(c, counters.SignalRateLimited, "edit", "edit rate limit exceeded (shared bucket)",
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many edits — wait a moment", RetryAfterMs: retryMs})
 		return
 	}
 
@@ -211,8 +212,9 @@ func (s *Server) handleEditGroup(c *Client, raw json.RawMessage) {
 	}
 
 	// Step 3: rate limit.
-	if !s.limiter.allowPerMinute("edit:"+c.UserID, s.cfg.Server.RateLimits.EditsPerMinute) {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many edits — wait a moment"})
+	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("edit:"+c.UserID, s.cfg.Server.RateLimits.EditsPerMinute); !allowed {
+		s.rejectAndLog(c, counters.SignalRateLimited, "edit", "edit rate limit exceeded (shared bucket)",
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many edits — wait a moment", RetryAfterMs: retryMs})
 		return
 	}
 
@@ -339,8 +341,9 @@ func (s *Server) handleEditDM(c *Client, raw json.RawMessage) {
 	}
 
 	// Step 3: rate limit.
-	if !s.limiter.allowPerMinute("edit:"+c.UserID, s.cfg.Server.RateLimits.EditsPerMinute) {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many edits — wait a moment"})
+	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("edit:"+c.UserID, s.cfg.Server.RateLimits.EditsPerMinute); !allowed {
+		s.rejectAndLog(c, counters.SignalRateLimited, "edit", "edit rate limit exceeded (shared bucket)",
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many edits — wait a moment", RetryAfterMs: retryMs})
 		return
 	}
 

@@ -233,18 +233,20 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	if !s.limiter.allowPerMinute("upload:"+c.UserID, s.cfg.Server.RateLimits.UploadsPerMinute) {
-		// Phase 17 Step 4c Part 3: count rate-limit rejections on the
-		// attachment path so Phase 17b observability sees the signal.
-		// Not in AutoRevokeSignals (load-shaped, legitimate clients
-		// trip this during bursty catchup) but counted for visibility.
+	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("upload:"+c.UserID, s.cfg.Server.RateLimits.UploadsPerMinute); !allowed {
+		// Phase 17 Step 4c Part 3 + Step 6: count the rejection AND
+		// populate retry_after_ms on the UploadError wire response.
+		// Counted for observability only; rate_limited is NOT in
+		// AutoRevokeSignals (load signal — legitimate clients trip
+		// this during bursty catchup).
 		s.rejectAndLog(c, counters.SignalRateLimited, "upload_start",
 			"upload rate limit exceeded", nil)
 		c.Encoder.Encode(protocol.UploadError{
-			Type:     "upload_error",
-			UploadID: msg.UploadID,
-			Code:     protocol.ErrRateLimited,
-			Message:  "Too many uploads — wait a moment",
+			Type:         "upload_error",
+			UploadID:     msg.UploadID,
+			Code:         protocol.ErrRateLimited,
+			Message:      "Too many uploads — wait a moment",
+			RetryAfterMs: retryMs,
 		})
 		return
 	}
@@ -538,10 +540,9 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 	// 60/min (1/sec) is higher than other refresh verbs because
 	// attachment-heavy chat views (photo gallery, multi-image threads)
 	// legitimately fire bursts of download requests when opened.
-	if !s.limiter.allowPerMinute("download:"+c.UserID, s.cfg.Server.RateLimits.DownloadRequestsPerMinute) {
-		s.rejectAndLog(c, counters.SignalRateLimited, "download",
-			"download rate limit exceeded", nil)
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many download requests — wait a moment"})
+	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("download:"+c.UserID, s.cfg.Server.RateLimits.DownloadRequestsPerMinute); !allowed {
+		s.rejectAndLog(c, counters.SignalRateLimited, "download", "download rate limit exceeded",
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many download requests — wait a moment", RetryAfterMs: retryMs})
 		return
 	}
 

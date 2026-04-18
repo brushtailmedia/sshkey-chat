@@ -1022,10 +1022,11 @@ type UploadComplete struct {
 // instead of waiting forever for upload_ready. Code matches the protocol
 // error codes (Err* constants).
 type UploadError struct {
-	Type     string `json:"type"`      // "upload_error"
-	UploadID string `json:"upload_id"`
-	Code     string `json:"code"`
-	Message  string `json:"message"`
+	Type         string `json:"type"`                      // "upload_error"
+	UploadID     string `json:"upload_id"`
+	Code         string `json:"code"`
+	Message      string `json:"message"`
+	RetryAfterMs int64  `json:"retry_after_ms,omitempty"`  // Phase 17 Step 6: populated on rate-limit rejections
 }
 
 type Download struct {

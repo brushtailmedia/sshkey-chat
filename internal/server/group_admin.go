@@ -74,15 +74,19 @@ func (s *Server) checkGroupAdminAuth(c *Client, groupID string) bool {
 
 // checkAdminActionRateLimit enforces AdminActionsPerMinute per-user-per-group.
 // Returns true if the action is allowed, false if rate-limited (error
-// response already sent).
+// response already sent). Phase 17 Step 6: populates RetryAfterMs on
+// the wire response + fires SignalRateLimited. Single site covers all
+// 4 admin verb callers (add/remove/promote/demote).
 func (s *Server) checkAdminActionRateLimit(c *Client, groupID string) bool {
 	key := "group_admin:" + c.UserID + ":" + groupID
-	if !s.limiter.allowPerMinute(key, s.cfg.Server.RateLimits.AdminActionsPerMinute) {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    protocol.ErrRateLimited,
-			Message: "Too many admin actions — wait a moment",
-		})
+	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry(key, s.cfg.Server.RateLimits.AdminActionsPerMinute); !allowed {
+		s.rejectAndLog(c, counters.SignalRateLimited, "group_admin", "admin action rate limit exceeded",
+			&protocol.Error{
+				Type:         "error",
+				Code:         protocol.ErrRateLimited,
+				Message:      "Too many admin actions — wait a moment",
+				RetryAfterMs: retryMs,
+			})
 		return false
 	}
 	return true
