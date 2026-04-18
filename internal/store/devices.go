@@ -62,6 +62,25 @@ func (s *Store) GetAllDevices() ([]Device, error) {
 	return devices, rows.Err()
 }
 
+// GetDeviceOwner returns the user ID that owns the given device_id.
+// Returns ("", sql.ErrNoRows) if the device isn't registered.
+//
+// Phase 17b uses this to resolve (user, device) from the counters
+// key, which is device-only. The active-connection path (iterate
+// s.clients) covers the common case; this method is the fallback for
+// offline devices that crossed a threshold in a prior tick and then
+// disconnected before revocation fired.
+//
+// Note: the devices table PRIMARY KEY is (user, device_id), so a
+// bare device_id lookup is a table scan. Fine at current cardinality
+// (10k devices typical); add an index on device_id if deployments
+// grow beyond that.
+func (s *Store) GetDeviceOwner(deviceID string) (string, error) {
+	var user string
+	err := s.dataDB.QueryRow(`SELECT user FROM devices WHERE device_id = ?`, deviceID).Scan(&user)
+	return user, err
+}
+
 // GetDevices returns all devices for a user.
 func (s *Store) GetDevices(user string) ([]Device, error) {
 	rows, err := s.dataDB.Query(`

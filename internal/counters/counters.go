@@ -312,6 +312,25 @@ func (c *Counters) Get(signal, deviceID string) int64 {
 	return e.value.Load()
 }
 
+// DevicesFor returns the list of device IDs that have at least one
+// recorded event for the given signal. Used by Phase 17b's auto-revoke
+// goroutine to drive per-device Check calls without snapshotting the
+// entire counter map on every tick.
+//
+// Return order is unspecified. The slice is a fresh copy — mutating
+// it has no effect on internal state.
+func (c *Counters) DevicesFor(signal string) []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var out []string
+	for k := range c.data {
+		if k.signal == signal {
+			out = append(out, k.deviceID)
+		}
+	}
+	return out
+}
+
 // Snapshot returns a deep copy of the current counter state, keyed by
 // signal → deviceID → count. The returned map is a fresh copy — mutating
 // it does not affect internal state, and subsequent Snapshot calls return

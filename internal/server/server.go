@@ -119,6 +119,16 @@ type Server struct {
 	// the previously dual-purpose user_left_rooms table — see
 	// refactor_plan.md.
 	removeFromRoomStop chan struct{}
+
+	// autoRevokeStop signals the auto-revoke processor to stop.
+	// Closed by Close() during shutdown. The processor evaluates
+	// configured [server.auto_revoke] thresholds against the
+	// counter sliding windows every autoRevokePollInterval and
+	// enqueues revocations into pending_device_revocations for
+	// devices that cross. Different shape from the Phase 16 Gap 1
+	// processors: this one WRITES into an existing queue rather
+	// than draining a dedicated one. Phase 17b.
+	autoRevokeStop chan struct{}
 }
 
 // roomRetirementPollInterval is how often the room retirement
@@ -151,6 +161,7 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		roomUpdateStop:       make(chan struct{}),
 		deviceRevocationStop: make(chan struct{}),
 		removeFromRoomStop:   make(chan struct{}),
+		autoRevokeStop:       make(chan struct{}),
 	}
 
 	// Open storage if data directory provided
@@ -289,6 +300,17 @@ func (s *Server) ListenAndServe() error {
 	s.processPendingRemoveFromRoom()
 	go s.runRemoveFromRoomProcessor()
 
+	// Start the auto-revoke processor (Phase 17b). Evaluates
+	// configured [server.auto_revoke] thresholds against counter
+	// sliding windows every autoRevokePollInterval. Enqueues
+	// revocations for devices that cross; the existing
+	// runDeviceRevocationProcessor drains them. Goroutine starts
+	// unconditionally — observer mode (enabled=false) keeps the
+	// loop running and logs "auto_revoke_would_fire" without
+	// enqueuing, so operators can diagnose false positives with
+	// the breaker disarmed.
+	go s.runAutoRevokeProcessor()
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -412,6 +434,16 @@ func (s *Server) Close() error {
 			// already closed
 		default:
 			close(s.removeFromRoomStop)
+		}
+	}
+
+	// Stop the auto-revoke processor goroutine (Phase 17b)
+	if s.autoRevokeStop != nil {
+		select {
+		case <-s.autoRevokeStop:
+			// already closed
+		default:
+			close(s.autoRevokeStop)
 		}
 	}
 
