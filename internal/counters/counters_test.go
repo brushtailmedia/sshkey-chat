@@ -234,6 +234,7 @@ func TestAutoRevokeSignals_ExactList(t *testing.T) {
 		SignalDownloadNotFound:     true,
 		SignalDownloadNoChannel:    true,
 		SignalReconnectFlood:       true, // Phase 17b Step 5c
+		SignalErrorFlood:           true, // Phase 17c Step 1
 	}
 	if len(AutoRevokeSignals) != len(want) {
 		t.Errorf("AutoRevokeSignals len = %d, want %d", len(AutoRevokeSignals), len(want))

@@ -163,3 +163,79 @@ func (s *Server) fanOutOne(verb string, msg any, c *Client) {
 		c.Channel.Close()
 	}
 }
+
+// respondError is the Phase 17c Step 1 chokepoint for typed error
+// responses. Every error a handler returns to a client goes through
+// this function. Responsibilities:
+//
+//  1. Consult the per-device error-response rate limiter. If the
+//     client has exceeded the ErrorResponsesPerMinute budget, silently
+//     drop the error (no wire bytes, no client-visible log entry)
+//     AND increment SignalErrorFlood so Phase 17b auto-revoke can
+//     escalate cross-connection abusers. Silent-drop preserves
+//     Category D's byte-identical privacy invariant: a rate-limited
+//     client sees "no response at all" regardless of the original
+//     rejection reason.
+//
+//  2. Encode the typed protocol.Error{} onto the client's NDJSON
+//     channel via the mutex-protected safeEncoder. Sets Type="error"
+//     automatically so callers don't have to remember it. retryAfterMs
+//     uses `omitempty` so 0 is elided from the wire (callers pass 0
+//     for non-Category-A errors).
+//
+// Callers MUST `return` immediately after invoking respondError — like
+// rejectAndLog, this helper does NOT break control flow, and forgetting
+// the return leaves the handler executing with inconsistent state.
+//
+// corrID is echoed from the inbound request (possibly empty if the
+// client didn't supply one). Server never persists it; respondError
+// simply includes it in the response when non-empty.
+//
+// c == nil is accepted but effectively a no-op (rate-limit skipped,
+// encode skipped) — matches rejectAndLog's nil-safety for Channel 3
+// and similar no-client-available paths.
+func (s *Server) respondError(c *Client, corrID, code, message string, retryAfterMs int64) {
+	if c == nil {
+		return
+	}
+
+	// Per-device error-response rate limit. 0 disables.
+	limit := s.cfg.Server.RateLimits.ErrorResponsesPerMinute
+	if limit > 0 {
+		if allowed, _ := s.limiter.allowPerMinuteWithRetry("errors:"+c.DeviceID, limit); !allowed {
+			// Silent drop: count the rate-limit rejection as a
+			// SignalErrorFlood event so Phase 17b can escalate
+			// cross-connection abusers. NO wire response, no
+			// client-visible log (the drop IS the enforcement).
+			s.counters.Inc(counters.SignalErrorFlood, c.DeviceID)
+			s.logger.Debug("error response silently dropped (rate limit)",
+				"device", c.DeviceID,
+				"code", code,
+			)
+			return
+		}
+	}
+
+	_ = c.Encoder.Encode(protocol.Error{
+		Type:         "error",
+		Code:         code,
+		Message:      message,
+		RetryAfterMs: retryAfterMs,
+		CorrID:       corrID,
+	})
+}
+
+// respondOpaque is the Category D helper: byte-identical privacy
+// rejection. Always emits the same wire shape (code="denied",
+// message="operation rejected") regardless of the underlying
+// server-side reason — preserves Phase 14's privacy invariant that
+// probing clients can't distinguish "not a member" from "room
+// doesn't exist" from "deleted row".
+//
+// corrID is echoed; rest of the wire shape is fixed by
+// protocol.OpaqueReject(). Routes through respondError so the
+// per-device error-rate-limit + SignalErrorFlood discipline applies
+// uniformly.
+func (s *Server) respondOpaque(c *Client, corrID string) {
+	s.respondError(c, corrID, protocol.CodeDenied, "operation rejected", 0)
+}

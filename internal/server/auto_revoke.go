@@ -73,6 +73,7 @@ var autoRevokeDescriptions = map[string]string{
 	counters.SignalDownloadNotFound:     "too many invalid download requests",
 	counters.SignalDownloadNoChannel:    "upload channel misuse (client bug)",
 	counters.SignalReconnectFlood:       "reconnecting too rapidly",
+	counters.SignalErrorFlood:           "generating too many error responses",
 }
 
 // buildAutoRevokeReason builds the operator-readable reason string

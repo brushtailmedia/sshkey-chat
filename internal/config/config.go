@@ -197,6 +197,18 @@ type RateLimitsSection struct {
 	// 0 disables disconnect-on-drops (drops still counted, but the
 	// channel stays open — not recommended).
 	ConsecutiveDropDisconnectThreshold int `toml:"consecutive_drop_disconnect_threshold"`
+
+	// ErrorResponsesPerMinute is the Phase 17c Step 1 per-device cap
+	// on outbound error response volume. respondError consults this
+	// before sending; on exceed the error is silently dropped (no
+	// wire bytes, no log) and the per-device SignalErrorFlood
+	// counter increments — Phase 17b auto-revoke picks up
+	// cross-connection abusers via `[server.auto_revoke.thresholds]
+	// error_flood = "10:60"` (typical). Default 60 matches the
+	// downloads_per_minute cadence; bounds a legitimate burst
+	// (e.g. opening a busy room with stale epochs). 0 disables the
+	// check entirely.
+	ErrorResponsesPerMinute int `toml:"error_responses_per_minute"`
 	// AdminActionsPerMinute caps the rate at which a single user can issue
 	// in-group admin verbs (add_to_group, remove_from_group, promote_group_admin,
 	// demote_group_admin, rename_group) against a single group. Scoped per
@@ -319,6 +331,8 @@ func DefaultServerConfig() ServerConfig {
 			// Phase 17b Step 5b: per-client outbound queue
 			PerClientWriteBufferSize:           256, // ~50s of chatty-room traffic
 			ConsecutiveDropDisconnectThreshold: 10,  // disconnect slow readers
+			// Phase 17c Step 1: error-response rate limit per device
+			ErrorResponsesPerMinute: 60, // bounds legit error bursts; 0 disables
 		},
 		Shutdown: ShutdownSection{
 			GracePeriod: "10s",

@@ -91,6 +91,18 @@ const (
 	// windows (tight default ~10:60) flag as flooding.
 	// Phase 17b Step 5c.
 	SignalReconnectFlood = "reconnect_flood"
+
+	// SignalErrorFlood fires when the per-device error-response rate
+	// limit rejects an outbound error in respondError. Note: NOT on
+	// every error response — only on the rate-limit REJECTION of an
+	// error send. Ordinary errors within the per-minute budget don't
+	// increment this. A client whose request pattern generates
+	// errors so fast that the server refuses to even send them back
+	// is a misbehaving client by definition; cross-connection
+	// escalation via Phase 17b auto-revoke (`error_flood = "10:60"`
+	// typical) catches clients that reconnect to evade the
+	// per-connection rate limit. Phase 17c Step 1.
+	SignalErrorFlood = "error_flood"
 )
 
 // Load signals — counted but NEVER auto-revoke inputs.
@@ -125,6 +137,7 @@ var AutoRevokeSignals = []string{
 	SignalDownloadNotFound,
 	SignalDownloadNoChannel,
 	SignalReconnectFlood,
+	SignalErrorFlood,
 }
 
 // key identifies a single counter — (signal, deviceID). Unexported so callers

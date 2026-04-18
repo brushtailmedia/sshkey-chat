@@ -1229,6 +1229,7 @@ type Error struct {
 	Message      string `json:"message"`                   // human-readable description
 	Ref          string `json:"ref,omitempty"`             // message ID that caused the error
 	RetryAfterMs int64  `json:"retry_after_ms,omitempty"`  // Phase 17: populated on rate-limit rejections; client backoff hint
+	CorrID       string `json:"corr_id,omitempty"`         // Phase 17c: echoed from the inbound request so clients correlate errors to their send queue entries
 }
 
 // Error codes
