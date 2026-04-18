@@ -61,6 +61,66 @@ func TestLoadMinimal(t *testing.T) {
 // ignored — operators upgrading from a pre-Phase-16 install will see
 // a warning in the server logs (from reload.go) but Load itself
 // shouldn't even look at the file.
+// TestDockerReferenceServerToml_LoadsCleanly locks in that the
+// operator-facing reference TOML shipped in docker/config/server.toml
+// parses successfully through the full Load + Validate pipeline —
+// including Phase 17b's [server.auto_revoke] validator. Regression
+// guard: future changes to the config schema that drop or rename a
+// documented key will fail this test before reaching CI.
+func TestDockerReferenceServerToml_LoadsCleanly(t *testing.T) {
+	// Copy the reference server.toml + a minimal rooms.toml into a
+	// temp dir and Load. Reference is at ../../docker/config/server.toml
+	// relative to internal/config/.
+	refPath := filepath.Join("..", "..", "docker", "config", "server.toml")
+	data, err := os.ReadFile(refPath)
+	if err != nil {
+		t.Fatalf("read reference server.toml: %v", err)
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "server.toml"), data, 0644); err != nil {
+		t.Fatalf("write temp server.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rooms.toml"), []byte(`
+[general]
+topic = "General"
+`), 0644); err != nil {
+		t.Fatalf("write rooms.toml: %v", err)
+	}
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load(reference docker/config/server.toml): %v", err)
+	}
+
+	// Spot-check that Phase 17 + 17b knobs populated from TOML, not
+	// just defaults — detects silent deletion of documented keys.
+	if cfg.Server.Server.AutoRevoke.PruneAfterHours != 168 {
+		t.Errorf("auto_revoke.prune_after_hours = %d, want 168 (reference TOML)", cfg.Server.Server.AutoRevoke.PruneAfterHours)
+	}
+	if !cfg.Server.Server.AutoRevoke.Enabled {
+		t.Error("auto_revoke.enabled should be true in reference TOML")
+	}
+	if cfg.Server.Server.AutoRevoke.Thresholds["malformed_frame"] != "3:60" {
+		t.Errorf("auto_revoke.thresholds.malformed_frame = %q, want 3:60",
+			cfg.Server.Server.AutoRevoke.Thresholds["malformed_frame"])
+	}
+	if cfg.Server.Server.AutoRevoke.Thresholds["reconnect_flood"] == "" {
+		t.Error("reference TOML should document reconnect_flood threshold")
+	}
+	if cfg.Server.Files.MaxFileIDsPerMessage != 20 {
+		t.Errorf("files.max_file_ids_per_message = %d, want 20",
+			cfg.Server.Files.MaxFileIDsPerMessage)
+	}
+	if cfg.Server.Groups.MaxMembers != 150 {
+		t.Errorf("groups.max_members = %d, want 150", cfg.Server.Groups.MaxMembers)
+	}
+	if cfg.Server.RateLimits.PerClientWriteBufferSize != 256 {
+		t.Errorf("rate_limits.per_client_write_buffer_size = %d, want 256",
+			cfg.Server.RateLimits.PerClientWriteBufferSize)
+	}
+}
+
 func TestLoadIgnoresUsersTomlIfPresent(t *testing.T) {
 	dir := writeMinimalConfig(t)
 	// Put a junk users.toml in the directory.

@@ -1,3 +1,13 @@
+# sshkey-chat server configuration — reference file.
+#
+# Every knob documented below carries its default value and a comment
+# explaining the trade-off when tuning. Commented-out entries show the
+# default; uncomment to override.
+
+# ----------------------------------------------------------------------
+# [server] — SSH listener + server policy
+# ----------------------------------------------------------------------
+
 [server]
 port = 2222
 bind = "0.0.0.0"
@@ -15,43 +25,232 @@ bind = "0.0.0.0"
 # their view without admin intervention.
 # allow_self_leave_retired_rooms = true
 
+# ----------------------------------------------------------------------
+# [server.auto_revoke] — Phase 17b: auto-revoke on sustained misbehavior
+# ----------------------------------------------------------------------
+#
+# The auto-revoke breaker watches per-device counters for misbehavior
+# signals (malformed frames, invalid identifiers, oversized envelopes,
+# etc.) and revokes a device that crosses the configured threshold
+# within the configured window.
+#
+# Every auto-revoke signal has a zero legitimate baseline — a
+# well-behaved client produces ZERO of them during normal operation.
+# Tight thresholds (2-5 events in 60s) are the right default because
+# any volume above that is conclusive evidence of a broken or hostile
+# client. See docs/ops/auto_revoke.md for the full operator guide
+# including monitoring, disable procedure, and device restoration.
+#
+# Revoked devices are restored via `sshkey-ctl restore-device --user
+# USER --device DEV`. The SSH key itself is unaffected — only the
+# specific device_id is blocked. Admins retain structural access via
+# OS-level SSH to the server host, so a misconfigured breaker never
+# traps an admin out of the system.
+
+[server.auto_revoke]
+# Enable the breaker. Default true — ships secure.
+# Set false to run in observer mode: the goroutine continues evaluating
+# thresholds and logs "auto_revoke_would_fire" (Info level) showing what
+# WOULD fire, but does not enqueue revocations. Use during initial
+# observation or while diagnosing a suspected false-positive storm.
+enabled = true
+
+# TTL for stale counter entries. When a device hasn't generated any
+# counter event for this many hours, its entry becomes eligible for
+# opportunistic pruning (evicted on the next new-entry Inc in the
+# counters package). Must strictly exceed the largest configured
+# threshold window (converted to hours, rounded up). 0 disables
+# TTL-based pruning entirely — entries persist until server restart.
+prune_after_hours = 168  # 7 days
+
+# Per-signal thresholds. Format: "count:window_seconds". Omit a key to
+# disable checking for that signal.
+#
+# Signal keys must match counters.Signal* constant string values
+# (snake_case). Adding a new signal in the counters package auto-accepts
+# it here — no config-loader code change needed. Unknown keys, load
+# signals (rate_limited), and observational signals (broadcast_dropped)
+# are rejected at startup with category-tagged errors.
+[server.auto_revoke.thresholds]
+# Protocol-layer misbehavior — tight thresholds for zero-baseline
+# signals. Raise only if client bug storms force operator intervention.
+malformed_frame        = "3:60"   # malformed JSON / decode failures
+oversized_body         = "2:60"   # payload exceeds max_body_size
+unknown_verb           = "5:60"   # unknown protocol verb
+invalid_nanoid         = "5:60"   # malformed room/group/dm ID shape
+invalid_content_hash   = "3:60"   # upload_start content_hash malformed
+oversized_upload_frame = "2:60"   # Channel 3 frame exceeds limits
+
+# Envelope caps — oversized wrapped_keys / file_ids arrays.
+wrapped_keys_over_cap  = "2:60"
+file_ids_over_cap      = "2:60"
+
+# Access violations — requests to contexts the client is not a
+# member of, or attacking the download path.
+non_member_context     = "5:60"
+download_not_found     = "5:60"   # covers ACL-deny + cascade race + I/O error
+download_no_channel    = "3:60"   # client sent download before opening Ch2
+
+# Connection hardening.
+reconnect_flood        = "10:60"  # device thrashing session setup
+
+# ----------------------------------------------------------------------
+# [messages]
+# ----------------------------------------------------------------------
+
 [messages]
 max_body_size = "16KB"
 
+# ----------------------------------------------------------------------
+# [retention]
+# ----------------------------------------------------------------------
+
 [retention]
-purge_days = 0
+purge_days = 0      # 0 = keep forever
+
+# ----------------------------------------------------------------------
+# [sync]
+# ----------------------------------------------------------------------
 
 [sync]
 window_messages = 200
 window_days = 7
 history_page_size = 100
 
+# ----------------------------------------------------------------------
+# [files] — attachment limits
+# ----------------------------------------------------------------------
+
 [files]
-max_file_size = "50MB"                  # increase with care — see grace_period below
+max_file_size = "50MB"                           # increase with care — see grace_period below
 max_avatar_size = "256KB"
 allowed_avatar_types = ["image/png", "image/jpeg"]
+
+# Phase 17 Step 4c: envelope-level file_ids[] cap at message-send time.
+# Defends against crafted messages that reference an unbounded number
+# of attachment IDs. Default 20 matches the WhatsApp batch-send ceiling
+# and sits comfortably above typical chat use. Raise only for
+# deployments that grow a legitimate multi-attach UX requiring more
+# than 20 files per message.
+max_file_ids_per_message = 20
+
+# ----------------------------------------------------------------------
+# [devices]
+# ----------------------------------------------------------------------
 
 [devices]
 max_per_user = 10
 
+# ----------------------------------------------------------------------
+# [groups] — group DM policy
+# ----------------------------------------------------------------------
+
+[groups]
+# Phase 17 Step 4d: hard cap on group-DM membership. Enforced at
+# create_group and add_to_group; also the upper bound on the
+# wrapped_keys envelope size the server will accept. Default 150
+# matches the pre-Phase-17 hardcoded value and PROTOCOL.md
+# documentation. At 150 members, each send carries ~12KB of per-message
+# wrapped-key material and ~15ms of per-member crypto. Smaller
+# deployments can tune down; larger deployments with hardware to match
+# can tune up.
+max_members = 150
+
+# ----------------------------------------------------------------------
+# [rate_limits] — per-user traffic shaping + connection hardening
+# ----------------------------------------------------------------------
+
 [rate_limits]
+# Message-send bucket (per second).
 messages_per_second = 5
+
+# Uploads: one token bucket per user, per-minute refill.
 uploads_per_minute = 60
+
+# Connection-open rate, per remote IP. Defense against connect floods
+# at the TCP/SSH layer before auth runs.
 connections_per_minute = 10
+
+# Failed-auth rate, per remote IP. Stops brute-force SSH key probing.
 failed_auth_per_minute = 5
+
+# Typing notifications — these fire continuously when users type, so
+# per-second granularity suppresses spam while allowing natural typing.
 typing_per_second = 1
+
+# History scroll-back pagination.
 history_per_minute = 50
+
+# Delete verbs (own messages + admin delete).
 deletes_per_minute = 10
 admin_deletes_per_minute = 50
+
+# Reactions: higher ceiling because reaction storms (🎉 on announcement
+# messages) are legitimate.
 reactions_per_minute = 30
+
+# DM creation — new 1:1 DM conversations + group DM creation.
 dm_creates_per_minute = 5
+
+# Profile updates (display name, avatar).
 profiles_per_minute = 5
+
+# Pin/unpin verbs.
 pins_per_minute = 10
+
+# Phase 14: admin verb rate limit. Applies to add_to_group,
+# remove_from_group, promote_group_admin, demote_group_admin,
+# rename_group — per user per group. Server-initiated paths
+# (retirement cascade, last-member cleanup) are exempt.
+admin_actions_per_minute = 20
+
+# Phase 15: message editing verb rate limit. Shared bucket per user
+# across edit / edit_group / edit_dm so a user can't bypass the limit
+# by interleaving across contexts.
+edits_per_minute = 10
+
+# Phase 17 Step 5: refresh-verb coverage.
+room_members_per_minute = 6   # info-panel refresh cadence (one every 10s)
+device_list_per_minute = 6    # settings-panel device refresh cadence
+download_requests_per_minute = 60  # attachment-heavy chat view tolerance
+
+# ----- Phase 17b connection hardening -----
+
+# Phase 17b Step 5a: NDJSON idle-timeout watchdog. If a connection
+# sends no complete protocol frame for this many seconds, the server
+# closes its SSH channel. 0 disables (default) — operators tune post-
+# launch once legitimate quiet-user idle patterns are observed.
+# Slow-loris defense; SSH-layer keepalive (30s) already kills dead
+# TCP connections independently.
+idle_timeout_seconds = 0
+
+# Phase 17b Step 5b: per-client outbound message queue size. Broadcasts
+# (fanOut) enqueue non-blocking into each recipient's queue; a slow
+# reader whose queue fills incurs drops rather than blocking the
+# broadcast for other recipients. Default 256 absorbs ~50 seconds of a
+# chatty room's traffic. Memory budget: size × active connections.
+per_client_write_buffer_size = 256
+
+# Phase 17b Step 5b: consecutive-drop disconnect threshold. After this
+# many consecutive full-queue drops to the same client, the server
+# closes their SSH channel. Disconnect (not auto-revoke) is the remedy
+# — the client reconnects with a clean slate and sync-catchup. 0
+# disables disconnect-on-drops (drops still counted via
+# SignalBroadcastDropped, but channel stays open — not recommended).
+consecutive_drop_disconnect_threshold = 10
+
+# ----------------------------------------------------------------------
+# [shutdown]
+# ----------------------------------------------------------------------
 
 [shutdown]
 grace_period = "10s"                    # time to finish in-flight transfers on shutdown
                                         # if you increase max_file_size, increase this too
                                         # rule of thumb: max_file_size / 10 MB/s = minimum grace
+
+# ----------------------------------------------------------------------
+# [logging]
+# ----------------------------------------------------------------------
 
 [logging]
 level = "info"
@@ -59,6 +258,10 @@ file = "/var/sshkey-chat/server.log"
 max_size_mb = 100
 max_files = 5
 format = "json"
+
+# ----------------------------------------------------------------------
+# [push]
+# ----------------------------------------------------------------------
 
 [push.apns]
 enabled = false
