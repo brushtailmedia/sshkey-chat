@@ -164,6 +164,12 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		autoRevokeStop:       make(chan struct{}),
 	}
 
+	// Phase 17b Step 4: propagate prune_after_hours from config to
+	// the counters package. Sets the stale-entry TTL that drives
+	// opportunistic pruning + Get/Snapshot/DevicesFor stale-filter.
+	// 0 disables pruning (entries persist until restart).
+	s.counters.SetTTLHours(cfg.Server.Server.AutoRevoke.PruneAfterHours)
+
 	// Open storage if data directory provided
 	if dir != "" {
 		st, err := store.Open(dir)

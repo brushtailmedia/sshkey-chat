@@ -164,6 +164,23 @@ type Counters struct {
 	// nowFn returns the current unix second. Replaceable for tests
 	// (see setNowFn). Never nil after New.
 	nowFn func() int64
+
+	// ttlSec (Phase 17b Step 4) is the stale-entry TTL in seconds.
+	// 0 disables TTL-based pruning entirely — entries persist until
+	// server restart. Set via SetTTLHours during server startup;
+	// atomic to allow lock-free reads from Get/Snapshot/DevicesFor.
+	ttlSec atomic.Int64
+
+	// nextPruneSize (Phase 17b Step 4) is the data-map size threshold
+	// that triggers an opportunistic prune. Prune fires in Inc's
+	// new-entry slow path when len(data) >= nextPruneSize. After
+	// pruning, it resets to max(len(data)*2, 64) — amortizes O(N)
+	// prune cost across log(N) prune events as the map grows.
+	//
+	// Only accessed under c.mu (write lock in Inc slow path, read
+	// lock not needed because the check happens inside Inc's write
+	// section).
+	nextPruneSize int
 }
 
 // New returns an initialized Counters with the default sliding-window
@@ -180,10 +197,66 @@ func NewWithRingCap(n int) *Counters {
 		n = defaultRingCap
 	}
 	return &Counters{
-		data:    make(map[key]*entry),
-		ringCap: n,
-		nowFn:   func() int64 { return time.Now().Unix() },
+		data:          make(map[key]*entry),
+		ringCap:       n,
+		nowFn:         func() int64 { return time.Now().Unix() },
+		nextPruneSize: initialPruneSize,
 	}
+}
+
+// initialPruneSize is the floor for the opportunistic-prune threshold.
+// Before the map grows to this size, prune is a no-op; once it crosses
+// this, prune fires and nextPruneSize resets to max(len(data)*2, 64).
+const initialPruneSize = 64
+
+// SetTTLHours configures the stale-entry TTL used by the opportunistic
+// pruner and the Get/Snapshot/DevicesFor stale-filter. Negative values
+// are clamped to 0 (disabled). 0 disables pruning entirely.
+//
+// Typical lifecycle: counters.New() → SetTTLHours(cfg.PruneAfterHours)
+// at server startup, before any Inc calls. Safe to call at any time
+// (atomic write) but behavior is only well-defined if called before
+// Inc pressure begins, to avoid a window where pruning is off.
+func (c *Counters) SetTTLHours(hours int) {
+	if hours < 0 {
+		hours = 0
+	}
+	c.ttlSec.Store(int64(hours) * 3600)
+}
+
+// isStale reports whether the entry's lastInc is older than the
+// configured TTL. TTL=0 means pruning is disabled → always false.
+// Thread-safe (all reads atomic).
+func (c *Counters) isStale(e *entry, now int64) bool {
+	ttl := c.ttlSec.Load()
+	if ttl <= 0 {
+		return false
+	}
+	return e.lastInc.Load() < now-ttl
+}
+
+// pruneStaleLocked deletes entries whose lastInc is older than ttlSec
+// seconds ago, then resets nextPruneSize to max(len(data)*2, 64).
+// Amortizes O(N) prune cost across log(N) growth events.
+//
+// Must be called with c.mu held in write mode.
+// No-op if ttlSec <= 0 (pruning disabled).
+func (c *Counters) pruneStaleLocked(now int64) {
+	ttl := c.ttlSec.Load()
+	if ttl <= 0 {
+		return
+	}
+	cutoff := now - ttl
+	for k, e := range c.data {
+		if e.lastInc.Load() < cutoff {
+			delete(c.data, k)
+		}
+	}
+	newSize := len(c.data) * 2
+	if newSize < initialPruneSize {
+		newSize = initialPruneSize
+	}
+	c.nextPruneSize = newSize
 }
 
 // setNowFn replaces the clock used for timestamps. Test-only (unexported);
@@ -229,6 +302,15 @@ func (c *Counters) Inc(signal, deviceID string) int64 {
 		e.lastInc.Store(now)
 		e.appendTimestamp(now, c.ringCap)
 		return e.value.Add(1)
+	}
+
+	// Phase 17b Step 4: opportunistic prune before adding the new
+	// entry. Fires when the data map has grown past nextPruneSize;
+	// no-op when TTL is disabled (ttlSec=0). Hot path (existing
+	// entry) is unaffected — only new-entry creation pays the
+	// amortized prune cost.
+	if len(c.data) >= c.nextPruneSize {
+		c.pruneStaleLocked(now)
 	}
 
 	e = &entry{}
@@ -302,11 +384,18 @@ func (c *Counters) Check(signal, deviceID string, threshold, windowSec int) bool
 
 // Get returns the current count for (signal, deviceID). Returns 0 if the key
 // is not present. Thread-safe.
+//
+// Phase 17b Step 4: returns 0 for entries past the configured TTL
+// (stale-filter) even if they haven't been physically deleted yet.
+// Callers never see stale data regardless of prune cadence.
 func (c *Counters) Get(signal, deviceID string) int64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	e, ok := c.data[key{signal: signal, deviceID: deviceID}]
 	if !ok {
+		return 0
+	}
+	if c.isStale(e, c.nowFn()) {
 		return 0
 	}
 	return e.value.Load()
@@ -319,14 +408,24 @@ func (c *Counters) Get(signal, deviceID string) int64 {
 //
 // Return order is unspecified. The slice is a fresh copy — mutating
 // it has no effect on internal state.
+//
+// Phase 17b Step 4: stale entries (lastInc past TTL) are excluded,
+// matching Get/Snapshot semantics. Avoids handing the auto-revoke
+// goroutine device IDs whose counters are about to be physically
+// pruned.
 func (c *Counters) DevicesFor(signal string) []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	now := c.nowFn()
 	var out []string
-	for k := range c.data {
-		if k.signal == signal {
-			out = append(out, k.deviceID)
+	for k, e := range c.data {
+		if k.signal != signal {
+			continue
 		}
+		if c.isStale(e, now) {
+			continue
+		}
+		out = append(out, k.deviceID)
 	}
 	return out
 }
@@ -335,11 +434,20 @@ func (c *Counters) DevicesFor(signal string) []string {
 // signal → deviceID → count. The returned map is a fresh copy — mutating
 // it does not affect internal state, and subsequent Snapshot calls return
 // new maps.
+//
+// Phase 17b Step 4: stale entries are filtered out. An operator
+// inspecting Snapshot sees the live picture — no lingering rows for
+// devices that haven't misbehaved within the TTL window — without
+// depending on prune timing.
 func (c *Counters) Snapshot() map[string]map[string]int64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	now := c.nowFn()
 	out := make(map[string]map[string]int64, len(c.data))
 	for k, e := range c.data {
+		if c.isStale(e, now) {
+			continue
+		}
 		bySignal, ok := out[k.signal]
 		if !ok {
 			bySignal = make(map[string]int64)
