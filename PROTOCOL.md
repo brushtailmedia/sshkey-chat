@@ -227,23 +227,33 @@ The key wrapping above gets you the symmetric key. Here's how to use it for the 
 
 Client signs every message and reaction with their Ed25519 private key. The signature is in the envelope (server can see it, can't modify it without detection).
 
-**Canonical serialization (two forms):**
+**Canonical serialization (four forms):**
+
+Send-path (`send` / `send_group` / `send_dm` / reactions):
 
 - **Rooms:** `Sign(payload_bytes || room_id_utf8 || epoch_as_big_endian_uint64)`
 - **Group DMs and 1:1 DMs:** `Sign(payload_bytes || context_id_utf8 || wrapped_keys_canonical)`
   - `context_id` is the group nanoid for group DMs, or the dm nanoid for 1:1 DMs
   - Same signing function for both — the context ID is the only difference
 
+Edit-path (`edit` / `edit_group` / `edit_dm` — Phase 21 item 3):
+
+- **Rooms:** `Sign("edit_room:" || uint32_be(len(msg_id)) || msg_id_utf8 || payload_bytes || room_id_utf8 || epoch_as_big_endian_uint64)`
+- **Group DMs and 1:1 DMs:** `Sign("edit_dm:" || uint32_be(len(msg_id)) || msg_id_utf8 || payload_bytes || context_id_utf8 || wrapped_keys_canonical)`
+
+The edit-path forms add two protections over the send-path forms: a domain-separation tag (`"edit_room:"` / `"edit_dm:"`) prevents a valid send signature from being replayed as a valid edit signature, and a length-prefixed `msg_id` binds the signature to one specific message row so a compromised server cannot replay a sender's past signed `(payload, context, epoch)` triple against a different `msg_id` to rewrite history via the edit broadcast path. Motivation: the Phase 15 `edited` / `group_edited` / `dm_edited` broadcasts overwrite existing message rows in recipients' local DBs, making the substitution attack invisible (only a `(edited)` marker distinguishes a genuine edit from a forged one), so binding to `msg_id` closes that gap.
+
 Where `wrapped_keys_canonical` is the wrapped key **values** (not keys/usernames) concatenated in sorted **user-ID order**. Implementation: sort the `wrapped_keys` map keys (user nanoids) alphabetically, then concatenate the corresponding base64-decoded wrapped-key values in that order.
 
-All fields are raw bytes: `payload_bytes` is the base64-decoded ciphertext (not the base64 string), `room_id_utf8` / `context_id_utf8` is the UTF-8 nanoid string, `epoch` is an 8-byte big-endian uint64.
+All fields are raw bytes: `payload_bytes` is the base64-decoded ciphertext (not the base64 string), `room_id_utf8` / `context_id_utf8` / `msg_id_utf8` is the UTF-8 string, `epoch` is an 8-byte big-endian uint64, `uint32_be(len(msg_id))` is a 4-byte big-endian length prefix.
 
 **Verification rules:**
 - Valid signature: display normally
 - Missing signature: show "unsigned" indicator
 - Invalid signature: hard warning — "This message failed signature verification"
+- **Edit broadcasts (`edited` / `group_edited` / `dm_edited`): verify-or-drop.** Clients MUST verify the edit signature against the edit-path canonical form before applying the edit to local state. A failed verification silently drops the broadcast — the stored message row stays unchanged. This is the defense-in-depth contract introduced by Phase 21 item 3; without it a compromised server can rewrite history invisibly.
 
-**Reactions use the same signing scheme** as messages in their respective context (room reactions sign with epoch, DM/group reactions sign with wrapped keys).
+**Reactions use the same signing scheme** as messages in their respective context (room reactions sign with epoch, DM/group reactions sign with wrapped keys). Reactions are not currently editable, so the edit-path canonical forms do not apply to them.
 
 ### Replay Detection
 
@@ -689,7 +699,7 @@ Three verb families mirror the send-family split: `edit` / `edited` for rooms, `
 
 **Reactions on edited messages are cleared.** The server drops all rows for the edited message ID from the per-context `reactions` table in the same transaction as the payload replace. Clients unconditionally clear their locally-cached reaction state for the edited message ID when they process the `edited` / `group_edited` / `dm_edited` envelope — no per-reaction `reaction_removed` broadcasts are emitted, matching the delete-tombstone pattern. Reaction preservation across edits is explicitly NOT a goal (Signal behaves the same way).
 
-**Signature is a pass-through blob.** The server does not verify `signature` on `edit` / `edit_group` / `edit_dm`, matching the existing `send` / `send_group` / `send_dm` behaviour where signatures are relayed opaquely and recipients verify client-side via their local TOFU pinned-key table. Authorship for the row replacement is established by the authenticated SSH channel, not the signature. Cross-cutting server-side signature verification is a separate future hardening decision.
+**Signature is a pass-through blob at the server, verify-or-drop at the client (Phase 21 item 3).** The server does not verify `signature` on `edit` / `edit_group` / `edit_dm`, matching `send` / `send_group` / `send_dm` where signatures are relayed opaquely. Authorship for the server-side row replacement is established by the authenticated SSH channel, not the signature. **Recipient clients MUST verify the signature** against the msgID-bound edit-path canonical form (see "Message Signatures" above) before applying the edit to local state — a failed verification silently drops the broadcast, leaving the stored row unchanged. The `edit_room:` / `edit_dm:` domain-separation prefix plus the length-prefixed `msg_id` field mean a compromised server cannot replay a sender's past valid send signatures across different msgIDs to rewrite history invisibly.
 
 **No edit history retained.** The original payload is replaced in place. No prior-versions list, no `/edits` verb, no edit-history viewer — matches Signal. Edits preserve the thread graph (same ID, same `ts`, same `reply_to`), but the pre-edit text is gone.
 
