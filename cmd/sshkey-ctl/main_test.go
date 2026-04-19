@@ -4,10 +4,13 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -1084,6 +1087,55 @@ func TestRevokeDevice_MissingArgs(t *testing.T) {
 }
 
 // --- Status tests ---
+
+// TestStatus_ProcessLineRunning verifies that status reports "running
+// (PID N) since <ts>" when a live lockfile exists. Phase 19 Step 2.
+//
+// Seeds the dataDir with a lockfile containing the current test
+// process's PID (guaranteed alive — the test is running). Captures
+// stdout and asserts the Process line reports running.
+func TestStatus_ProcessLineRunning(t *testing.T) {
+	users := map[string]testUser{
+		"usr_alice": {Key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJPpG4hFrxw7JOAppGdh0JrkNDNGxypfmwJxNFCWXnpG", DisplayName: "Alice"},
+	}
+	configDir := setupConfig(t, users, nil)
+	dataDir := setupDataDir(t, map[string]config.Room{"general": {}}, users)
+
+	// Seed a lockfile at the expected path with our own PID + a
+	// recognisable start timestamp.
+	lockPath := filepath.Join(dataDir, "sshkey-server.pid")
+	content := fmt.Sprintf("%d\n%d\n", os.Getpid(), time.Now().Unix())
+	if err := os.WriteFile(lockPath, []byte(content), 0644); err != nil {
+		t.Fatalf("seed lockfile: %v", err)
+	}
+
+	// Capture stdout for the duration of the call.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	origStdout := os.Stdout
+	os.Stdout = w
+
+	err = cmdStatus(configDir, dataDir)
+
+	w.Close()
+	os.Stdout = origStdout
+
+	if err != nil {
+		t.Fatalf("cmdStatus: %v", err)
+	}
+	var buf strings.Builder
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("copy pipe: %v", err)
+	}
+	output := buf.String()
+
+	wantSub := fmt.Sprintf("running (PID %d)", os.Getpid())
+	if !strings.Contains(output, wantSub) {
+		t.Errorf("status output missing %q\n---\n%s---", wantSub, output)
+	}
+}
 
 func TestStatus_ShowsCounts(t *testing.T) {
 	aliceKey, _ := genTestKey(t, "Alice")

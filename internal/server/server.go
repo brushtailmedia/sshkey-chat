@@ -18,10 +18,17 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
+	"github.com/brushtailmedia/sshkey-chat/internal/lockfile"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/push"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
+
+// lockfileName is the filename (inside dataDir) of the server process
+// lockfile. Phase 19 Step 2 — prevents double-start on the same dataDir
+// and gates `sshkey-ctl restore` from running against a live server.
+// CLI consumers read the file at the same path.
+const lockfileName = "sshkey-server.pid"
 
 // Server is the sshkey-chat SSH server.
 type Server struct {
@@ -215,6 +222,21 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		// Remove orphan files from crashed uploads (files on disk with
 		// no hash record in the DB — they never completed successfully)
 		s.cleanOrphanFiles()
+
+		// Phase 19 Step 2: write the server-process lockfile. Refuses
+		// to start if another server instance is running against this
+		// dataDir (double-start protection). Stale lockfiles from prior
+		// crashes are overwritten automatically — the Write path does
+		// the PID-alive check internally.
+		//
+		// The lockfile gates `sshkey-ctl restore` from running against
+		// a live server (primary purpose) and powers reliable
+		// running-vs-not reporting in `sshkey-ctl status`. Removed on
+		// graceful shutdown via Server.Close.
+		lockPath := filepath.Join(dir, lockfileName)
+		if err := lockfile.Write(lockPath); err != nil {
+			return nil, fmt.Errorf("lockfile: %w", err)
+		}
 	}
 
 	// Initialize push relay (nil if not configured)
@@ -492,6 +514,18 @@ func (s *Server) Close() error {
 	// Close store (flushes WAL)
 	if s.store != nil {
 		if err := s.store.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	// Phase 19 Step 2: remove the lockfile as the last action. A crash
+	// mid-shutdown leaves the file in place; the next startup's
+	// stale-PID check handles it. Only graceful shutdown reaches this
+	// line. Done AFTER store.Close so the store is already flushed
+	// when the lockfile disappears — an observer following the
+	// lockfile state knows the DBs are consistent.
+	if s.dataDir != "" {
+		if err := lockfile.Remove(filepath.Join(s.dataDir, lockfileName)); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

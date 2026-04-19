@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
+	"github.com/brushtailmedia/sshkey-chat/internal/lockfile"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
 
@@ -1442,6 +1444,26 @@ func cmdRestoreDevice(dataDir string, args []string) error {
 }
 
 func cmdStatus(configDir, dataDir string) error {
+	// Process state (Phase 19 Step 2: read the server lockfile).
+	// Reported first so operators running `status` against a failed
+	// server see the most important signal up top.
+	lockPath := filepath.Join(dataDir, "sshkey-server.pid")
+	processLine := "not running"
+	if info, err := lockfile.Read(lockPath); err == nil {
+		if info.Alive {
+			processLine = fmt.Sprintf("running (PID %d) since %s",
+				info.PID, info.StartedAt.UTC().Format(time.RFC3339))
+		} else {
+			// Stale lockfile — process is dead but file remains.
+			// Usually means an ungraceful crash; flag it so the
+			// operator can investigate before the next start cleans it.
+			processLine = fmt.Sprintf("not running (stale lockfile — PID %d exited)", info.PID)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		// Lockfile exists but is unreadable — worth surfacing.
+		processLine = fmt.Sprintf("unknown (lockfile unreadable: %v)", err)
+	}
+
 	// Users + Rooms from store
 	st, err := store.Open(dataDir)
 	if err != nil {
@@ -1476,8 +1498,8 @@ func cmdStatus(configDir, dataDir string) error {
 		for _, e := range entries {
 			if strings.HasSuffix(e.Name(), ".db") {
 				dbCount++
-				if info, err := e.Info(); err == nil {
-					totalSize += info.Size()
+				if entryInfo, err := e.Info(); err == nil {
+					totalSize += entryInfo.Size()
 				}
 			}
 		}
@@ -1485,6 +1507,7 @@ func cmdStatus(configDir, dataDir string) error {
 
 	fmt.Println("sshkey-chat server status")
 	fmt.Println("─────────────────────────")
+	fmt.Printf("Process:      %s\n", processLine)
 	fmt.Printf("Users:        %d active, %d retired\n", active, retired)
 	fmt.Printf("Rooms:        %d\n", len(rooms))
 	fmt.Printf("Pending keys: %d\n", pendingCount)

@@ -62,6 +62,7 @@ type ServerConfig struct {
 	Shutdown   ShutdownSection   `toml:"shutdown"`
 	Logging    LoggingSection    `toml:"logging"`
 	Push       PushSection       `toml:"push"`
+	Backup     BackupSection     `toml:"backup"` // Phase 19 — scheduled backup + retention
 }
 
 type ServerSection struct {
@@ -344,6 +345,23 @@ func DefaultServerConfig() ServerConfig {
 			MaxFiles:  5,
 			Format:    "json",
 		},
+		Backup: BackupSection{
+			// Phase 19 default-on. See refactor_plan.md §Phase 19
+			// decision #11 for the asymmetry rationale — the cost
+			// of "wrong default on" is ~30KB of disk on an unused
+			// test server; the cost of "wrong default off" is
+			// total data loss on disk failure in production.
+			// skip_if_idle = true neutralizes the default-on
+			// cost on truly-idle deployments.
+			Enabled:            true,
+			Interval:           "24h",
+			DestDir:            "backups", // relative → <dataDir>/backups/
+			RetentionCount:     10,
+			RetentionAge:       "720h", // 30 days
+			Compress:           true,
+			SkipIfIdle:         true,
+			IncludeConfigFiles: true,
+		},
 	}
 }
 
@@ -372,14 +390,22 @@ func LoadServerConfig(path string) (ServerConfig, error) {
 // Returns startup warnings (non-fatal; caller should surface to
 // operator) and hard errors (abort startup).
 //
-// Phase 17b Step 1 adds [server.auto_revoke] validation. Future
-// cross-section checks land here too.
+// Phase 17b Step 1 adds [server.auto_revoke] validation.
+// Phase 19 Step 1 adds [backup] validation. Future cross-section
+// checks land here too.
 func (c ServerConfig) Validate() (warnings []string, err error) {
 	_, warn, err := c.Server.AutoRevoke.ParseAndValidate()
 	if err != nil {
 		return nil, err
 	}
 	warnings = append(warnings, warn...)
+
+	_, warnBackup, err := c.Backup.ParseAndValidate()
+	if err != nil {
+		return nil, err
+	}
+	warnings = append(warnings, warnBackup...)
+
 	return warnings, nil
 }
 
