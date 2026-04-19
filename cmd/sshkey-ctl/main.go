@@ -13,6 +13,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/lockfile"
+	"github.com/brushtailmedia/sshkey-chat/internal/server"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
 
@@ -1510,6 +1511,11 @@ func cmdStatus(configDir, dataDir string) error {
 		}
 	}
 
+	// Backup scheduler stats (Phase 19 Step 5). Reads the sidecar
+	// JSON the scheduler writes after each attempt. Absent file →
+	// all zeros (scheduler hasn't run yet, or [backup].enabled=false).
+	bkFails, bkSuccesses, bkLastSuccess, bkLastFailure, bkLastErr := server.ReadBackupStatsForCLI(dataDir)
+
 	fmt.Println("sshkey-chat server status")
 	fmt.Println("─────────────────────────")
 	fmt.Printf("Process:      %s\n", processLine)
@@ -1517,6 +1523,16 @@ func cmdStatus(configDir, dataDir string) error {
 	fmt.Printf("Rooms:        %d\n", len(rooms))
 	fmt.Printf("Pending keys: %d\n", pendingCount)
 	fmt.Printf("Databases:    %d files, %s\n", dbCount, formatBytes(totalSize))
+	fmt.Printf("Backups:      %d successes, %d failures\n", bkSuccesses, bkFails)
+	if !bkLastSuccess.IsZero() {
+		fmt.Printf("              last success: %s\n", bkLastSuccess.UTC().Format(time.RFC3339))
+	}
+	if !bkLastFailure.IsZero() {
+		fmt.Printf("              last failure: %s\n", bkLastFailure.UTC().Format(time.RFC3339))
+		if bkLastErr != "" {
+			fmt.Printf("              last error:   %s\n", bkLastErr)
+		}
+	}
 	fmt.Printf("Config:       %s\n", configDir)
 	fmt.Printf("Data:         %s\n", dataDir)
 	return nil

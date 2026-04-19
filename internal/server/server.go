@@ -147,6 +147,47 @@ type Server struct {
 	// repeated pushes within 1s are no-ops; the client's retry
 	// logic applies the previous push.
 	stateFixLast map[string]int64
+
+	// backupSchedulerStop signals the backup scheduler goroutine
+	// to stop. Closed by Close() during shutdown. The scheduler
+	// runs backup.Run on a configurable interval (default 24h)
+	// alongside the 7 Phase 16 Gap 1 processors. Phase 19 Step 5.
+	backupSchedulerStop chan struct{}
+
+	// backupMu serializes scheduler ticks against manual
+	// `sshkey-ctl backup` invocations within the same process AND
+	// against subsequent scheduler ticks (long-running backup
+	// against a small interval). Acquired via TryLock — losing
+	// contender skips this tick rather than queueing.
+	//
+	// Cross-process contention (server scheduler vs. CLI in
+	// another shell) is NOT covered by this mutex — that would
+	// need a file lock on dest_dir. In practice the CLI and
+	// scheduler producing tarballs simultaneously is harmless
+	// (different timestamps, no filename collision; SQLite Online
+	// Backup tolerates concurrent readers). The mutex's job is to
+	// stop two backups in the same process from racing on the
+	// same staging dir + temp file path.
+	backupMu sync.Mutex
+
+	// backupSkipState tracks the data.db PRAGMA data_version and
+	// the max mtime of data/files/ at the time of the last
+	// successful backup. The next scheduler tick compares current
+	// values against these; if both are unchanged AND
+	// skip_if_idle is true, the tick is skipped. In-memory only —
+	// after restart the first scheduler tick always runs (a
+	// restart often coincides with deployment changes worth
+	// snapshotting). Phase 19 Step 5.
+	backupSkipState backupSkipState
+}
+
+// backupSkipState is the per-Server state used by the skip_if_idle
+// check. Reset on Server start (in-memory only).
+type backupSkipState struct {
+	mu              sync.Mutex
+	initialized     bool
+	lastDataVersion int64
+	lastFilesMtime  time.Time
 }
 
 // roomRetirementPollInterval is how often the room retirement
@@ -181,6 +222,7 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		removeFromRoomStop:   make(chan struct{}),
 		autoRevokeStop:       make(chan struct{}),
 		stateFixLast:         make(map[string]int64),
+		backupSchedulerStop:  make(chan struct{}),
 	}
 
 	// Phase 17b Step 4: propagate prune_after_hours from config to
@@ -351,6 +393,16 @@ func (s *Server) ListenAndServe() error {
 	// the breaker disarmed.
 	go s.runAutoRevokeProcessor()
 
+	// Start the backup scheduler goroutine (Phase 19 Step 5).
+	// Runs internal/backup.Run on a configurable interval (default
+	// 24h) with retention pruning. Skipped if [backup].enabled =
+	// false (the scheduler logs and returns immediately, the
+	// goroutine just exits — manual `sshkey-ctl backup` still works
+	// regardless of the enabled flag). 60-second startup grace
+	// period before the first immediate backup so the server has
+	// time to settle before the IO spike.
+	go s.runBackupScheduler()
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -484,6 +536,21 @@ func (s *Server) Close() error {
 			// already closed
 		default:
 			close(s.autoRevokeStop)
+		}
+	}
+
+	// Stop the backup scheduler goroutine (Phase 19 Step 5).
+	// In-flight backup is NOT cancelled — backup.Run does not
+	// honor a context for the per-DB Step loop, and aborting
+	// mid-tarball would leave a partial in dest_dir (the temp
+	// file would survive the process exit). Letting the current
+	// tick finish is harmless and correct.
+	if s.backupSchedulerStop != nil {
+		select {
+		case <-s.backupSchedulerStop:
+			// already closed
+		default:
+			close(s.backupSchedulerStop)
 		}
 	}
 
