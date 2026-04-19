@@ -229,7 +229,10 @@ func validateTarball(path string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("tar header: %w", err)
 		}
-		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
+		// tar.TypeRegA was deprecated in Go 1.11 and the stdlib tar
+		// reader normalises TypeRegA ('\x00') entries to TypeReg on
+		// read, so checking TypeReg alone is sufficient.
+		if header.Typeflag != tar.TypeReg {
 			return nil, fmt.Errorf("entry %q: only regular files allowed (got typeflag %d)", header.Name, header.Typeflag)
 		}
 		if filepath.IsAbs(header.Name) {

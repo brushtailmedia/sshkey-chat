@@ -292,9 +292,7 @@ func (s *Store) SetUserUnretired(userID string) error {
 	newName := user.DisplayName
 	if len(userID) > 8 {
 		suffix := "_" + userID[4:8]
-		if strings.HasSuffix(newName, suffix) {
-			newName = strings.TrimSuffix(newName, suffix)
-		}
+		newName = strings.TrimSuffix(newName, suffix)
 	}
 
 	_, err := s.usersDB.Exec(`

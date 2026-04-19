@@ -44,7 +44,7 @@ func cmdSetDefaultRoom(dataDir string, args []string) error {
 		return fmt.Errorf("usage: set-default-room ROOM_NAME\n\n" +
 			"Flags a room as 'default' AND backfills every active user\n" +
 			"as a member. Every new user approved or bootstrapped after\n" +
-			"this point will also auto-join the flagged room.")
+			"this point will also auto-join the flagged room")
 	}
 	roomName := args[0]
 
@@ -113,7 +113,7 @@ func cmdUnsetDefaultRoom(dataDir string, args []string) error {
 		return fmt.Errorf("usage: unset-default-room ROOM_NAME\n\n" +
 			"Clears the 'default' flag on a room. EXISTING members are\n" +
 			"NOT removed — only future user approvals will skip this\n" +
-			"room. To kick everyone, retire the room instead.")
+			"room. To kick everyone, retire the room instead")
 	}
 	roomName := args[0]
 

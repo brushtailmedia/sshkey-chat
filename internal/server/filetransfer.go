@@ -564,6 +564,22 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	// Defensive nil-store guard. Peer handlers (handleEdit / handleSend
+	// / handleRoomMembers) all short-circuit before their first store
+	// dereference; this handler's `authorizeDownload` call below is
+	// where the first dereference happens in this flow. The guard is
+	// unreachable in production (the server never runs with a nil
+	// store), but matching the peer pattern prevents a future refactor
+	// from introducing a nil-deref. Response uses the same
+	// privacy-uniform "not_found" shape as the ACL-deny and
+	// file-missing paths so a probing client cannot distinguish
+	// server misconfiguration from "the file doesn't exist." Phase 21
+	// F2 closure (2026-04-19); see docs/security/handler_auth_audit.md.
+	if s.store == nil {
+		s.respondDownloadError(c, msg.CorrID, msg.FileID, "not_found", "File not found: "+msg.FileID)
+		return
+	}
+
 	// ACL check: caller must be a current member of the file's bound
 	// context, and (for rooms/groups) joined before the file was
 	// attached. Forward-secrecy gate for rooms/groups; party-only for

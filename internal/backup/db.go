@@ -92,7 +92,7 @@ func runOnlineBackup(conn *sql.Conn, dstPath string) error {
 			more, err := bk.Step(backupPageStep)
 			if err != nil {
 				_ = bk.Finish()
-				return fmt.Errorf("Step: %w", err)
+				return fmt.Errorf("step: %w", err)
 			}
 			if !more {
 				break

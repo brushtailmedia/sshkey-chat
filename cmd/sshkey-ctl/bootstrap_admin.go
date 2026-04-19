@@ -63,7 +63,7 @@ func cmdBootstrapAdmin(dataDir string, args []string) error {
 		return fmt.Errorf("usage: bootstrap-admin DISPLAY_NAME\n\n" +
 			"Generates a new admin keypair, writes the encrypted private\n" +
 			"key to ./<name>_ed25519 in the current directory, and inserts\n" +
-			"a user row with admin=true into users.db.")
+			"a user row with admin=true into users.db")
 	}
 
 	rawDisplayName := args[0]
@@ -100,7 +100,7 @@ func cmdBootstrapAdmin(dataDir string, args []string) error {
 	// the "operator ran from / by mistake" failure mode early.
 	probe := filepath.Join(cwd, ".bootstrap-admin-write-probe")
 	if f, err := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY, 0600); err != nil {
-		return fmt.Errorf("cannot write to current directory %s: %w. Run bootstrap-admin from a writable directory.", cwd, err)
+		return fmt.Errorf("cannot write to current directory %s: %w (run bootstrap-admin from a writable directory)", cwd, err)
 	} else {
 		f.Close()
 		os.Remove(probe)
@@ -231,7 +231,7 @@ func bootstrapAdminCore(st *store.Store, dataDir, displayName, passphrase, outDi
 	outBase := filepath.Join(outDir, displayName+"_ed25519")
 	pubBase := outBase + ".pub"
 	if err := os.WriteFile(outBase, privPEM, 0600); err != nil {
-		return nil, fmt.Errorf("write private key to %s: %w\n\nThe user row was created in users.db but the key file write failed.\nRetire the orphan with: sshkey-ctl retire-user %s --reason admin_mistake\nThen retry bootstrap-admin from a writable directory.", outBase, err, userID)
+		return nil, fmt.Errorf("write private key to %s: %w\n\nThe user row was created in users.db but the key file write failed.\nRetire the orphan with: sshkey-ctl retire-user %s --reason admin_mistake\nThen retry bootstrap-admin from a writable directory", outBase, err, userID)
 	}
 	if err := os.WriteFile(pubBase, []byte(pubLine+"\n"), 0644); err != nil {
 		return nil, fmt.Errorf("write public key to %s: %w (private key was written to %s, you can keep it)", pubBase, err, outBase)

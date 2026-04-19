@@ -3427,10 +3427,17 @@ func (s *Server) handleRoomMembers(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Check membership via rooms.db (req.Room is a nanoid)
+	// Membership check. Non-members AND unknown-room probes collapse
+	// into the byte-identical ErrUnknownRoom response so a client
+	// cannot use room_members to enumerate room existence by diffing
+	// error frames. Same pattern as handleEdit / handleSend.
+	//
+	// Phase 21 F1 closure (2026-04-19) — previously returned
+	// ErrNotAuthorized + "You are not a member of room: "+req.Room,
+	// which leaked existence because the wire bytes differed from the
+	// unknown-room path. See docs/security/audit_v0.2.0.md#F1.
 	if s.store == nil || !s.store.IsRoomMemberByID(req.Room, c.UserID) {
-		s.respondError(c, req.CorrID, protocol.ErrNotAuthorized,
-			"You are not a member of room: "+req.Room, 0)
+		s.sendUnknownRoom(c)
 		return
 	}
 

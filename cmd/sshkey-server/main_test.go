@@ -704,7 +704,7 @@ func TestDMConversations(t *testing.T) {
 	})
 
 	// Alice receives her own DM
-	msgType, raw = alice.readMessage()
+	msgType, _ = alice.readMessage()
 	if msgType != "dm" {
 		t.Fatalf("alice expected dm, got %s", msgType)
 	}
@@ -778,10 +778,6 @@ func TestDMConversations(t *testing.T) {
 	}
 
 	t.Log("DM conversations + silent leave fully verified")
-}
-
-func itoa(n int) string {
-	return fmt.Sprintf("%d", n)
 }
 
 // dmRowCutoffs reads the direct_messages row directly from data.db and

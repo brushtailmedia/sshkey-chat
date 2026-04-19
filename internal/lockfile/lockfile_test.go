@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -223,7 +224,14 @@ func TestIsAlive_InventedPIDIsDead(t *testing.T) {
 	}
 }
 
-func TestWrite_CleansTempFileOnSuccess(t *testing.T) {
+// TestWrite_NoLeakedTempFilesAfterAcquire verifies that the staged
+// tempfile used by the Phase 21 F6 tmpfile+Link pattern is cleaned
+// up after a successful Write — a deferred os.Remove in Write() is
+// supposed to delete the tempfile whether Link succeeded (inode
+// persists via the linked path) or failed. A regression would
+// accumulate `.sshkey-lockfile-*.tmp` files in the data directory
+// every startup.
+func TestWrite_NoLeakedTempFilesAfterAcquire(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.pid")
 
@@ -231,8 +239,84 @@ func TestWrite_CleansTempFileOnSuccess(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 
-	// The temp file should not exist after a successful Write.
-	if _, err := os.Stat(path + ".tmp"); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("temp file leaked: %v", err)
+	// The only file in dir should be the lockfile itself — no
+	// `.sshkey-lockfile-*.tmp` companions.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() == filepath.Base(path) {
+			continue
+		}
+		if strings.HasPrefix(e.Name(), ".sshkey-lockfile-") {
+			t.Errorf("leaked lockfile tempfile: %s", e.Name())
+		}
+	}
+}
+
+// TestWrite_ConcurrentAcquisitionExactlyOneSucceeds verifies the
+// Phase 21 F6 fix: N goroutines racing to acquire the same lockfile
+// must see exactly one success and (N-1) ErrAlreadyRunning. Before the
+// O_EXCL refactor, the Read-then-Write sequence had a TOCTOU window
+// where two concurrent fresh startups could both pass the aliveness
+// check and both write, letting the second's rename clobber the
+// first's lockfile without either returning ErrAlreadyRunning.
+//
+// This test asserts the correct outcome is deterministic: under
+// concurrent load, the lockfile semantic is exactly-one-winner.
+func TestWrite_ConcurrentAcquisitionExactlyOneSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.pid")
+
+	const goroutines = 20
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var successes int
+	var alreadyRunning int
+	var other []error
+	start := make(chan struct{})
+
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			<-start // release all goroutines simultaneously
+			err := Write(path)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				successes++
+			case errors.Is(err, ErrAlreadyRunning):
+				alreadyRunning++
+			default:
+				other = append(other, err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if successes != 1 {
+		t.Errorf("successes = %d, want exactly 1 (TOCTOU regression?)", successes)
+	}
+	if alreadyRunning != goroutines-1 {
+		t.Errorf("alreadyRunning = %d, want %d", alreadyRunning, goroutines-1)
+	}
+	if len(other) != 0 {
+		t.Errorf("unexpected errors: %v", other)
+	}
+
+	// The surviving lockfile must be parseable and carry the winning PID.
+	info, err := Read(path)
+	if err != nil {
+		t.Fatalf("Read surviving lockfile: %v", err)
+	}
+	if info.PID != os.Getpid() {
+		t.Errorf("surviving PID = %d, want %d", info.PID, os.Getpid())
+	}
+	if !info.Alive {
+		t.Error("surviving lockfile should report Alive=true")
 	}
 }

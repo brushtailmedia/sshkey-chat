@@ -637,6 +637,8 @@ Privacy: callers who are not members of the requested context get the same byte-
 - **Group DMs:** own messages only, no admin override (groups have no admin concept — admins have the CLI escape hatch)
 - **1:1 DMs:** own messages only
 
+**Why the asymmetry.** Rooms are the moderation surface: they're public-by-membership, admin-managed, and the room topic/rename/retire verbs all flow through the global admin gate. Admin-override of `delete` in rooms follows the same model — an operator removing abusive content in a shared space. Groups and 1:1 DMs have no analogous moderation role (groups use a flat peer-admin model for invite/remove/rename; DMs are strictly two-party), so an admin-override there would be an escalation without a policy justification. Operators who need to intervene in a group or DM (rare — typically abuse-investigation or legal-hold) use the `sshkey-ctl` CLI escape hatch to act directly on the SQLite files while the server is stopped; that path intentionally sits outside the protocol surface. See `docs/security/handler_auth_audit.md#handledelete` and `docs/security/audit_v0.2.0.md#F13` for the audit-finding rationale.
+
 Rate limited: 10 deletes/min for regular users, 50/min for admins (rooms only).
 
 Deletion is a **soft-delete** — the server keeps the message row with `deleted = 1` and cleared payload. Tombstones (`{"type":"deleted",...}`) are interleaved in `sync_batch` and `history_result` so clients that reconnect after a deletion receive the tombstone and update their display. Clients should render deleted messages as visible tombstones in the message stream (e.g. "message deleted") rather than removing them, to preserve conversation flow.
@@ -1217,6 +1219,21 @@ Auto-revoke adds one consequence to that baseline: a client that produces misbeh
 
 A client that ships with a bug producing (for example) malformed JSON under specific load conditions will see every affected instance auto-revoked as the bug triggers in the field. Server operators can disable auto-revoke as an emergency stop (`enabled = false` + restart), restore affected devices via `sshkey-ctl approve-device`, and re-enable auto-revoke after the corrected client build is deployed — but the cost of this incident is borne by users, not by the server. **Test client code against the validation rules before deploying.** This is a protocol-level contract, not a client-internal nice-to-have.
 
+### Keys as Identities (no-rotation invariant)
+
+**In sshkey-chat, a user's Ed25519 key IS their identity.** Keys are not credentials attached to an identity; they are the identity. The protocol does not support rotation — there is no "add a new key to my account" flow, no expiry, no key-update verb. A user exists for the lifetime of their keypair; when the key is gone, the user is gone.
+
+Consequences client builders must understand:
+
+- **`Profile.KeyFingerprint` for a given `Profile.User` (user ID) is stable across the user's entire active lifetime.** A server broadcasting a `profile` with a different `KeyFingerprint` for an existing user ID is producing anomalous data by design.
+- **A client's pinned fingerprint should never legitimately disagree with the server's broadcast value.** If your client maintains a TOFU cache (sshkey-term's `pinned_keys` table is the reference implementation), a mismatch event has exactly three causes:
+  1. The server is compromised and substituting a key in `profile` broadcasts (MITM).
+  2. A server bug is emitting a corrupted `KeyFingerprint`.
+  3. Local database tampering on the client side.
+  All three are abnormal; none are the "user got a new phone" case.
+- **Surface the mismatch loudly.** The recommended UX is a blocking modal that shows old vs. new fingerprints and requires an explicit Accept (re-pin) or Disconnect (drop the session) choice. Do NOT silently re-pin — the detection is the feature. See sshkey-term's `KeyWarningModel` for the reference implementation.
+- **"User needs a new key" is NOT this event.** When a legitimate user needs a new key (device loss, suspected compromise, switching_key), the flow is Retirement (next section) + new-account approval with a DIFFERENT user ID. The new account pins under a new `pinned_keys` row; the old account's row persists under the retired user ID. The two never collide at the user-ID key, so the schema/code path that detects same-user-ID fingerprint mismatch never fires on the legitimate-new-account path.
+
 ### Account Retirement
 
 Ed25519 keys are permanent identities on this server. There is no key rotation. When an account needs to end — lost key, compromised key, retired identity — the account is **retired**: monotonic, irreversible, and client-triggered or admin-triggered.
@@ -1731,3 +1748,47 @@ Things every client builder hits at least once:
 7. **Not storing `synced_to` from `sync_complete`.** This timestamp is your reconnect bookmark. Without it, every reconnect either gets no sync (empty `last_synced_at`) or the wrong sync window. Store it in your local DB immediately on receipt.
 
 8. **Epoch key confusion during rotation.** During the grace window (between `epoch_trigger` and `epoch_confirmed`), keep sending with the OLD epoch. The server accepts messages encrypted with the current or previous epoch. Only switch to the new epoch after receiving `epoch_confirmed`. If you receive `epoch_conflict`, another client's rotation won — discard your generated key and wait for the winning key via `epoch_key`.
+
+9. **Retransmits produce visible duplicates.** The server does not deduplicate sends. Every accepted `send` / `send_group` / `send_dm` gets a freshly-generated server-side `msg_<nanoid>` ID (via `generateID("msg_")`); the store's only uniqueness constraint is on that server-assigned ID column. If a client retransmits an identical `{payload, room/group/dm, signature}` envelope — for example because of a network retry after an ambiguous timeout — the server will store TWO rows with distinct IDs and broadcast BOTH to room/group/DM members. From the recipient's view this renders as the same message appearing twice in history with different `id` values.
+
+    Consequences for client builders:
+    - **Client dedup is by server-assigned `id`.** The local message table's primary key is `id` (the server's `msg_<nanoid>`), and that's the only dedup boundary. Two identical-looking messages with different `id` values are two distinct messages; the UI should render them as such.
+    - **`corr_id` is NOT an idempotency token.** Phase 17c added `corr_id` as a client-private correlation tag for matching server responses to the originating send (send-queue ack, error routing). The server does not consult `corr_id` for dedup and does not persist it. Two sends with the same `corr_id` will produce two distinct stored messages and two distinct successful responses — not one response reused.
+    - **There is no server-side idempotency key.** If your client retries a send after a timeout, do so only when you've decided the first attempt definitely did not land. Prefer waiting for explicit failure (server error response, connection loss with no `send_result`) over speculative retry. The client send queue shipped in Phase 17c uses this discipline — it does not retry on ambiguous state.
+    - **The spam defence is the rate limit, not idempotency.** `[rate_limits] messages_per_second` (default 5) bounds send volume; a client that retransmits at high rate trips the limit and gets `rate_limited` responses. Clients should not attempt to bypass this via retry storms — the cost is a revoked device via Phase 17b's `rate_limited`-adjacent signals if probing is sustained.
+
+    The design trade-off: duplicate-on-retransmit produces **visibly new rows** (distinct IDs), not silent history mutation. This is the same accepted-limitation shape as the send-path signature (which does not bind to `msg.ID` — see pitfall 10). The dangerous variant — a hostile server silently rewriting an EXISTING row — is closed separately by the edit-path signature binding (Phase 21 item 3) and the client-side verify-or-drop contract documented in the "Message Editing" section.
+
+10. **Send-path signatures do NOT bind to `msg.ID`.** The send-path canonical forms omit the server-assigned `msg.ID` by design, because the ID is generated server-side after the envelope is received:
+
+    ```
+    SignRoom(priv, payload, room, epoch)        // sshkey-term/internal/crypto/crypto.go:187
+      = Sign(payload_bytes || room_utf8 || epoch_big_endian_uint64)
+
+    SignDM(priv, payload, conversation, wrappedKeys)  // crypto.go:209
+      = Sign(payload_bytes || conversation_utf8 || wrapped_keys_canonical)
+    ```
+
+    The edit-path canonical forms DO bind to `msg.ID` via a domain-separation tag + length-prefixed msgID field:
+
+    ```
+    SignRoomEdit(priv, msgID, payload, room, epoch)   // crypto.go:244
+      = Sign("edit_room:" || uint32_be(len(msgID)) || msgID || payload_bytes || room_utf8 || epoch_big_endian_uint64)
+
+    SignDMEdit(priv, msgID, payload, conversation, wrappedKeys)  // crypto.go:268
+      = Sign("edit_dm:"   || uint32_be(len(msgID)) || msgID || payload_bytes || conversation_utf8 || wrapped_keys_canonical)
+    ```
+
+    **Why the asymmetry.** A compromised server that has a valid Alice-signed `(payload, room/dm, epoch/wrappedKeys)` envelope can replay it to create a DIFFERENT message row (different server-assigned `msg_<nanoid>`) carrying Alice's valid signature. For SENDS, this produces a visibly-new row in the conversation — the same accepted-limitation shape as retransmit duplicates in pitfall 9 above. For EDITS (pre-Phase-21), the same attack would have allowed the server to take Alice's old edit signature and apply it as an edit to a DIFFERENT existing message, silently mutating historical rows. That's the dangerous variant. Phase 21 item 3 closed it by:
+    - Adding msgID binding + domain separation to `SignRoomEdit` / `SignDMEdit`.
+    - Wiring client-side `VerifyRoomEdit` / `VerifyDMEdit` into the receive paths for `edited` / `group_edited` / `dm_edited` broadcasts — verify-or-drop, see `storeEditedRoomMessage` / `storeEditedGroupMessage` / `storeEditedDMMessage` in `sshkey-term/internal/client/persist.go`.
+
+    Send-path was left as an accepted limitation because closing it would require a two-phase commit (client sends preflight → server replies with reserved `msg.ID` → client signs + transmits), which doubles the round-trip cost of every message for no additional protection beyond what the visibly-new-row property already gives. The edit-path fix was necessary because `edited` broadcasts overwrite existing rows invisibly; sends create fresh rows that are obviously-new.
+
+    Consequences for client builders:
+    - **Treat send-path signatures as authenticity + payload-integrity, NOT authorization-to-edit.** A valid `SignRoom` signature proves "Alice authored this ciphertext under room X at epoch E" — it does NOT prove "this row is THE authoritative instance of that message."
+    - **Always verify edit-path signatures with msgID binding.** On receipt of any `edited` / `group_edited` / `dm_edited` broadcast, call `VerifyRoomEdit` / `VerifyDMEdit` with the msgID from the broadcast; drop the update if verification fails. This is the enforced contract from Phase 21 item 3 — without it, a compromised server can silently rewrite history.
+    - **Don't cross-verify send signatures as edit signatures.** The domain-separation tag (`"edit_room:"` / `"edit_dm:"`) guarantees a valid `SignRoom` signature will never pass `VerifyRoomEdit` regardless of how the attacker constructs inputs. Clients that persist message signatures should keep the two sets strictly distinct.
+    - **Offline-composed sends are more exposed.** A client that signs sends offline and transmits later (e.g., queued-while-disconnected) increases the window where a compromised relay could replay the signed envelope. The standard online send path already has this exposure, but offline-composed sends multiply it. If your client needs offline composition, consider prompting the user to confirm recipients before transmission so replay-to-different-context cannot happen silently.
+
+    A drift-guard test asserting "identical send envelopes produce distinct visible rows" is tracked as Phase 22 item 15 in `refactor_plan.md`; it covers both this pitfall and pitfall 9.

@@ -8,7 +8,6 @@
 package config
 
 import (
-	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"os"
@@ -503,68 +502,6 @@ func Load(dir string) (*Config, error) {
 		Dir:    dir,
 	}, nil
 }
-
-// isEd25519Key checks if the key string starts with ssh-ed25519.
-func isEd25519Key(key string) bool {
-	return len(key) > 11 && key[:11] == "ssh-ed25519"
-}
-
-// keyType extracts the key type prefix from an SSH public key string.
-func keyType(key string) string {
-	for i, c := range key {
-		if c == ' ' {
-			return key[:i]
-		}
-	}
-	return key
-}
-
-// validateSSHKey checks that the key string can be parsed as a valid SSH public key.
-func validateSSHKey(key string) error {
-	_, err := parseSSHKey(key)
-	return err
-}
-
-// parseSSHKey parses an SSH authorized_key format string.
-func parseSSHKey(key string) ([]byte, error) {
-	fields := splitFields(key)
-	if len(fields) < 2 {
-		return nil, fmt.Errorf("invalid key format")
-	}
-	// Decode the base64 key data to validate it
-	data, err := base64Decode(fields[1])
-	if err != nil {
-		return nil, fmt.Errorf("invalid base64 in key: %w", err)
-	}
-	return data, nil
-}
-
-// splitFields splits a string on whitespace (simple, no allocation for small fields).
-func splitFields(s string) []string {
-	var fields []string
-	start := -1
-	for i, c := range s {
-		if c == ' ' || c == '\t' {
-			if start >= 0 {
-				fields = append(fields, s[start:i])
-				start = -1
-			}
-		} else if start < 0 {
-			start = i
-		}
-	}
-	if start >= 0 {
-		fields = append(fields, s[start:])
-	}
-	return fields
-}
-
-// base64Decode decodes standard base64.
-func base64Decode(s string) ([]byte, error) {
-	return base64Std.DecodeString(s)
-}
-
-var base64Std = base64.StdEncoding
 
 // EnsureDataDir creates the data directory if it doesn't exist.
 func EnsureDataDir(path string) error {

@@ -26,6 +26,21 @@
 // with ErrAlreadyRunning so the second server instance can report
 // cleanly instead of fighting for file locks.
 //
+// Atomic acquire (Phase 21 F6 closure, 2026-04-19). Write stages the
+// full payload in a per-process tempfile then calls `os.Link(tmp,
+// path)` — POSIX link(2) is atomic and returns EEXIST if the target
+// exists, making it the canonical exclusive-create primitive for
+// file-based locks. Because the tempfile carries the complete
+// payload before the Link attempt, readers who see the linked path
+// always observe complete content; there is no empty-file window
+// that a plain O_EXCL-on-final-path approach would expose. Prior
+// implementation used a Read-then-temp-write-then-Rename sequence
+// with a microsecond-level TOCTOU window where two fresh startups
+// could both pass the aliveness check before either wrote, causing
+// the second's rename to clobber the first's lockfile with both
+// processes continuing to run. The tmpfile+Link pattern closes that
+// window structurally.
+//
 // Read semantics: returns parsed PID + start time + alive bool.
 // Callers decide what to do based on alive — Server.New refuses to
 // start if alive+same-dataDir; `sshkey-ctl restore` refuses to run
@@ -38,6 +53,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -57,55 +73,89 @@ type Info struct {
 	Alive     bool
 }
 
-// Write atomically writes a lockfile at path containing the current
+// Write atomically acquires a lockfile at path containing the current
 // process PID and start time.
 //
 // If a lockfile already exists:
-//   - Stale PID (process dead) → overwrites it, returns nil
+//   - Stale PID (process dead) → removes and retries, returns nil
 //   - Live PID → refuses with ErrAlreadyRunning
 //   - Unparseable → refuses with a clear error (don't silently clobber
 //     a file we don't understand — operator investigates manually)
 //
-// Write uses a temp-file + rename pattern so a crash mid-write can't
-// leave a partial lockfile that breaks parsing.
+// Atomicity: acquisition stages the complete payload in a per-process
+// tempfile then calls os.Link(tmp, path). POSIX link(2) is atomic and
+// returns EEXIST if the target exists — exactly one of N racing
+// processes wins. Because the tempfile holds the complete payload
+// before Link, readers always see full content on the linked path;
+// there is no zero-byte or partial-content race.
+//
+// The stale-retry path does one additional Link attempt after removing
+// the stale file. If that retry also collides (another process beat us
+// to the recovery), we return ErrAlreadyRunning against the winning
+// PID rather than looping indefinitely.
 func Write(path string) error {
-	// Check for an existing lockfile first.
-	if existing, err := Read(path); err == nil {
-		if existing.Alive {
-			return fmt.Errorf("%w: PID %d started at %s",
-				ErrAlreadyRunning, existing.PID, existing.StartedAt.UTC().Format(time.RFC3339))
-		}
-		// Stale — fall through to overwrite.
-	} else if !errors.Is(err, os.ErrNotExist) {
-		// Existing file that we couldn't parse. Don't clobber it.
-		return fmt.Errorf("existing lockfile at %s is unreadable: %w", path, err)
-	}
-
-	// Write to a temp file in the same directory, then rename for
-	// atomicity. Same directory is required for rename to be atomic
-	// on Unix (must be same filesystem).
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	if err != nil {
-		return fmt.Errorf("create %s: %w", tmp, err)
-	}
-
 	content := fmt.Sprintf("%d\n%d\n", os.Getpid(), time.Now().Unix())
-	if _, err := f.WriteString(content); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return fmt.Errorf("write %s: %w", tmp, err)
+
+	// Stage the full payload in a tempfile within the same directory
+	// as `path`. Same-directory is required so link(2) stays within a
+	// single filesystem (EXDEV otherwise). CreateTemp uses O_EXCL
+	// internally so two concurrent calls get distinct tempfile names.
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".sshkey-lockfile-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create lockfile tempfile in %s: %w", dir, err)
 	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("close %s: %w", tmp, err)
+	tmpName := tmp.Name()
+	// Always remove the tempfile: on success link(2) duplicates the
+	// inode so path survives; on failure the tempfile would otherwise
+	// leak.
+	defer os.Remove(tmpName)
+
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write lockfile tempfile %s: %w", tmpName, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close lockfile tempfile %s: %w", tmpName, err)
 	}
 
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("rename %s to %s: %w", tmp, path, err)
+	// First attempt: atomic exclusive-link to the final path.
+	if err := os.Link(tmpName, path); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("link %s to %s: %w", tmpName, path, err)
 	}
-	return nil
+
+	// Lockfile already exists. Check whether it's a live server or a
+	// stale post-crash artefact.
+	existing, readErr := Read(path)
+	if readErr != nil {
+		// File exists but is unparseable (corrupted). Refuse to
+		// clobber — operator investigates manually.
+		return fmt.Errorf("existing lockfile at %s is unreadable: %w", path, readErr)
+	}
+	if existing.Alive {
+		return fmt.Errorf("%w: PID %d started at %s",
+			ErrAlreadyRunning, existing.PID, existing.StartedAt.UTC().Format(time.RFC3339))
+	}
+
+	// Stale. Remove and retry once. A concurrent process racing on
+	// the same stale recovery could win the retry; in that case we
+	// return ErrAlreadyRunning against their PID.
+	if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+		return fmt.Errorf("remove stale lockfile %s: %w", path, rmErr)
+	}
+	if err := os.Link(tmpName, path); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("retry link %s to %s: %w", tmpName, path, err)
+	}
+	// Another process beat us to the stale-recovery retry.
+	if existing, readErr := Read(path); readErr == nil && existing.Alive {
+		return fmt.Errorf("%w: PID %d started at %s (beat us to stale-lock recovery)",
+			ErrAlreadyRunning, existing.PID, existing.StartedAt.UTC().Format(time.RFC3339))
+	}
+	return fmt.Errorf("%w: concurrent stale-lock recovery collided at %s", ErrAlreadyRunning, path)
 }
 
 // Read parses the lockfile at path and returns its contents plus a

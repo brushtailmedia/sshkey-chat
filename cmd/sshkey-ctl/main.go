@@ -312,7 +312,7 @@ func cmdApprove(configDir, dataDir string, args []string) error {
 	// Check for duplicate SSH key (same key already assigned to another user)
 	if existingID := st.GetUserByKey(keyLine); existingID != "" {
 		existing := st.GetUserByID(existingID)
-		return fmt.Errorf("this SSH key is already assigned to user %s (%s). Each key can only belong to one account.", existing.DisplayName, existingID)
+		return fmt.Errorf("this SSH key is already assigned to user %s (%s) — each key can only belong to one account", existing.DisplayName, existingID)
 	}
 
 	// Check display name not already in use
@@ -586,7 +586,7 @@ func cmdUnretireUser(dataDir string, args []string) error {
 			"clients so they flush the [retired] marker. Does NOT\n" +
 			"restore room/group/DM memberships — those were cleared\n" +
 			"on retirement and must be re-established manually via\n" +
-			"add-to-room or in-group /add.")
+			"add-to-room or in-group /add")
 	}
 	name := args[0]
 
@@ -750,7 +750,7 @@ func cmdRenameUser(dataDir string, args []string) error {
 		return fmt.Errorf("usage: rename-user USER_ID NEW_DISPLAY_NAME\n\n" +
 			"Forces a display name change server-side (moderation tool).\n" +
 			"The new name is validated for format and uniqueness.\n" +
-			"Connected clients receive a live profile update.")
+			"Connected clients receive a live profile update")
 	}
 	userID := args[0]
 	newName := args[1]
@@ -1653,8 +1653,16 @@ func cmdPurge(dataDir string, args []string) error {
 			continue
 		}
 
+		// Phase 21 F9 closure (2026-04-19) — every DB/fs call on the
+		// purge path now checks its error and reports to stderr. Prior
+		// code silently ignored failures, letting the "deleted N
+		// messages, vacuumed" success line print even when a DELETE
+		// failed. See docs/security/audit_v0.2.0.md#F9.
 		var count int
-		db.QueryRow("SELECT COUNT(*) FROM messages WHERE ts < ?", cutoff).Scan(&count)
+		if err := db.QueryRow("SELECT COUNT(*) FROM messages WHERE ts < ?", cutoff).Scan(&count); err != nil {
+			fmt.Fprintf(os.Stderr, "  %s: count query failed: %v (skipping)\n", name, err)
+			continue
+		}
 
 		if count == 0 {
 			continue
@@ -1667,28 +1675,72 @@ func cmdPurge(dataDir string, args []string) error {
 			// remove the bytes on disk + file_hashes row + file_contexts
 			// binding (Phase 17 Step 4.f — the binding cascade keeps the
 			// "file exists iff bound" invariant intact after bulk purge).
-			fileRows, _ := db.Query("SELECT file_ids FROM messages WHERE ts < ? AND file_ids != ''", cutoff)
-			if fileRows != nil {
+			// File cleanup errors are logged but don't abort the purge
+			// for this DB; the message-DELETE below is the critical
+			// operation whose success gates the "deleted N messages"
+			// output line.
+			fileRows, err := db.Query("SELECT file_ids FROM messages WHERE ts < ? AND file_ids != ''", cutoff)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  %s: file_ids query failed: %v (file cleanup skipped)\n", name, err)
+			} else {
 				for fileRows.Next() {
 					var fids string
-					fileRows.Scan(&fids)
-					if fids != "" {
-						for _, fid := range strings.Split(strings.Trim(fids, "[]\""), ",") {
-							fid = strings.Trim(fid, " \"")
-							if fid != "" {
-								os.Remove(filepath.Join(dataDir, "data", "files", fid))
-								st.DataDB().Exec("DELETE FROM file_hashes WHERE file_id = ?", fid)
-								st.DataDB().Exec("DELETE FROM file_contexts WHERE file_id = ?", fid)
-							}
+					if err := fileRows.Scan(&fids); err != nil {
+						fmt.Fprintf(os.Stderr, "  %s: file_ids scan failed: %v (skipping row)\n", name, err)
+						continue
+					}
+					if fids == "" {
+						continue
+					}
+					for _, fid := range strings.Split(strings.Trim(fids, "[]\""), ",") {
+						fid = strings.Trim(fid, " \"")
+						if fid == "" {
+							continue
+						}
+						// ENOENT on blob removal is benign (already
+						// cleaned by a prior purge or cascade path).
+						// Other errors surface to stderr.
+						if err := os.Remove(filepath.Join(dataDir, "data", "files", fid)); err != nil && !errors.Is(err, os.ErrNotExist) {
+							fmt.Fprintf(os.Stderr, "  %s: remove file %s: %v\n", name, fid, err)
+						}
+						if _, err := st.DataDB().Exec("DELETE FROM file_hashes WHERE file_id = ?", fid); err != nil {
+							fmt.Fprintf(os.Stderr, "  %s: delete file_hashes(%s): %v\n", name, fid, err)
+						}
+						if _, err := st.DataDB().Exec("DELETE FROM file_contexts WHERE file_id = ?", fid); err != nil {
+							fmt.Fprintf(os.Stderr, "  %s: delete file_contexts(%s): %v\n", name, fid, err)
 						}
 					}
 				}
 				fileRows.Close()
 			}
-			db.Exec("DELETE FROM messages WHERE ts < ?", cutoff)
-			db.Exec("DELETE FROM reactions WHERE ts < ?", cutoff)
-			db.Exec("VACUUM")
-			fmt.Printf("  %s: deleted %d messages, vacuumed\n", name, count)
+
+			// The critical DELETE. On failure, the DB is left in its
+			// pre-purge state; emit a loud error and skip the success
+			// line + totalDeleted increment for this DB so the summary
+			// doesn't claim work that didn't happen.
+			if _, err := db.Exec("DELETE FROM messages WHERE ts < ?", cutoff); err != nil {
+				fmt.Fprintf(os.Stderr, "  %s: DELETE messages failed: %v (DB left unchanged)\n", name, err)
+				continue
+			}
+			// Reactions delete orphan rows that reference the just-
+			// purged messages. Failure here leaves orphan reactions in
+			// the DB — visible + warned, but not a data-loss event.
+			if _, err := db.Exec("DELETE FROM reactions WHERE ts < ?", cutoff); err != nil {
+				fmt.Fprintf(os.Stderr, "  %s: DELETE reactions failed: %v (messages deleted; reactions may orphan)\n", name, err)
+			}
+			// VACUUM is best-effort disk compaction; the purge is
+			// already committed. Surface failure so the operator
+			// knows the DB didn't shrink.
+			vacuumed := true
+			if _, err := db.Exec("VACUUM"); err != nil {
+				vacuumed = false
+				fmt.Fprintf(os.Stderr, "  %s: VACUUM failed: %v (DB not compacted)\n", name, err)
+			}
+			if vacuumed {
+				fmt.Printf("  %s: deleted %d messages, vacuumed\n", name, count)
+			} else {
+				fmt.Printf("  %s: deleted %d messages (vacuum failed — see stderr)\n", name, count)
+			}
 		}
 		totalDeleted += count
 	}

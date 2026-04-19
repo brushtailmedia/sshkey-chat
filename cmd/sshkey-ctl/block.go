@@ -29,7 +29,7 @@ func cmdBlockFingerprint(dataDir string, args []string) error {
 		return fmt.Errorf("usage: block-fingerprint <fingerprint> [--reason TEXT]\n\n" +
 			"Adds an SSH key fingerprint (SHA256:...) to the block list.\n" +
 			"Blocked keys are rejected at the SSH handshake layer before\n" +
-			"they can enter the pending-keys queue.")
+			"they can enter the pending-keys queue")
 	}
 	fingerprint := args[0]
 	reason := ""
