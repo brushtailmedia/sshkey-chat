@@ -457,6 +457,7 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 			Reactions: roomReactions,
 			EpochKeys: epochKeys,
 			HasMore:   hasMore,
+			CorrID:    req.CorrID, // Phase 17c
 		})
 
 	} else if req.Group != "" {
@@ -508,6 +509,7 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 			Messages:  storedToRawMessages(msgs, "", req.Group),
 			Reactions: groupReactions,
 			HasMore:   hasMore,
+			CorrID:    req.CorrID, // Phase 17c
 		})
 
 	} else if req.DM != "" {
@@ -551,6 +553,7 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 			Messages:  storedToRawDMMessages(msgs, req.DM),
 			Reactions: dmReactions,
 			HasMore:   hasMore,
+			CorrID:    req.CorrID, // Phase 17c
 		})
 	}
 }

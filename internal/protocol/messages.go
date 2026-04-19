@@ -82,6 +82,7 @@ type Message struct {
 	FileIDs   []string `json:"file_ids,omitempty"`
 	Signature string   `json:"signature"`           // base64, pass-through
 	EditedAt  int64    `json:"edited_at,omitempty"` // Phase 15: server sets on edit, absent on unedited messages
+	CorrID    string   `json:"corr_id,omitempty"`   // Phase 17c: echoed from the originator's Send for client send-queue ack correlation (omitted on broadcasts to non-originators)
 }
 
 // Edit is the client → server envelope for replacing a room message's
@@ -120,6 +121,7 @@ type Edited struct {
 	FileIDs   []string `json:"file_ids,omitempty"`  // preserved from stored row
 	Signature string   `json:"signature"`
 	EditedAt  int64    `json:"edited_at"`           // server-authoritative edit wall clock
+	CorrID    string   `json:"corr_id,omitempty"`   // Phase 17c: originator-only ack echo
 }
 
 // Group DM messages
@@ -177,6 +179,7 @@ type GroupMessage struct {
 	FileIDs     []string          `json:"file_ids,omitempty"`
 	Signature   string            `json:"signature"`             // pass-through
 	EditedAt    int64             `json:"edited_at,omitempty"`   // Phase 15
+	CorrID      string            `json:"corr_id,omitempty"`     // Phase 17c: originator-only ack echo
 }
 
 // EditGroup is the client → server envelope for replacing a group DM
@@ -207,6 +210,7 @@ type GroupEdited struct {
 	FileIDs     []string          `json:"file_ids,omitempty"`  // preserved from stored row
 	Signature   string            `json:"signature"`
 	EditedAt    int64             `json:"edited_at"`
+	CorrID      string            `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 // Leave group
@@ -659,6 +663,7 @@ type DM struct {
 	FileIDs     []string          `json:"file_ids,omitempty"`
 	Signature   string            `json:"signature"`
 	EditedAt    int64             `json:"edited_at,omitempty"`   // Phase 15
+	CorrID      string            `json:"corr_id,omitempty"`     // Phase 17c: originator-only ack echo
 }
 
 // EditDM is the client → server envelope for replacing a 1:1 DM
@@ -690,6 +695,7 @@ type DMEdited struct {
 	FileIDs     []string          `json:"file_ids,omitempty"`  // preserved from stored row
 	Signature   string            `json:"signature"`
 	EditedAt    int64             `json:"edited_at"`
+	CorrID      string            `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 type LeaveDM struct {
@@ -740,6 +746,7 @@ type Deleted struct {
 	Room      string `json:"room,omitempty"`    // set for room messages
 	Group     string `json:"group,omitempty"`   // set for group DM messages
 	DM        string `json:"dm,omitempty"`      // set for 1:1 DM messages
+	CorrID    string `json:"corr_id,omitempty"` // Phase 17c: originator-only ack echo
 }
 
 // Typing indicators (capability: typing)
@@ -791,6 +798,7 @@ type Reaction struct {
 	WrappedKeys map[string]string `json:"wrapped_keys,omitempty"` // DMs (group + 1:1)
 	Payload     string            `json:"payload"`                // pass-through
 	Signature   string            `json:"signature"`              // pass-through
+	CorrID      string            `json:"corr_id,omitempty"`      // Phase 17c: originator-only ack echo
 }
 
 type Unreact struct {
@@ -800,13 +808,14 @@ type Unreact struct {
 }
 
 type ReactionRemoved struct {
-	Type       string `json:"type"`             // "reaction_removed"
+	Type       string `json:"type"`              // "reaction_removed"
 	ReactionID string `json:"reaction_id"`
-	ID         string `json:"id"`               // target message ID
+	ID         string `json:"id"`                // target message ID
 	Room       string `json:"room,omitempty"`
 	Group      string `json:"group,omitempty"`
 	DM         string `json:"dm,omitempty"`
 	User       string `json:"user"`
+	CorrID     string `json:"corr_id,omitempty"` // Phase 17c
 }
 
 // Pinned messages (rooms only)
@@ -969,6 +978,7 @@ type HistoryResult struct {
 	Reactions []RawMessage   `json:"reactions,omitempty"`   // reactions on the returned messages
 	EpochKeys []SyncEpochKey `json:"epoch_keys,omitempty"`  // rooms only
 	HasMore   bool           `json:"has_more"`
+	CorrID    string         `json:"corr_id,omitempty"`     // Phase 17c
 }
 
 // Key exchange -- epoch keys (rooms)
@@ -1020,14 +1030,16 @@ type UploadStart struct {
 }
 
 type UploadReady struct {
-	Type     string `json:"type"`      // "upload_ready"
+	Type     string `json:"type"`              // "upload_ready"
 	UploadID string `json:"upload_id"`
+	CorrID   string `json:"corr_id,omitempty"` // Phase 17c
 }
 
 type UploadComplete struct {
-	Type     string `json:"type"`      // "upload_complete"
+	Type     string `json:"type"`              // "upload_complete"
 	UploadID string `json:"upload_id"`
-	FileID   string `json:"file_id"`   // server-assigned, file_ prefix
+	FileID   string `json:"file_id"`           // server-assigned, file_ prefix
+	CorrID   string `json:"corr_id,omitempty"` // Phase 17c
 }
 
 // UploadError is sent when the server rejects an upload_start (rate limit,
@@ -1053,7 +1065,8 @@ type DownloadStart struct {
 	Type        string `json:"type"`                    // "download_start"
 	FileID      string `json:"file_id"`
 	Size        int64  `json:"size"`
-	ContentHash string `json:"content_hash"`  // "blake2b-256:<hex>" of encrypted bytes
+	ContentHash string `json:"content_hash"`            // "blake2b-256:<hex>" of encrypted bytes
+	CorrID      string `json:"corr_id,omitempty"`       // Phase 17c
 }
 
 type DownloadComplete struct {
@@ -1095,8 +1108,9 @@ type ListDevices struct {
 // DeviceList is the server's response to ListDevices, listing all devices
 // for the requesting user.
 type DeviceList struct {
-	Type    string       `json:"type"`    // "device_list"
+	Type    string       `json:"type"`              // "device_list"
 	Devices []DeviceInfo `json:"devices"`
+	CorrID  string       `json:"corr_id,omitempty"` // Phase 17c
 }
 
 type DeviceInfo struct {
@@ -1160,9 +1174,10 @@ type RoomMembers struct {
 }
 
 type RoomMembersList struct {
-	Type    string   `json:"type"` // "room_members_list"
+	Type    string   `json:"type"`              // "room_members_list"
 	Room    string   `json:"room"`
 	Members []string `json:"members"`
+	CorrID  string   `json:"corr_id,omitempty"` // Phase 17c
 }
 
 // Mobile push registration

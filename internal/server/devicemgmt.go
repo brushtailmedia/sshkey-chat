@@ -11,24 +11,32 @@ import (
 // authenticated user. Revocation status is included so the UI can render
 // previously-revoked devices separately.
 func (s *Server) handleListDevices(c *Client, raw json.RawMessage) {
+	// Phase 17c Step 5 residual: unmarshal to capture corr_id so the
+	// success response echoes it for the client's send-queue Ack.
+	// Pre-17c the handler ignored `raw` entirely; parse failures are
+	// silent-safe because the only client-carried field we rely on
+	// here is the optional corr_id.
+	var req protocol.ListDevices
+	_ = json.Unmarshal(raw, &req)
+
 	// Phase 17 Step 5: rate-limit refresh cadence. Default 6/min
 	// (one per 10s) — settings-panel open is the legitimate use,
 	// mashing refresh is rate-limited.
 	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("list_devices:"+c.UserID, s.cfg.Server.RateLimits.DeviceListPerMinute); !allowed {
 		s.rejectAndLog(c, counters.SignalRateLimited, "list_devices", "list_devices rate limit exceeded",
-			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many device list requests — wait a moment", RetryAfterMs: retryMs})
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many device list requests — wait a moment", RetryAfterMs: retryMs, CorrID: req.CorrID})
 		return
 	}
 
 	if s.store == nil {
-		s.respondError(c, "", protocol.CodeInternal, "storage not available", 0)
+		s.respondError(c, req.CorrID, protocol.CodeInternal, "storage not available", 0)
 		return
 	}
 
 	devices, err := s.store.GetDevices(c.UserID)
 	if err != nil {
 		s.logger.Error("list_devices: failed to fetch devices", "user", c.UserID, "error", err)
-		s.respondError(c, "", protocol.CodeInternal, "failed to list devices", 0)
+		s.respondError(c, req.CorrID, protocol.CodeInternal, "failed to list devices", 0)
 		return
 	}
 
@@ -47,6 +55,7 @@ func (s *Server) handleListDevices(c *Client, raw json.RawMessage) {
 	c.Encoder.Encode(protocol.DeviceList{
 		Type:    "device_list",
 		Devices: out,
+		CorrID:  req.CorrID, // Phase 17c
 	})
 }
 

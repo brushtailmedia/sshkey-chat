@@ -164,6 +164,7 @@ func (s *Server) handleEdit(c *Client, raw json.RawMessage) {
 		FileIDs:   row.FileIDs,
 		Signature: msg.Signature,
 		EditedAt:  editedAt,
+		CorrID:    msg.CorrID, // Phase 17c: originator ack echo
 	})
 	s.logger.Info("room message edited", "room", msg.Room, "id", msg.ID, "user", c.UserID)
 }
@@ -279,6 +280,7 @@ func (s *Server) handleEditGroup(c *Client, raw json.RawMessage) {
 		FileIDs:     row.FileIDs,
 		Signature:   msg.Signature,
 		EditedAt:    editedAt,
+		CorrID:      msg.CorrID, // Phase 17c
 	})
 	s.logger.Info("group message edited", "group", msg.Group, "id", msg.ID, "user", c.UserID)
 }
@@ -406,6 +408,7 @@ func (s *Server) handleEditDM(c *Client, raw json.RawMessage) {
 		FileIDs:     row.FileIDs,
 		Signature:   msg.Signature,
 		EditedAt:    editedAt,
+		CorrID:      msg.CorrID, // Phase 17c
 	}
 	// Phase 17 Step 3: lock-release pattern.
 	s.mu.RLock()

@@ -74,6 +74,7 @@ type pendingUpload struct {
 	room        string
 	groupID     string
 	dmID        string
+	corrID      string // Phase 17c: preserved from upload_start so upload_complete echoes it
 }
 
 func newFileManager(dataDir string) *fileManager {
@@ -398,12 +399,14 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 		room:        msg.Room,
 		groupID:     msg.Group,
 		dmID:        msg.DM,
+		corrID:      msg.CorrID, // Phase 17c: preserved for upload_complete echo
 	}
 	s.files.mu.Unlock()
 
 	c.Encoder.Encode(protocol.UploadReady{
 		Type:     "upload_ready",
 		UploadID: msg.UploadID,
+		CorrID:   msg.CorrID, // Phase 17c
 	})
 }
 
@@ -611,6 +614,7 @@ func (s *Server) handleDownload(c *Client, raw json.RawMessage) {
 		FileID:      msg.FileID,
 		Size:        info.Size(),
 		ContentHash: storedHash,
+		CorrID:      msg.CorrID, // Phase 17c
 	})
 
 	if err := writeBinaryFrame(c.DownloadChannel, msg.FileID, f, info.Size()); err != nil {
@@ -860,6 +864,7 @@ func (s *Server) handleBinaryChannel(userID string, ch ssh.Channel) {
 			Type:     "upload_complete",
 			UploadID: uploadID,
 			FileID:   pending.fileID,
+			CorrID:   pending.corrID, // Phase 17c
 		}, targets)
 	}
 }

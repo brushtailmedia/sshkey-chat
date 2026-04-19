@@ -958,6 +958,12 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 		Payload:   msg.Payload,
 		FileIDs:   msg.FileIDs,
 		Signature: msg.Signature,
+		// Phase 17c: echo the sender's corr_id on the broadcast. The
+		// originator's client matches this against its in-flight
+		// send-queue entry to transition pending→acked. Non-originator
+		// recipients ignore the field (corr_id is client-private and
+		// carries no interpretable state).
+		CorrID: msg.CorrID,
 	}
 
 	// Store in room DB
@@ -1077,6 +1083,7 @@ func (s *Server) handleSendGroup(c *Client, raw json.RawMessage) {
 		Payload:     msg.Payload,
 		FileIDs:     msg.FileIDs,
 		Signature:   msg.Signature,
+		CorrID:      msg.CorrID, // Phase 17c: originator ack correlation
 	}
 
 	// Store in group DM DB
@@ -1289,6 +1296,7 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 		WrappedKeys: msg.WrappedKeys,
 		Payload:     msg.Payload,
 		Signature:   msg.Signature,
+		CorrID:      msg.CorrID, // Phase 17c
 	}
 
 	// Store in the appropriate DB.
@@ -1527,6 +1535,7 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 		Group:      group,
 		DM:         dmID,
 		User:       c.UserID,
+		CorrID:     msg.CorrID, // Phase 17c
 	}
 
 	if room != "" {
@@ -1826,6 +1835,7 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 			DeletedBy: c.UserID,
 			TS:        time.Now().Unix(),
 			Room:      roomID,
+			CorrID:    msg.CorrID, // Phase 17c
 		})
 		return
 	}
@@ -1866,6 +1876,7 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 			DeletedBy: c.UserID,
 			TS:        time.Now().Unix(),
 			Group:     g.ID,
+			CorrID:    msg.CorrID, // Phase 17c
 		})
 		return
 	}
@@ -1907,6 +1918,7 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 			DeletedBy: c.UserID,
 			TS:        time.Now().Unix(),
 			DM:        dm.ID,
+			CorrID:    msg.CorrID, // Phase 17c
 		}
 		// Phase 17 Step 3: lock-release pattern.
 		s.mu.RLock()
@@ -2997,6 +3009,7 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 		Payload:     msg.Payload,
 		FileIDs:     msg.FileIDs,
 		Signature:   msg.Signature,
+		CorrID:      msg.CorrID, // Phase 17c: originator ack correlation
 	}
 
 	// Store in DM DB — messages are always written regardless of cutoffs.
@@ -3427,5 +3440,6 @@ func (s *Server) handleRoomMembers(c *Client, raw json.RawMessage) {
 		Type:    "room_members_list",
 		Room:    req.Room,
 		Members: members,
+		CorrID:  req.CorrID, // Phase 17c
 	})
 }
