@@ -260,6 +260,85 @@ max_files = 5
 format = "json"
 
 # ----------------------------------------------------------------------
+# [backup] — Phase 19: scheduled snapshot backups + retention
+# ----------------------------------------------------------------------
+#
+# Scheduled backups produce a single .tar.gz per tick containing every
+# SQLite DB (via Online Backup API — runs concurrently with the live
+# server, no downtime), all attachment blobs, the audit + pending-keys
+# logs, the SSH host key, and server.toml. See docs/ops/backup_restore.md
+# for the full operator guide.
+#
+# Default-enabled because data loss on a chat server is catastrophic
+# and skip_if_idle prevents noise on unused deployments (fresh-install
+# test servers produce at most one ~30KB schema-only tarball and then
+# skip subsequent ticks until there's real activity). Set
+# enabled = false for throwaway dev/test instances where you're
+# certain no backups are needed.
+#
+# The CLI complements the scheduler:
+#   sshkey-ctl backup [--out PATH] [--label TAG]   # one-shot snapshot
+#   sshkey-ctl restore <tarball> [--no-pre-backup] # restore (server stopped)
+#   sshkey-ctl list-backups                        # list newest-first
+# Restore refuses to run while the server is alive (lockfile check)
+# and creates a pre-restore backup of current state by default so the
+# operator has a portable rollback point.
+
+[backup]
+# Enable the scheduler. Default true. Manual `sshkey-ctl backup`
+# works regardless of this flag — only the periodic goroutine is
+# gated.
+enabled = true
+
+# Cadence between scheduled backups. Go duration string. Changes
+# require a server restart (the ticker is created at startup and
+# does not observe SIGHUP config reloads).
+interval = "24h"
+
+# Where the scheduler writes tarballs. Relative paths resolve
+# against the data dir (so "backups" → /var/sshkey-chat/backups).
+# Absolute paths used as-is — point this at an NFS mount or a
+# separate volume if you want backups off the primary disk.
+dest_dir = "backups"
+
+# Hard cap on the number of tarballs kept. After each successful
+# backup, older tarballs beyond this count are deleted. 0 disables
+# count-based retention (keep unlimited).
+retention_count = 10
+
+# Delete tarballs older than this duration. Empty disables
+# age-based retention. 720h = 30 days.
+#
+# Retention semantics: OR — a tarball is deleted if it exceeds
+# EITHER cap. Each cap is a hard upper bound. Set retention_age = ""
+# for count-only retention; set retention_count = 0 for age-only.
+retention_age = "720h"
+
+# Gzip-compress the tarball. Default true — DBs and plaintext logs
+# compress well; attachments are usually pre-compressed/encrypted
+# so compression there is near-no-op. CPU cost is negligible at
+# typical chat-server data sizes.
+compress = true
+
+# Skip the scheduled tick if no write activity has occurred since
+# the last successful backup. Detection: PRAGMA data_version on
+# data.db + max mtime of <dataDir>/data/files/. Skip fires only if
+# BOTH show no change. After a server restart, the first tick
+# always runs (a restart often coincides with deployment changes
+# worth snapshotting). Default true neutralizes the default-on
+# scheduler's cost on truly-idle deployments.
+skip_if_idle = true
+
+# Bundle host_key (always — required for restore-to-new-machine
+# without breaking SSH client pinning) and server.toml into the
+# tarball under config/. Set false if you manage server.toml via
+# external config management (Ansible, Terraform) and don't want
+# duplicate sources of truth — but understand restore-to-fresh-host
+# without host_key produces a new host key that triggers SSH
+# warnings on every existing client.
+include_config_files = true
+
+# ----------------------------------------------------------------------
 # [push]
 # ----------------------------------------------------------------------
 
