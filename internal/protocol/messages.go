@@ -1147,6 +1147,32 @@ type AdminNotify struct {
 	FirstSeen   string `json:"first_seen"`  // ISO 8601
 }
 
+// AdminNotifyQuota is the admin_notify shape for per-user daily upload
+// quota events. Three event kinds:
+//
+//   - "quota_warn":      user crossed daily_upload_bytes_warn for the
+//                        first time today
+//   - "quota_sustained": user crossed warn AND yesterday also crossed
+//                        warn (consecutive_days condition met)
+//   - "quota_block":     upload rejected because today_bytes +
+//                        attempted_bytes would exceed
+//                        daily_upload_bytes_block
+//
+// All three share the User / Date / BytesToday / ThresholdBytes fields.
+// quota_sustained adds BytesYesterday + ConsecutiveDays. quota_block
+// adds BytesAttempted. Out-of-phase 2026-04-19, originally Phase 25.
+type AdminNotifyQuota struct {
+	Type            string `json:"type"`                       // "admin_notify"
+	Event           string `json:"event"`                      // "quota_warn" / "quota_sustained" / "quota_block"
+	User            string `json:"user"`                       // user_id (nanoid)
+	Date            string `json:"date"`                       // YYYY-MM-DD UTC
+	BytesToday      int64  `json:"bytes_today"`                // running daily total at event time
+	ThresholdBytes  int64  `json:"threshold_bytes"`            // configured warn or block threshold (event-dependent)
+	BytesYesterday  int64  `json:"bytes_yesterday,omitempty"`  // quota_sustained only
+	ConsecutiveDays int    `json:"consecutive_days,omitempty"` // quota_sustained only
+	BytesAttempted  int64  `json:"bytes_attempted,omitempty"`  // quota_block only — the upload size that pushed over
+}
+
 // Pending keys management (admin-only)
 
 type ListPendingKeys struct {
@@ -1299,6 +1325,14 @@ const (
 	ErrEditNotMostRecent  = "edit_not_most_recent" // surfaced
 	ErrEditWindowExpired  = "edit_window_expired"  // surfaced
 	ErrEditDeletedMessage = "edit_deleted_message" // internal only — wire response is ErrUnknownX
+
+	// Per-user daily upload quota exceeded (out-of-phase 2026-04-19,
+	// originally Phase 25). Returned on UploadError when the user's
+	// running daily total + this upload would exceed
+	// [server.quotas.user].daily_upload_bytes_block. Surfaced with a
+	// configurable-block-message-aware Message field. Category C
+	// (permanent user-action — retry tomorrow); not auto-retried.
+	ErrDailyQuotaExceeded = "daily_quota_exceeded"
 )
 
 // Phase 17 Step 2 wire codes — stable protocol tokens for the Phase 17c

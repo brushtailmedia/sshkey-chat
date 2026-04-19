@@ -142,6 +142,10 @@ func run() error {
 		return cmdRestore(configDir, dataDir, cmdArgs)
 	case "list-backups":
 		return cmdListBackups(configDir, dataDir, cmdArgs)
+	case "user":
+		return cmdUser(configDir, dataDir, cmdArgs)
+	case "quota-report":
+		return cmdQuotaReport(dataDir, cmdArgs)
 	default:
 		return fmt.Errorf("unknown command: %s", cmd)
 	}
@@ -211,7 +215,13 @@ Commands:
                                           current state first; --no-pre-backup
                                           skips that.
   list-backups                            Show available backups in [backup].dest_dir
-                                          (newest first)`)
+                                          (newest first)
+  user quota-exempt <user_id> --on|--off  Toggle daily upload quota exempt flag
+                                          (out-of-phase 2026-04-19; --on requires
+                                          [server.quotas.user] allow_exempt_users
+                                          = true in server.toml — default false)
+  quota-report [--days N] [--top M]       Top users by upload volume in the
+                                          recent window (default: 7 days, top 10)`)
 	return nil
 }
 

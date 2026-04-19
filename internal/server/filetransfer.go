@@ -387,6 +387,33 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 		}
 	}
 
+	// Per-user daily upload quota check (out-of-phase 2026-04-19,
+	// originally Phase 25). Cheap single SQLite query (indexed by
+	// (user_id, date)) — runs only when quotas are enabled in
+	// config. Exempt users skip the check entirely.
+	//
+	// EARLY-REJECT path: declared_size + today_bytes > block →
+	// reject before allocating pendingUpload + accepting Channel 3
+	// bytes. The TOCTOU defense (upload_complete recheck) handles
+	// concurrent uploads that individually pass this check but
+	// collectively cross the block threshold.
+	if quota := s.parsedQuota(); quota.Enabled && !s.isQuotaExempt(quota, c.UserID) {
+		todayBytes, _, _, qerr := s.store.GetDailyUploadRow(c.UserID, todayUTC())
+		if qerr != nil {
+			// Read failure = fail-open (don't block legitimate
+			// uploads on a transient DB blip). Logged for ops.
+			s.logger.Warn("quota check read failed; allowing upload",
+				"user", c.UserID, "error", qerr)
+		} else if todayBytes+msg.Size > quota.BlockBytes {
+			s.counters.Inc(counters.SignalDailyQuotaExceeded, c.DeviceID)
+			s.notifyAdminsQuotaBlock(c.UserID, todayBytes, msg.Size, quota.BlockBytes)
+			s.respondUploadError(c, msg.CorrID, msg.UploadID,
+				protocol.ErrDailyQuotaExceeded,
+				quotaBlockedMessage(quota.BlockBytes), 0)
+			return
+		}
+	}
+
 	fileID := generateID("file_")
 
 	s.files.mu.Lock()
@@ -783,6 +810,80 @@ func (s *Server) handleBinaryChannel(userID string, ch ssh.Channel) {
 		// startup sweep reconciles; no intermediate state is queryable
 		// in a way that matters for correctness or security.
 		if s.store != nil {
+			// Per-user daily upload quota TOCTOU defense (out-of-phase
+			// 2026-04-19, originally Phase 25). Concurrent uploads
+			// from the same user could each pass handleUploadStart's
+			// check individually but collectively push the daily total
+			// past block. Recheck here, BEFORE writing the hash row;
+			// rejection deletes the file blob and skips both the hash
+			// write AND the file_contexts binding so the file is
+			// unreachable to download. Skip the recheck if quotas are
+			// disabled or the user is exempt — same gates as the
+			// upload_start check.
+			if quota := s.parsedQuota(); quota.Enabled && !s.isQuotaExempt(quota, userID) {
+				today := todayUTC()
+				prevBytes, prevWarned, _, qerr := s.store.GetDailyUploadRow(userID, today)
+				if qerr != nil {
+					s.logger.Warn("quota recheck read failed; allowing upload",
+						"user", userID, "error", qerr)
+				} else {
+					newBytes := prevBytes + int64(size)
+					crossingWarn := !prevWarned && prevBytes < quota.WarnBytes && newBytes >= quota.WarnBytes
+					if newBytes > quota.BlockBytes {
+						// TOCTOU rejection: delete the file blob,
+						// don't write hash or binding, fire counter
+						// + admin_notify, return upload_error.
+						s.removeUploadedFile(pending.fileID)
+						s.counters.Inc(counters.SignalDailyQuotaExceeded, "")
+						s.notifyAdminsQuotaBlock(userID, prevBytes, int64(size), quota.BlockBytes)
+						s.mu.RLock()
+						var errTargets []*Client
+						for _, client := range s.clients {
+							if client.UserID == userID {
+								errTargets = []*Client{client}
+								break
+							}
+						}
+						s.mu.RUnlock()
+						if len(errTargets) > 0 {
+							s.respondUploadError(errTargets[0], pending.corrID, uploadID,
+								protocol.ErrDailyQuotaExceeded,
+								quotaBlockedMessage(quota.BlockBytes), 0)
+						}
+						s.files.mu.Lock()
+						delete(s.files.uploads, uploadID)
+						s.files.mu.Unlock()
+						continue
+					}
+					// Quota OK — commit the increment. Mark
+					// warn_notified iff this completion crossed warn
+					// for the FIRST time today (prevWarned was false
+					// before, prevBytes was below warn, newBytes is
+					// at or above).
+					if _, ierr := s.store.IncrementDailyUploadBytes(userID, today, int64(size), crossingWarn); ierr != nil {
+						s.logger.Warn("quota increment write failed; upload allowed but accounting drift",
+							"user", userID, "error", ierr)
+					}
+					if crossingWarn {
+						// Check sustained pattern. Need recent
+						// contiguous days at-or-above warn for the
+						// quota_sustained event. Gracefully degrades
+						// to plain quota_warn if recent rows are
+						// missing or non-contiguous.
+						recent, _ := s.store.GetRecentUploadDays(userID, quota.FlagConsecutiveDays)
+						if isSustainedPattern(recent, quota.WarnBytes, quota.FlagConsecutiveDays) {
+							var bytesYesterday int64
+							if len(recent) >= 2 {
+								bytesYesterday = recent[1].BytesTotal
+							}
+							s.notifyAdminsQuotaSustained(userID, newBytes, bytesYesterday,
+								quota.WarnBytes, quota.FlagConsecutiveDays)
+						} else {
+							s.notifyAdminsQuotaWarn(userID, newBytes, quota.WarnBytes)
+						}
+					}
+				}
+			}
 			// Phase 17c Step 4 bug #1 fix: StoreFileHash failure must
 			// abort the upload — without a hash row, future downloads
 			// GetFileHash returns no rows and the file is unreachable.

@@ -47,9 +47,7 @@ docker/config/host_key
 
 # Design docs (internal working files, not checked in)
 refactor_plan.md
-performance_optimization.md
 business_edition.md
-download_fix.md
 upload_quota.md
 
 # OS

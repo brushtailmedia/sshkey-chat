@@ -78,6 +78,14 @@ func Open(dir string) (*Store, error) {
 		return nil, fmt.Errorf("init users.db: %w", err)
 	}
 
+	// Per-user daily upload quotas table (out-of-phase work
+	// 2026-04-19, originally designed as Phase 25). Lives in
+	// data.db alongside file_hashes + file_contexts so per-upload
+	// accounting stays in one transactional domain.
+	if err := s.initDailyUploadQuotas(); err != nil {
+		return nil, fmt.Errorf("init daily_upload_quotas: %w", err)
+	}
+
 	return s, nil
 }
 

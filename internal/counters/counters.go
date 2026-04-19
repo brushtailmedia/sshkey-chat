@@ -108,6 +108,17 @@ const (
 // Load signals — counted but NEVER auto-revoke inputs.
 const (
 	SignalRateLimited = "rate_limited"
+
+	// SignalDailyQuotaExceeded fires when a per-user daily upload
+	// quota check rejects an upload (either at upload_start where
+	// declared_size + today_bytes > block, OR at upload_complete via
+	// the TOCTOU defense path). Counted for observability — operators
+	// see the rate of quota hits in the counter snapshot. NOT in
+	// AutoRevokeSignals: legitimate users can hit this through normal
+	// over-the-line activity; the policy response is admin_notify
+	// quota_block (admin-visible, not auto-action). Out-of-phase
+	// 2026-04-19, originally designed as Phase 25.
+	SignalDailyQuotaExceeded = "daily_quota_exceeded"
 )
 
 // Observational signals — counted but NEVER auto-revoke inputs.

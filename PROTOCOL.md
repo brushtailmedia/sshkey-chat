@@ -1057,7 +1057,9 @@ If the server rejects an `upload_start`, it replies with `upload_error`:
 {"type":"upload_error","upload_id":"up_001","code":"rate_limited","message":"Upload rate limit exceeded"}
 ```
 
-Upload error codes: `rate_limited`, `upload_too_large`, `missing_hash`, `invalid_content_hash`, `hash_mismatch`, `invalid_upload_id`, `invalid_context`, `unknown_room` / `unknown_group` / `unknown_dm` (not a member), `invalid_message`.
+Upload error codes: `rate_limited`, `upload_too_large`, `missing_hash`, `invalid_content_hash`, `hash_mismatch`, `invalid_upload_id`, `invalid_context`, `unknown_room` / `unknown_group` / `unknown_dm` (not a member), `invalid_message`, `daily_quota_exceeded`.
+
+**Per-user daily upload quota** (`daily_quota_exceeded`). Default-on feature governed by `[server.quotas.user]` in `server.toml`. `DefaultServerConfig` populates the section with `enabled = true` plus the 1 GB warn / 5 GB block / 30-day-retention defaults; an operator who omits the section entirely gets the validated default-on config. Opt-out is an explicit `[server.quotas.user] enabled = false`. When enabled, the server tracks each user's running daily byte total (UTC calendar day) and rejects uploads that would push the total past the configured `daily_upload_bytes_block` threshold (default 5 GB). The error message includes the configured threshold value rendered as a human-readable size (`"...you've reached your daily upload quota (5 GB)..."`). Quota resets at UTC midnight. Operators can mark users `quota_exempt` via `sshkey-ctl user quota-exempt <user_id> --on` to bypass the check, but only when `[server.quotas.user] allow_exempt_users = true` is set in `server.toml` (default `false`, admin-managed-by-default). The gate is authoritative: when off, the CLI rejects `--on` AND the server runtime ignores `users.quota_exempt = 1` for every user; `--off` is always allowed. The check fires at TWO points: `upload_start` (early reject before any bytes stream — the common case) and `upload_complete` (TOCTOU defense for concurrent uploads from the same user that individually pass the start check but collectively cross the block threshold; the partial file is unlinked on rejection).
 
 Then send a message referencing the `file_id`. Upload first, message second. The server enforces that every `file_id` in a send message's `file_ids[]` is bound to the same context as the send — cross-context references are rejected with `unknown_file`.
 
@@ -1313,6 +1315,39 @@ This is critical for the support story: users find admins via the admin badge in
 ```
 
 Delivered only to connected admin clients.
+
+**Per-user upload quota events** (default-on; suppressed when `[server.quotas.user] enabled = false`):
+
+```json
+// First time today's running total crossed daily_upload_bytes_warn
+{"type":"admin_notify","event":"quota_warn","user":"usr_alice",
+ "date":"2026-04-19","bytes_today":1100000000,"threshold_bytes":1073741824}
+
+// Same as above, but yesterday also crossed warn (consecutive_days
+// pattern fired). Adds bytes_yesterday + consecutive_days fields.
+{"type":"admin_notify","event":"quota_sustained","user":"usr_alice",
+ "date":"2026-04-19","bytes_today":1200000000,"bytes_yesterday":1500000000,
+ "threshold_bytes":1073741824,"consecutive_days":2}
+
+// An upload was rejected at upload_start OR upload_complete because
+// it would push today's total past daily_upload_bytes_block. Adds
+// bytes_attempted (the size of the upload that crossed the line).
+{"type":"admin_notify","event":"quota_block","user":"usr_alice",
+ "date":"2026-04-19","bytes_today":4900000000,"bytes_attempted":200000000,
+ "threshold_bytes":5368709120}
+```
+
+`quota_warn` is idempotent per (user, date) — fires once per day even
+if multiple uploads cross the threshold. `quota_sustained` fires
+alongside `quota_warn` when the consecutive-days pattern is met
+(strict contiguous days at-or-above warn). `quota_block` fires every
+time an upload is rejected — operators see the block rate.
+
+Quota events are NOT auto-revoke inputs (Phase 17b). Quota hits are
+load-shaped signals (legitimate-but-over-the-line activity); the
+admin response is the operator deciding whether to investigate, raise
+the quota, or mark the user `quota_exempt`. Out-of-phase 2026-04-19,
+originally Phase 25.
 
 **Pending key listing (admin-only):**
 

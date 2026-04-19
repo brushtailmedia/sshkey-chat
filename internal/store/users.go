@@ -21,7 +21,7 @@ type UserRecord struct {
 }
 
 func (s *Store) initUsersDB() error {
-	_, err := s.usersDB.Exec(`
+	if _, err := s.usersDB.Exec(`
 		CREATE TABLE IF NOT EXISTS users (
 			id             TEXT PRIMARY KEY,
 			key            TEXT NOT NULL,
@@ -29,12 +29,52 @@ func (s *Store) initUsersDB() error {
 			admin          INTEGER NOT NULL DEFAULT 0,
 			retired        INTEGER NOT NULL DEFAULT 0,
 			retired_at     TEXT NOT NULL DEFAULT '',
-			retired_reason TEXT NOT NULL DEFAULT ''
+			retired_reason TEXT NOT NULL DEFAULT '',
+			quota_exempt   INTEGER NOT NULL DEFAULT 0
 		);
 
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_users_key ON users(key);
-	`)
-	return err
+	`); err != nil {
+		return err
+	}
+
+	// Defensive ALTER TABLE for users.db files created before
+	// quota_exempt was added (2026-04-19). No live users per the
+	// pre-launch policy, so this is dev/test continuity only — but
+	// failing-to-start because a column is missing on an existing
+	// users.db is a worse UX than the silent migration. The IF NOT
+	// EXISTS check via PRAGMA table_info avoids the "duplicate column"
+	// error on already-migrated DBs.
+	if !s.userColumnExists("quota_exempt") {
+		if _, err := s.usersDB.Exec(`ALTER TABLE users ADD COLUMN quota_exempt INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("migrate users.quota_exempt: %w", err)
+		}
+	}
+	return nil
+}
+
+// userColumnExists returns true if the users table has a column with
+// the given name. Used by initUsersDB to gate the defensive ALTER for
+// columns added after the original CREATE TABLE shipped.
+func (s *Store) userColumnExists(name string) bool {
+	rows, err := s.usersDB.Query(`PRAGMA table_info(users)`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var colName, colType string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &colName, &colType, &notNull, &dflt, &pk); err != nil {
+			return false
+		}
+		if colName == name {
+			return true
+		}
+	}
+	return false
 }
 
 // UsersDBEmpty returns true if the users table has no rows.

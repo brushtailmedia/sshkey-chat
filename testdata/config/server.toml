@@ -1,8 +1,8 @@
 [server]
 port = 2222
 bind = "0.0.0.0"
-# allow_self_leave_rooms = false          # default — admin-managed rooms
-# allow_self_leave_retired_rooms = true   # default — users can /delete retired rooms
+allow_self_leave_rooms = false          # default — admin-managed rooms
+allow_self_leave_retired_rooms = true   # default — users can /delete retired rooms
 
 # Phase 17b: test fixtures explicitly disable auto-revoke. Real
 # deployments get enabled=true via config defaults; tests that want

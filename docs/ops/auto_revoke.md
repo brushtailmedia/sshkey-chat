@@ -1,6 +1,6 @@
 # Auto-revoke operations runbook
 
-Phase 17b shipped an auto-revoke breaker that watches per-device
+An auto-revoke breaker that watches per-device
 misbehavior counters and revokes devices that sustain threshold
 crossings. This runbook covers what operators need to know.
 
@@ -191,7 +191,7 @@ users producing a signal repeatedly, the signal needs to move out of
 
 ## Cascade-failure safety
 
-The earlier Phase 17b design proposed an automatic "global cap" that
+The earlier design proposed an automatic "global cap" that
 would disable the breaker if more than 5% of devices were revoked in
 a 60s window. The simplified design drops this in favor of
 observability-first operator-manual control:
@@ -206,7 +206,7 @@ are hands-on. Revisit if scale grows beyond hands-on ops.
 
 ## Related knobs
 
-Two separate Phase 17b knobs also sit under `[rate_limits]` but are
+Two separate knobs also sit under `[rate_limits]` but are
 NOT auto-revoke-adjacent. They're connection-hardening primitives:
 
 - `idle_timeout_seconds` — NDJSON-layer idle timeout. If >0, the

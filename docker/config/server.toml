@@ -17,16 +17,16 @@ bind = "0.0.0.0"
 # to let users run /leave in rooms; the server then broadcasts a
 # room_event leave to remaining members and marks the room for epoch
 # rotation. Hot-reloadable.
-# allow_self_leave_rooms = false
+allow_self_leave_rooms = false
 
 # Whether users can clean up retired rooms from their sidebar via /delete.
 # Default true because retired rooms are read-only — there's no membership
 # decision to preserve, and users should be able to remove dead rooms from
 # their view without admin intervention.
-# allow_self_leave_retired_rooms = true
+allow_self_leave_retired_rooms = true
 
 # ----------------------------------------------------------------------
-# [server.auto_revoke] — Phase 17b: auto-revoke on sustained misbehavior
+# [server.auto_revoke] — auto-revoke on sustained misbehavior
 # ----------------------------------------------------------------------
 #
 # The auto-revoke breaker watches per-device counters for misbehavior
@@ -93,6 +93,87 @@ download_no_channel    = "3:60"   # client sent download before opening Ch2
 
 # Connection hardening.
 reconnect_flood        = "10:60"  # device thrashing session setup
+
+# ----------------------------------------------------------------------
+# [server.quotas.user] — per-user daily upload quotas
+# ----------------------------------------------------------------------
+#
+# Out-of-phase 2026-04-19, originally Phase 25. Layered on top of the
+# Phase 17 Step 5 [rate_limits] uploads_per_minute bucket — that one
+# bounds bytes/minute; this one bounds bytes/day. Complementary, not
+# redundant.
+#
+# When a user's running daily byte total (UTC calendar day, reset at
+# UTC midnight) crosses daily_upload_bytes_warn the server fires
+# admin_notify event = "quota_warn" exactly once per (user, date). If
+# the user also crossed warn on the prior flag_consecutive_days days
+# (strict contiguous), the event upgrades to "quota_sustained" with
+# bytes_yesterday + consecutive_days fields. When an upload would push
+# the total past daily_upload_bytes_block the server rejects with
+# upload-error code "daily_quota_exceeded" AND fires admin_notify
+# event = "quota_block". The check fires at TWO points: upload_start
+# (early reject before any Channel 3 bytes stream) and upload_complete
+# (TOCTOU defense for concurrent uploads from the same user that
+# individually pass the start check but collectively cross the block —
+# the partial file is unlinked on rejection). See PROTOCOL.md
+# "Per-user upload quota events" for the wire-format payload samples.
+#
+# Default-on for the same asymmetry-of-harm reason as [server.auto_revoke]
+# and [backup]: a chat server with no upload cap can have a single
+# misbehaving (or compromised) device rapidly fill the disk; the
+# default cap rejects that scenario with a clear error. Operators
+# running file-share-style deployments that legitimately need higher
+# caps tune the values up or set enabled = false.
+#
+# Operators investigate quota events via:
+#   sshkey-ctl quota-report [--days N] [--top M]   # top users by recent volume
+#   sshkey-ctl user quota-exempt <user_id> --on    # bypass for service accounts
+
+[server.quotas.user]
+# Enable the feature. Default true. Set false to disable all quota
+# enforcement: no DB reads on the upload path, no admin_notify, no
+# checks, no startup retention prune.
+enabled = true
+
+# Gate the per-user `quota_exempt` escape hatch. Default false —
+# admin-managed-by-default (mirrors the [server] allow_self_leave_rooms
+# = false pattern). When false:
+#   - `sshkey-ctl user quota-exempt <user> --on` is rejected at the CLI
+#     with a pointer to this knob.
+#   - The server runtime ignores `users.quota_exempt = 1` and enforces
+#     the quota on every user, regardless of any stale exempt flag left
+#     in the DB from a prior config.
+# `--off` from the CLI is always allowed so operators can clean up
+# existing exempt flags after flipping this gate to false. Set true
+# only when you have a deliberate use case for quota-exempt service
+# accounts / power users — exempting a user bypasses the daily upload
+# cap entirely.
+allow_exempt_users = false
+
+# Soft warn threshold — first time today's running total crosses this,
+# admin_notify fires once per (user, date). Idempotent via the
+# warn_notified column on the daily_upload_quotas row.
+daily_upload_bytes_warn = "1GB"
+
+# Hard cap — uploads that would push today's total past this are
+# rejected with daily_quota_exceeded. Must be strictly greater than
+# daily_upload_bytes_warn (validation rejects reversed thresholds at
+# startup with a category-tagged error).
+daily_upload_bytes_block = "5GB"
+
+# Consecutive days at-or-above warn that fire admin_notify
+# "quota_sustained" instead of plain "quota_warn". Strict contiguous —
+# a single day under warn breaks the streak. Default 2 catches the
+# "user is steadily over warn day after day" pattern operators want
+# to know about.
+flag_consecutive_days = 2
+
+# Retention for daily_upload_quotas rows. Pruned at server startup
+# alongside the orphan-file cleanup. Must be >= flag_consecutive_days
+# so the consecutive-days check has enough history. 30 days is plenty
+# for the operator-investigation use case; raise only if you want
+# longer-term per-user volume reports.
+retention_days = 30
 
 # ----------------------------------------------------------------------
 # [messages]
@@ -260,7 +341,7 @@ max_files = 5
 format = "json"
 
 # ----------------------------------------------------------------------
-# [backup] — Phase 19: scheduled snapshot backups + retention
+# [backup] — scheduled snapshot backups + retention
 # ----------------------------------------------------------------------
 #
 # Scheduled backups produce a single .tar.gz per tick containing every

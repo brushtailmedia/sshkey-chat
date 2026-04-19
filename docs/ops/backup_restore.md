@@ -1,6 +1,6 @@
 # Backup & restore operations runbook
 
-Phase 19 shipped a server-side backup/restore feature: scheduled
+Server-side backup/restore feature: scheduled
 nightly snapshots by default, on-demand manual backups via the CLI,
 and a restore command that handles the destructive operation safely.
 This runbook covers what operators need to know.

@@ -265,6 +265,12 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		// no hash record in the DB — they never completed successfully)
 		s.cleanOrphanFiles()
 
+		// Prune old per-user daily upload quota rows (out-of-phase
+		// 2026-04-19, originally Phase 25). No-op when quotas are
+		// disabled in config. Same family as cleanOrphanFiles —
+		// bounded maintenance, runs once at startup.
+		s.pruneOldQuotaRows()
+
 		// Phase 19 Step 2: write the server-process lockfile. Refuses
 		// to start if another server instance is running against this
 		// dataDir (double-start protection). Stale lockfiles from prior

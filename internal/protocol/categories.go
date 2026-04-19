@@ -114,6 +114,12 @@ func CategoryForCode(code string) ErrorCategory {
 	// ── Category C — permanent user-action ──────────────────────────
 	case ErrMessageTooLarge, ErrUploadTooLarge:
 		return CategoryC
+	case ErrDailyQuotaExceeded:
+		// Per-user daily upload quota — retry is "wait until UTC
+		// midnight" which is closer to "permanent for now" than
+		// "transient." Client surfaces the message directly without
+		// auto-retry. Out-of-phase 2026-04-19.
+		return CategoryC
 	case ErrEditWindowExpired, ErrEditNotMostRecent:
 		return CategoryC
 	case ErrInvalidWrappedKeys:

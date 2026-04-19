@@ -89,6 +89,16 @@ type ServerSection struct {
 	// schema + validation rules. Nested as [server.auto_revoke] in
 	// server.toml.
 	AutoRevoke AutoRevokeSection `toml:"auto_revoke"`
+
+	// Quotas configures per-user daily upload caps (originally
+	// designed as Phase 25, shipped 2026-04-19 as out-of-phase fix).
+	// Default-on: DefaultServerConfig populates [server.quotas.user]
+	// with Enabled = true and 1GB warn / 5GB block / 30-day retention.
+	// Operators opt out with `[server.quotas.user] enabled = false`.
+	// Mirrors the Phase 17b auto-revoke + Phase 19 backup default-on
+	// pattern. See internal/config/quotas.go for the schema +
+	// validation. Nested as [server.quotas] in server.toml.
+	Quotas QuotasSection `toml:"quotas"`
 }
 
 type MessagesSection struct {
@@ -286,6 +296,32 @@ func DefaultServerConfig() ServerConfig {
 				PruneAfterHours: 168, // 7 days — comfortably exceeds the typical 60s window
 				Thresholds:      nil, // operator populates via [server.auto_revoke.thresholds]
 			},
+			Quotas: QuotasSection{
+				// Per-user upload quotas — default-on
+				// (revised 2026-04-19 same day after
+				// consistency review against Phase 17b
+				// auto-revoke + Phase 19 backups, both of
+				// which ship default-on with the same
+				// asymmetry-of-harm argument). Operators
+				// who don't want quotas set
+				// `[server.quotas.user] enabled = false`.
+				//
+				// AllowExemptUsers default false — the
+				// per-user `quota_exempt` escape hatch is
+				// admin-managed-by-default. Set
+				// `allow_exempt_users = true` in server.toml
+				// to enable `sshkey-ctl user quota-exempt
+				// <user> --on`. Mirrors the
+				// AllowSelfLeaveRooms = false pattern.
+				User: UserQuotaSection{
+					Enabled:               true,
+					AllowExemptUsers:      false,
+					DailyUploadBytesWarn:  "1GB",
+					DailyUploadBytesBlock: "5GB",
+					FlagConsecutiveDays:   2,
+					RetentionDays:         30,
+				},
+			},
 		},
 		Messages: MessagesSection{
 			MaxBodySize: "16KB",
@@ -405,6 +441,16 @@ func (c ServerConfig) Validate() (warnings []string, err error) {
 		return nil, err
 	}
 	warnings = append(warnings, warnBackup...)
+
+	// Per-user upload quotas (out-of-phase 2026-04-19, default-on).
+	// DefaultServerConfig populates Enabled=true + sensible defaults,
+	// so even an operator who omits the section entirely gets a
+	// validated config. Explicit `enabled = false` short-circuits
+	// validation and disables the feature. Invalid fields under
+	// Enabled=true → hard error.
+	if _, err := c.Server.Quotas.User.ParseAndValidate(); err != nil {
+		return nil, err
+	}
 
 	return warnings, nil
 }
