@@ -1,6 +1,12 @@
 # Security Audit — v0.2.0 Launch
 
-**Date:** 2026-04-19
+**Date:** 2026-04-19 (phase opened) → 2026-04-19 (phase closed)
+**Status:** **Phase 21 complete.** All pre-launch-blocking findings
+closed; residual items either accepted with documented scope or
+formally deferred to Phase 22. See the `## Change log` section at
+the bottom of this file for the day-by-day timeline and the
+`refactor_plan.md` Completed-section Phase 21 entry for the
+consolidated summary.
 **Scope:** Phase 21 of the refactor_plan.md. All 13 items executed as
 an audit-only pass (no code changes during the audit; findings triaged
 here for fix-now / defer / accept decisions).
@@ -1518,3 +1524,18 @@ Against the Phase 21 gate from `refactor_plan.md`:
   F20 (both test-coverage drift guards, not active vulnerabilities)
   formally tracked as Phase 22 items 13 and 14 in
   `refactor_plan.md`.
+- **2026-04-19 — Phase 21 closed.** All 32 findings triaged. Final
+  tally: Critical 1 (closed), High 4 (all closed), Medium 8 (4
+  closed, 3 deferred to Phase 22, 1 accepted with documented scope),
+  Low 17 (4 closed, 5 deferred to Phase 22, 6 accepted with
+  documented scope / hygiene, 2 info), Info 1. Five clean
+  categories confirmed (SQL parameterisation, CLI log leaks,
+  concurrency at target scale, 4/6 pen-test scenarios, drift-guard
+  tests). Tooling gate met: `go build` / `go vet ./...` /
+  `staticcheck ./...` / `govulncheck ./...` clean on both repos;
+  full `-race` suites green. No release tag (per v0.2.0 release
+  plan). Phase moved to Completed section of
+  `refactor_plan.md`; this document stays as the canonical security-
+  review artefact referenced at launch. Phase 22 inherits nine
+  deferred test-coverage drift guards (items 12.c, 12.d, 13, 13.b,
+  14, 16, 17, 18, 19).
