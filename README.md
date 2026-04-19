@@ -106,7 +106,7 @@ docker exec sshkey-server sshkey-ctl revoke-device --user usr_abc123 --device de
 docker logs -f sshkey-server
 ```
 
-> **Note:** `users.toml` and `rooms.toml` are seed files -- they are only processed on first server start to bootstrap initial users and rooms. After that, `users.db` and `rooms.db` are the source of truth and all management happens through `sshkey-ctl`.
+> **Note:** `rooms.toml` is a seed file — it is only processed on first server start to bootstrap initial rooms. After that, `rooms.db` is the source of truth and all management happens through `sshkey-ctl`. Users are bootstrapped via `sshkey-ctl bootstrap-admin <name>` on a fresh deployment (generates an Ed25519 keypair with an interactive passphrase, inserts the user row with admin rights, and writes the encrypted private key to the current working directory). Everyone else joins via the normal `approve` flow. `users.toml` seed support was removed in Phase 16.
 
 ### Install
 
@@ -139,7 +139,7 @@ mkdir -p /etc/sshkey-chat /var/sshkey-chat
 
 Create the config files:
 
-> **Note:** `users.toml` and `rooms.toml` are **seed files only** -- they are processed on first server start to bootstrap initial users and rooms. After that, use `sshkey-ctl` for all user and room management. `server.toml` remains the runtime config file for server settings.
+> **Note:** `rooms.toml` is a **seed file only** — processed on first server start to bootstrap initial rooms. After that, use `sshkey-ctl` for all room management. `server.toml` remains the runtime config file for server settings. Users are bootstrapped via `sshkey-ctl bootstrap-admin` (not a seed file) — see the setup flow below.
 
 **`/etc/sshkey-chat/server.toml`**
 
@@ -168,23 +168,17 @@ profiles_per_minute = 5
 pins_per_minute = 10
 ```
 
-See `testdata/config/server.toml` for a complete example with all options.
+See `docker/config/server.toml` for the complete reference with every option documented inline. (`testdata/config/server.toml` mirrors the same section shape for test fixtures but with test-friendly values — not intended as an operator reference.)
 
-**`/etc/sshkey-chat/users.toml`** -- Seed file, processed on first server start only. After that, use `sshkey-ctl` to manage users and rooms.
+**Users** are not configured via a seed file. On a fresh deployment, create the first admin via:
 
-```toml
-[alice]
-key = "ssh-ed25519 AAAA... alice@laptop"
-display_name = "Alice"
-rooms = ["general", "support"]
-
-[bob]
-key = "ssh-ed25519 AAAA... bob@desktop"
-display_name = "Bob"
-rooms = ["general", "support"]
+```bash
+sshkey-ctl bootstrap-admin admin
 ```
 
-**`/etc/sshkey-chat/rooms.toml`** -- Seed file, processed on first server start only. After that, use `sshkey-ctl` to manage users and rooms.
+This generates an Ed25519 keypair (interactive passphrase prompt), inserts the admin row into `users.db`, writes the encrypted private key to the current directory, and records an audit entry. Subsequent users join via the normal pending-keys + `approve` flow.
+
+**`/etc/sshkey-chat/rooms.toml`** -- Seed file, processed on first server start only. After that, use `sshkey-ctl` to manage rooms.
 
 ```toml
 [general]
@@ -219,8 +213,10 @@ sudo chown sshkey:sshkey /var/sshkey-chat
 sudo chmod 750 /var/sshkey-chat
 
 # Copy config files
-sudo cp testdata/config/*.toml /etc/sshkey-chat/
-# Edit users.toml and rooms.toml for your setup
+sudo cp docker/config/server.toml /etc/sshkey-chat/
+sudo cp docker/config/rooms.toml /etc/sshkey-chat/   # optional — seed default rooms
+# Edit server.toml to taste; rooms.toml is optional (server creates empty rooms.db if absent)
+# Bootstrap the first admin (see "Configure" above for sshkey-ctl bootstrap-admin)
 
 # Install and enable the service
 sudo cp init/sshkey-server.service /etc/systemd/system/
@@ -646,7 +642,7 @@ sshkey-chat/
 │   ├── push/              # APNs + FCM push notification senders
 │   ├── server/            # SSH server, session handling, all protocol logic
 │   └── store/             # SQLite storage (users, rooms, messages, devices, epochs, groups, DMs)
-├── testdata/config/       # example config files for testing
+├── testdata/config/       # test-fixture configs (rooms.toml + server.toml; no users.toml since Phase 16)
 ├── go.mod
 └── go.sum
 ```

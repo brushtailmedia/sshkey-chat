@@ -1,21 +1,55 @@
+# Test-fixture server.toml. Mirrors the shape of docker/config/server.toml
+# so every Phase 17+ config section is exercised by the config loader
+# during tests, but with test-friendly values (high rate limits, disabled
+# default-on schedulers, fast shutdown). Comments here are minimal on
+# purpose — see docker/config/server.toml for the canonical per-knob
+# rationale. Keep the two files in sync on structure, diverge only on
+# values.
+
 [server]
 port = 2222
 bind = "0.0.0.0"
-allow_self_leave_rooms = false          # default — admin-managed rooms
-allow_self_leave_retired_rooms = true   # default — users can /delete retired rooms
+allow_self_leave_rooms = false
+allow_self_leave_retired_rooms = true
 
-# Phase 17b: test fixtures explicitly disable auto-revoke. Real
-# deployments get enabled=true via config defaults; tests that want
-# to exercise auto-revoke paths set this to true + populate thresholds
-# at runtime via cfg.Server.Server.AutoRevoke.
+# Tests explicitly disable auto-revoke. Individual tests that exercise
+# the auto-revoke path flip this to true + populate thresholds at
+# runtime via cfg.Server.Server.AutoRevoke.
 [server.auto_revoke]
 enabled = false
+prune_after_hours = 168
+
+[server.auto_revoke.thresholds]
+malformed_frame        = "3:60"
+oversized_body         = "2:60"
+unknown_verb           = "5:60"
+invalid_nanoid         = "5:60"
+invalid_content_hash   = "3:60"
+oversized_upload_frame = "2:60"
+wrapped_keys_over_cap  = "2:60"
+file_ids_over_cap      = "2:60"
+non_member_context     = "5:60"
+download_not_found     = "5:60"
+download_no_channel    = "3:60"
+reconnect_flood        = "10:60"
+error_flood            = "10:60"
+
+# Per-user daily upload quotas. Default-on in production; tests disable
+# explicitly so upload-heavy tests don't hit quota rejections. Individual
+# tests that exercise the quota path enable + set thresholds at runtime.
+[server.quotas.user]
+enabled = false
+allow_exempt_users = false
+daily_upload_bytes_warn = "1GB"
+daily_upload_bytes_block = "5GB"
+flag_consecutive_days = 2
+retention_days = 30
 
 [messages]
 max_body_size = "16KB"
 
 [retention]
-purge_days = 0      # 0 = keep forever
+purge_days = 0
 
 [sync]
 window_messages = 200
@@ -26,11 +60,17 @@ history_page_size = 100
 max_file_size = "50MB"
 max_avatar_size = "256KB"
 allowed_avatar_types = ["image/png", "image/jpeg"]
+max_file_ids_per_message = 20
 
 [devices]
 max_per_user = 10
 
+[groups]
+max_members = 150
+
 [rate_limits]
+# All rate limits intentionally high so tests don't trip them. Individual
+# tests exercising rate-limit paths adjust the specific bucket they need.
 messages_per_second = 200
 uploads_per_minute = 6000
 connections_per_minute = 10
@@ -43,26 +83,43 @@ reactions_per_minute = 300
 dm_creates_per_minute = 50
 profiles_per_minute = 50
 pins_per_minute = 100
+admin_actions_per_minute = 200
+edits_per_minute = 100
+room_members_per_minute = 60
+device_list_per_minute = 60
+download_requests_per_minute = 600
+error_responses_per_minute = 600
+idle_timeout_seconds = 0
+per_client_write_buffer_size = 256
+consecutive_drop_disconnect_threshold = 10
 
 [shutdown]
 grace_period = "100ms"
 
 [logging]
+# Empty file = stderr via the slog JSONHandler wired up by main_test.go.
+# Tests that want structured-log assertions configure the logger in-code.
 level = "info"
-file = "/var/sshkey-chat/server.log"
+file = ""
 max_size_mb = 100
 max_files = 5
 format = "json"
 
+# Backup scheduler disabled in tests — individual backup-feature tests
+# build a Server manually with backup enabled. Keeps the default suite
+# from spawning a disk-writing goroutine.
+[backup]
+enabled = false
+interval = "24h"
+dest_dir = "backups"
+retention_count = 10
+retention_age = "720h"
+compress = true
+skip_if_idle = true
+include_config_files = true
+
 [push.apns]
 enabled = false
-key_path = ""
-key_id = ""
-team_id = ""
-bundle_id = ""
-sandbox = false
 
 [push.fcm]
 enabled = false
-credentials_path = ""
-project_id = ""

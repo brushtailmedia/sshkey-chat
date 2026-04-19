@@ -27,11 +27,13 @@ Server machine
 ├── sshkey-ctl            -- local admin tool, reads/writes config + pending log
 ├── /etc/sshkey-chat/
 │   ├── server.toml         -- server config (port, retention settings)
-│   ├── users.toml          -- seed file (first-run only, then users.db is source of truth)
-│   └── rooms.toml          -- seed file (first-run only, then rooms.db is source of truth)
+│   └── rooms.toml          -- optional seed file (first-run only; then rooms.db is source of truth)
 └── /var/sshkey-chat/
     ├── pending-keys.log    -- unrecognised keys that tried to connect
-    └── data/               -- SQLite DBs (encrypted blobs -- rooms, DMs, data.db)
+    ├── audit.log           -- append-only log of admin actions
+    ├── host_key            -- server SSH host key (generated on first run if missing)
+    ├── sshkey-server.pid   -- lockfile (PID + start time; cleaned on graceful shutdown)
+    └── data/               -- SQLite DBs (users.db, rooms.db, room-*.db, group-*.db, dm-*.db, data.db)
 ```
 
 **Port separation:**
@@ -881,7 +883,7 @@ The sender generates a fresh AES-256 key per message, encrypts the payload, wrap
 ```
 
 **Leave notifications:** all leave events (rooms, DMs, group DMs) produce a visible system message in the conversation: "carol has left the conversation." Clients render these inline in the message stream, not as silent metadata. This applies to:
-- Room leaves (user removed from `users.toml` or reassigned)
+- Room leaves (user removed via `sshkey-ctl remove-from-room`, self-leave via `/leave` when `allow_self_leave_rooms = true`, or retirement cascade)
 - DM / group DM leaves (explicit `leave_conversation` or client-side delete)
 
 #### Conversations (DMs)
@@ -1145,23 +1147,11 @@ grace_period = "10s"             # time to finish in-flight transfers on shutdow
                                  # rule of thumb: max_file_size / 10 MB/s = minimum grace
 ```
 
-```toml
-# /etc/sshkey-chat/users.toml (SEED FILE — processed on first server start only)
-# After first start, manage users via: sshkey-ctl approve/retire-user/promote/demote
-[alice]
-key = "ssh-ed25519 AAAA...abc"       # one key per user, always
-display_name = "Alice Chen"
-rooms = ["general", "engineering", "admin"]
-
-[bob]
-key = "ssh-ed25519 AAAA...def"
-display_name = "Bob"
-rooms = ["general"]
-```
+> **Full reference:** `docker/config/server.toml` documents every knob (including `[server.auto_revoke]`, `[server.quotas.user]`, `[backup]`, the expanded `[rate_limits]` surface added by Phases 17 / 17b / 17c, and the `[files].max_file_ids_per_message` cap) with inline trade-off comments. The example above is the minimal learn-by-shape subset.
 
 ```toml
-# /etc/sshkey-chat/rooms.toml (SEED FILE — processed on first server start only)
-# After first start, manage rooms via: sshkey-ctl add-room/add-to-room/remove-from-room
+# /etc/sshkey-chat/rooms.toml (optional SEED FILE — processed on first server start only if rooms.db does not yet exist)
+# After first start, manage rooms via: sshkey-ctl add-room / add-to-room / remove-from-room / retire-room
 [general]
 topic = "General chat"
 
@@ -1172,7 +1162,15 @@ topic = "Core platform work"
 topic = "Admin discussion"
 ```
 
-Server watches config files for changes (fsnotify) or reloads on SIGHUP.
+**Users are not configured via a seed file.** On a fresh deployment, create the first admin with:
+
+```bash
+sshkey-ctl bootstrap-admin admin-name
+```
+
+This generates an Ed25519 keypair (interactive passphrase prompt, zxcvbn score ≥ 3 required), inserts the user row into `users.db` with `is_admin = true`, and writes the encrypted private key to the current directory. Subsequent users join via the normal pending-keys + `sshkey-ctl approve` flow. `users.toml` seed support was removed in Phase 16 Gap 4 — a stray `users.toml` in the config dir is ignored at startup with a one-time WARN log.
+
+Server watches `server.toml` and `rooms.toml` for changes (fsnotify) or reloads on SIGHUP.
 
 ### sshkey-ctl
 
@@ -1271,12 +1269,13 @@ All state-changing commands (retire-user, promote, demote, rename-user, update-t
 Append-only log of all administrative actions. Stored at `/var/sshkey-chat/audit.log`.
 
 ```
-2026-04-03T14:22:00Z  sshkey-ctl  approve    user=carol fingerprint=xx:yy:zz rooms=general,engineering
-2026-04-03T14:25:00Z  sshkey-ctl  reject     fingerprint=aa:bb:cc
-2026-04-03T15:00:00Z  server      reload     trigger=fsnotify file=users.toml changes="+carol"
-2026-04-03T15:10:00Z  sshkey-ctl  remove     user=dave
-2026-04-03T16:00:00Z  sshkey-ctl  revoke-device  user=alice device=dev_macbook_abc
-2026-04-03T18:00:00Z  server      shutdown   signal=SIGTERM grace=10s clients=12
+2026-04-03T14:22:00Z  sshkey-ctl  bootstrap-admin  user=usr_admin fingerprint=xx:yy:zz
+2026-04-03T14:22:00Z  sshkey-ctl  approve          user=usr_carol fingerprint=yy:zz:aa rooms=general,engineering
+2026-04-03T14:25:00Z  sshkey-ctl  reject           fingerprint=aa:bb:cc
+2026-04-03T15:00:00Z  server      reload           trigger=fsnotify file=server.toml
+2026-04-03T15:10:00Z  sshkey-ctl  retire-user      user=usr_dave reason="offboarded"
+2026-04-03T16:00:00Z  sshkey-ctl  revoke-device    user=usr_alice device=dev_macbook_abc
+2026-04-03T18:00:00Z  server      shutdown         signal=SIGTERM grace=10s clients=12
 ```
 
 Every `sshkey-ctl` command and every server-initiated action (config reload, shutdown) gets a timestamped entry. Not tamper-proof against root, but creates accountability and makes forensics possible after an incident.
@@ -1408,7 +1407,6 @@ Handled entirely client-side. Fall back to text placeholder + download for unsup
   - DMs don't need `first_epoch` -- members are set at conversation creation and per-message keys are only wrapped for current members. Old DM messages from before a member existed in the conversation were never wrapped for them.
 - For rooms, both filters apply. A message must pass both to be delivered.
 - If a user is removed and re-added, they get a new `first_seen` and (for rooms) a new `first_epoch` -- previous history window is closed. Clean break.
-- Admin override possible via `users.toml`: `history_from = "2026-01-01"` to grant access to older room history. This relaxes `first_seen` only -- the user still needs epoch keys for those older messages, which would need to be provided separately.
 
 ### Message Deletion
 
@@ -2125,7 +2123,7 @@ A shared `protocol_test.json` file containing sample messages for every protocol
 sshkey-ctl import --file users.csv --rooms general
 ```
 
-CSV format: `key,display_name,rooms` (one user per line). Runs the same validation as single approve (duplicate key, duplicate name, Ed25519, name length) per row. Atomic: all-or-nothing write to users.toml.
+CSV format: `key,display_name,rooms` (one user per line). Runs the same validation as single approve (duplicate key, duplicate name, Ed25519, name length) per row. Atomic: wraps the batch in a single `users.db` transaction so partial failures roll back cleanly.
 
 ### Batch room management
 
