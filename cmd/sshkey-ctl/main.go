@@ -135,6 +135,8 @@ func run() error {
 		return cmdHostKey(configDir)
 	case "purge":
 		return cmdPurge(dataDir, cmdArgs)
+	case "backup":
+		return cmdBackup(configDir, dataDir, cmdArgs)
 	default:
 		return fmt.Errorf("unknown command: %s", cmd)
 	}
@@ -194,7 +196,10 @@ Commands:
   unblock-fingerprint <fp>                Remove a fingerprint from the block list
   status                                  Show server overview (users, rooms, data)
   host-key                                Print server host key fingerprint
-  purge --older-than DURATION [--dry-run]  Purge old messages and vacuum DBs`)
+  purge --older-than DURATION [--dry-run]  Purge old messages and vacuum DBs
+  backup [--out PATH] [--label TAG]       Take a snapshot tarball (Phase 19;
+                                          uses [backup].dest_dir from server.toml
+                                          unless --out is specified)`)
 	return nil
 }
 

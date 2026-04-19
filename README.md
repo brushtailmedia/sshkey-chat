@@ -323,10 +323,13 @@ sshkey-ctl check-integrity --all                               # include per-roo
 **Server:**
 
 ```bash
-sshkey-ctl status                                              # show server overview
+sshkey-ctl status                                              # show server overview (includes running PID from lockfile)
 sshkey-ctl host-key                                            # print server host key fingerprint
 sshkey-ctl purge --older-than 5y                               # delete old messages + vacuum
 sshkey-ctl purge --older-than 1y --dry-run                     # preview what would be deleted
+sshkey-ctl backup                                              # snapshot all DBs + attachments + host_key + server.toml (uses [backup].dest_dir)
+sshkey-ctl backup --label pre-upgrade                          # tag the snapshot with a human-readable label
+sshkey-ctl backup --out /mnt/archive                           # write to a custom directory instead of the configured dest_dir
 ```
 
 ## Protocol
