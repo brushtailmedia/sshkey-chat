@@ -138,6 +138,10 @@ func run() error {
 		return cmdPurge(dataDir, cmdArgs)
 	case "backup":
 		return cmdBackup(configDir, dataDir, cmdArgs)
+	case "restore":
+		return cmdRestore(configDir, dataDir, cmdArgs)
+	case "list-backups":
+		return cmdListBackups(configDir, dataDir, cmdArgs)
 	default:
 		return fmt.Errorf("unknown command: %s", cmd)
 	}
@@ -200,7 +204,14 @@ Commands:
   purge --older-than DURATION [--dry-run]  Purge old messages and vacuum DBs
   backup [--out PATH] [--label TAG]       Take a snapshot tarball (Phase 19;
                                           uses [backup].dest_dir from server.toml
-                                          unless --out is specified)`)
+                                          unless --out is specified)
+  restore <tarball> [--no-pre-backup]     Restore from a backup tarball (server
+                                          must be stopped). Default behavior is
+                                          to create a pre-restore backup of the
+                                          current state first; --no-pre-backup
+                                          skips that.
+  list-backups                            Show available backups in [backup].dest_dir
+                                          (newest first)`)
 	return nil
 }
 
