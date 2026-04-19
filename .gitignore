@@ -47,8 +47,6 @@ docker/config/host_key
 
 # Design docs (internal working files, not checked in)
 refactor_plan.md
-business_edition.md
-upload_quota.md
 
 # OS
 .DS_Store
