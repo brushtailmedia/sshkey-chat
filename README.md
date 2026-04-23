@@ -65,45 +65,67 @@ Only Ed25519 SSH keys are supported. The server rejects RSA, ECDSA, and other ke
 
 ```bash
 # 1. (Optional) Edit docker/config/rooms.toml to seed initial rooms on first start.
+#    The seed file is processed only on first boot — rooms.db becomes the
+#    source of truth after that.
 
 # 2. Start the server
 docker compose up -d
 
-# 3. Create the first admin (generates an encrypted keypair on the server)
-docker exec sshkey-chat sshkey-ctl bootstrap-admin alice
+# 3. Create the first admin. The -it flags are REQUIRED — bootstrap-admin
+#    prompts interactively for a passphrase (zxcvbn strength check, min
+#    score 3). Inserts the admin row into users.db + writes the encrypted
+#    Ed25519 private key to /var/sshkey-chat/alice_ed25519 inside the
+#    container (which is a persistent volume).
+docker exec -it sshkey-chat sshkey-ctl bootstrap-admin alice
 
-# 4. Copy the generated key to your client machine, then connect
+# 4. Extract the generated private key from the container to your local
+#    SSH directory. The file is encrypted with the passphrase you just
+#    chose, so copying it is safe over untrusted paths.
+docker cp sshkey-chat:/var/sshkey-chat/alice_ed25519 ~/.ssh/
+docker cp sshkey-chat:/var/sshkey-chat/alice_ed25519.pub ~/.ssh/
+chmod 600 ~/.ssh/alice_ed25519
+
+# 5. Connect with sshkey-term. It prompts for the passphrase on first
+#    use and remembers the key in the client's encrypted store.
 sshkey-term --host localhost --key ~/.ssh/alice_ed25519
 ```
+
+**First-boot check:** if you skip step 3, the server still starts — but `docker logs sshkey-chat` will show:
+
+```
+{"level":"WARN","msg":"no users in users.db — run `sshkey-ctl bootstrap-admin <name>` against the data directory to create the first admin; the server will accept no logins until an admin exists","data_dir":"/var/sshkey-chat"}
+```
+
+SSH connections will be rejected with every key landing in `pending-keys.log` with no admin available to triage. Run step 3 to unblock.
 
 Manage the server:
 
 ```bash
 # View pending key requests
-docker exec sshkey-server sshkey-ctl pending
+docker exec sshkey-chat sshkey-ctl pending
 
 # Approve a user and add them to rooms
-docker exec sshkey-server sshkey-ctl approve --key "ssh-ed25519 AAAA... Alice" --rooms general,support
+docker exec sshkey-chat sshkey-ctl approve --key "ssh-ed25519 AAAA... Alice" --rooms general,support
 
 # List users / rooms
-docker exec sshkey-server sshkey-ctl list-users
-docker exec sshkey-server sshkey-ctl list-rooms
+docker exec sshkey-chat sshkey-ctl list-users
+docker exec sshkey-chat sshkey-ctl list-rooms
 
 # Promote/demote admin status (lives in users.db, NOT server.toml)
-docker exec sshkey-server sshkey-ctl promote usr_abc123
-docker exec sshkey-server sshkey-ctl demote usr_abc123
+docker exec sshkey-chat sshkey-ctl promote usr_abc123
+docker exec sshkey-chat sshkey-ctl demote usr_abc123
 
 # Create a new room
-docker exec sshkey-server sshkey-ctl add-room --name engineering --topic "Engineering chat"
+docker exec sshkey-chat sshkey-ctl add-room --name engineering --topic "Engineering chat"
 
 # Retire a room (read-only for everyone; display name gets a random suffix)
-docker exec sshkey-server sshkey-ctl retire-room --room engineering --reason "project ended"
+docker exec sshkey-chat sshkey-ctl retire-room --room engineering --reason "project ended"
 
 # Revoke a device
-docker exec sshkey-server sshkey-ctl revoke-device --user usr_abc123 --device dev_x
+docker exec sshkey-chat sshkey-ctl revoke-device --user usr_abc123 --device dev_x
 
 # View logs
-docker logs -f sshkey-server
+docker logs -f sshkey-chat
 ```
 
 > **Note:** `rooms.toml` is a seed file — it is only processed on first server start to bootstrap initial rooms. After that, `rooms.db` is the source of truth and all management happens through `sshkey-ctl`. Users are bootstrapped via `sshkey-ctl bootstrap-admin <name>` on a fresh deployment (generates an Ed25519 keypair with an interactive passphrase, inserts the user row with admin rights, and writes the encrypted private key to the current working directory). Everyone else joins via the normal `approve` flow. `users.toml` seed support was removed in Phase 16.

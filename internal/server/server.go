@@ -260,6 +260,18 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		// rooms feature. Existing deployments with data in users.db are
 		// unaffected — `users.db` was already the source of truth post
 		// Phase 9, the TOML file was only first-boot seed convenience.
+		//
+		// Empty-users.db warning: fire at startup so a fresh docker /
+		// systemd deploy has a visible signal in the logs pointing at
+		// the next step. Without this, an operator sees "server started"
+		// and no error, but every SSH connection silently lands in
+		// pending-keys.log with no admin to triage it. Non-fatal — the
+		// server still runs; bootstrap-admin can be invoked any time.
+		if st.UsersDBEmpty() {
+			logger.Warn("no users in users.db — run `sshkey-ctl bootstrap-admin <name>` against the data directory to create the first admin; the server will accept no logins until an admin exists",
+				"data_dir", dir,
+			)
+		}
 
 		// Remove orphan files from crashed uploads (files on disk with
 		// no hash record in the DB — they never completed successfully)

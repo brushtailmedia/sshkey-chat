@@ -3,7 +3,7 @@
 # Use sshkey-ctl to manage rooms after the initial seed.
 #
 # To add a room after first start:
-#   docker exec sshkey-server sshkey-ctl add-room --name engineering --topic "Engineering chat"
+#   docker exec sshkey-chat sshkey-ctl add-room --name engineering --topic "Engineering chat"
 
 [general]
 topic = "General chat"
