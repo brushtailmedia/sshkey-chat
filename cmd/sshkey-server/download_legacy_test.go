@@ -104,6 +104,7 @@ func (e *testEnv) roomIDByName(name string) string {
 type legacyClient struct {
 	*testClient
 	downloadCh ssh.Channel
+	uploadCh   ssh.Channel
 }
 
 // connectLegacy opens all three session channels in the pre-Phase-17-
@@ -156,8 +157,6 @@ func (e *testEnv) connectLegacy(keyPath, deviceID string) *legacyClient {
 		e.t.Fatalf("open Ch3 (upload): %v", err)
 	}
 	go ssh.DiscardRequests(req3)
-	_ = ulCh // upload unused in these tests
-
 	tc := &testClient{
 		enc:  protocol.NewEncoder(ch1),
 		dec:  protocol.NewDecoder(ch1),
@@ -180,7 +179,7 @@ func (e *testEnv) connectLegacy(keyPath, deviceID string) *legacyClient {
 	tc.expectType("welcome")
 	tc.drainUntil("sync_complete")
 
-	return &legacyClient{testClient: tc, downloadCh: dlCh}
+	return &legacyClient{testClient: tc, downloadCh: dlCh, uploadCh: ulCh}
 }
 
 // readLegacyDownloadFrame reads the binary frame the server writes to
@@ -294,7 +293,7 @@ func legacyDownload(tc *legacyClient, fileID string) (data []byte, hash string, 
 // Channel-1-request + Channel-2-binary-frame protocol.
 func TestLegacyDownload_HappyPath(t *testing.T) {
 	e := newTestEnv(t)
-	alice := e.connectLegacy("/tmp/sshkey-test-key", "dev_alice")
+	alice := e.connectLegacy(fixtureKeyPath(t, "alice"), "dev_alice")
 
 	generalID := e.roomIDByName("general")
 	payload := []byte("legacy path still works fine")
@@ -318,7 +317,7 @@ func TestLegacyDownload_HappyPath(t *testing.T) {
 // Channel 1 and no bytes written to Channel 2.
 func TestLegacyDownload_NonMemberDenied(t *testing.T) {
 	e := newTestEnv(t)
-	bob := e.connectLegacy("/tmp/sshkey-test-key-bob", "dev_bob")
+	bob := e.connectLegacy(fixtureKeyPath(t, "bob"), "dev_bob")
 
 	engID := e.roomIDByName("engineering")
 	fileID := store.GenerateID("file_")
@@ -339,7 +338,7 @@ func TestLegacyDownload_NonMemberDenied(t *testing.T) {
 // directory via filepath.Join.
 func TestLegacyDownload_InvalidFileID(t *testing.T) {
 	e := newTestEnv(t)
-	alice := e.connectLegacy("/tmp/sshkey-test-key", "dev_alice")
+	alice := e.connectLegacy(fixtureKeyPath(t, "alice"), "dev_alice")
 
 	_, _, err := legacyDownload(alice, "../../etc/passwd")
 	if err == nil {
@@ -356,7 +355,7 @@ func TestLegacyDownload_InvalidFileID(t *testing.T) {
 // cannot distinguish "doesn't exist" from "no access."
 func TestLegacyDownload_UnknownFileIDIsNotFound(t *testing.T) {
 	e := newTestEnv(t)
-	alice := e.connectLegacy("/tmp/sshkey-test-key", "dev_alice")
+	alice := e.connectLegacy(fixtureKeyPath(t, "alice"), "dev_alice")
 
 	fileID := store.GenerateID("file_") // valid shape, never seeded
 	_, _, err := legacyDownload(alice, fileID)
@@ -367,4 +366,3 @@ func TestLegacyDownload_UnknownFileIDIsNotFound(t *testing.T) {
 		t.Errorf("expected not_found, got: %v", err)
 	}
 }
-

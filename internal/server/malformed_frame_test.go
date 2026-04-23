@@ -26,9 +26,11 @@ package server
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
+	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 )
 
 // malformedRaw returns a syntactically-broken JSON blob that every
@@ -137,6 +139,111 @@ func TestHandlePushRegister_BadPlatformFiresSignal(t *testing.T) {
 	s.handlePushRegister(alice.Client, raw)
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_push_badplat"); got != 1 {
 		t.Errorf("SignalMalformedFrame on bad platform = %d, want 1", got)
+	}
+}
+
+func TestHandlePushRegister_ShortTokenRejectedAndNotStored(t *testing.T) {
+	s := newTestServer(t)
+	alice := testClientFor("alice", "dev_alice_push_short")
+
+	raw := json.RawMessage(`{"type":"push_register","platform":"ios","device_id":"dev_x","token":"abc"}`)
+	s.handlePushRegister(alice.Client, raw)
+
+	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_push_short"); got != 1 {
+		t.Fatalf("SignalMalformedFrame on short token = %d, want 1", got)
+	}
+
+	msgs := alice.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 error message, got %d", len(msgs))
+	}
+	var errMsg protocol.Error
+	if err := json.Unmarshal(msgs[0], &errMsg); err != nil {
+		t.Fatalf("parse error reply: %v", err)
+	}
+	if errMsg.Code != "invalid_message" {
+		t.Fatalf("error code = %q, want invalid_message", errMsg.Code)
+	}
+	if !strings.Contains(errMsg.Message, "at least 8") {
+		t.Fatalf("error message = %q, want at-least-8 hint", errMsg.Message)
+	}
+
+	tokens, err := s.store.GetActivePushTokens("alice")
+	if err != nil {
+		t.Fatalf("GetActivePushTokens: %v", err)
+	}
+	if len(tokens) != 0 {
+		t.Fatalf("short token should not be stored, got %d rows", len(tokens))
+	}
+}
+
+func TestHandlePushRegister_ValidTokenStoredTrimmed(t *testing.T) {
+	s := newTestServer(t)
+	alice := testClientFor("alice", "dev_alice_push_ok")
+
+	raw := json.RawMessage(`{"type":"push_register","platform":"android","device_id":"dev_x","token":"   12345678abcdef   "}`)
+	s.handlePushRegister(alice.Client, raw)
+
+	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_push_ok"); got != 0 {
+		t.Fatalf("SignalMalformedFrame on valid token = %d, want 0", got)
+	}
+
+	msgs := alice.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 push_registered message, got %d", len(msgs))
+	}
+	var ack protocol.PushRegistered
+	if err := json.Unmarshal(msgs[0], &ack); err != nil {
+		t.Fatalf("parse push_registered: %v", err)
+	}
+	if ack.Type != "push_registered" || ack.Platform != "android" {
+		t.Fatalf("unexpected ack: %+v", ack)
+	}
+
+	tokens, err := s.store.GetActivePushTokens("alice")
+	if err != nil {
+		t.Fatalf("GetActivePushTokens: %v", err)
+	}
+	if len(tokens) != 1 {
+		t.Fatalf("expected 1 stored push token, got %d", len(tokens))
+	}
+	if tokens[0].Token != "12345678abcdef" {
+		t.Fatalf("stored token = %q, want trimmed token", tokens[0].Token)
+	}
+	if tokens[0].DeviceID != "dev_alice_push_ok" {
+		t.Fatalf("device_id = %q, want connection device id", tokens[0].DeviceID)
+	}
+}
+
+func TestHandlePushRegister_OversizedTokenRejected(t *testing.T) {
+	s := newTestServer(t)
+	alice := testClientFor("alice", "dev_alice_push_long")
+
+	token := strings.Repeat("a", maxPushTokenLen+1)
+	rawBytes, err := json.Marshal(protocol.PushRegister{
+		Type:     "push_register",
+		Platform: "ios",
+		DeviceID: "dev_x",
+		Token:    token,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s.handlePushRegister(alice.Client, rawBytes)
+
+	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_push_long"); got != 1 {
+		t.Fatalf("SignalMalformedFrame on oversized token = %d, want 1", got)
+	}
+	msgs := alice.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 error message, got %d", len(msgs))
+	}
+	var errMsg protocol.Error
+	if err := json.Unmarshal(msgs[0], &errMsg); err != nil {
+		t.Fatalf("parse error reply: %v", err)
+	}
+	if errMsg.Code != "invalid_message" {
+		t.Fatalf("error code = %q, want invalid_message", errMsg.Code)
 	}
 }
 

@@ -1,0 +1,20 @@
+name: Nightly Flake
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  shuffle-stress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: Sleep Guard
+        run: bash .github/scripts/check_test_sleeps.sh
+      - name: Shuffle Stress (critical packages)
+        run: |
+          go test -v -shuffle=on -count=20 -p 1 ./internal/server ./internal/store ./internal/protocol ./internal/counters

@@ -24,13 +24,11 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
 
-// Test fixture keys generated once per TestMain run. Written to /tmp
-// for backwards compatibility with pre-existing test code that expects
-// them there. Phase 16 Gap 4 removed users.toml support, so the
-// fixture code no longer writes a users.toml file — instead, the user
-// metadata is stored in testFixtureUsers and seeded into users.db
-// directly via store.InsertUser inside newTestEnv after the server is
-// created.
+// Test fixture keys generated once per test run under a temp dir.
+// Phase 16 Gap 4 removed users.toml support, so the fixture code no
+// longer writes a users.toml file — instead, user metadata is stored in
+// testFixtureUsers and seeded into users.db directly via
+// store.InsertUser inside newTestEnv after the server is created.
 type testFixtureUser struct {
 	UserID      string // nanoid-style internal ID
 	DisplayName string
@@ -40,15 +38,15 @@ type testFixtureUser struct {
 }
 
 var (
-	testFixtureOnce   sync.Once
-	testFixtureDir    string             // temp config dir (server.toml + rooms.toml only)
-	testFixtureUsers  []testFixtureUser  // user metadata for store seeding
-	testFixtureErr    error
+	testFixtureOnce  sync.Once
+	testFixtureDir   string            // temp config dir (server.toml + rooms.toml only)
+	testFixtureUsers []testFixtureUser // user metadata for store seeding
+	testFixtureErr   error
 )
 
-// setupFixtures creates three Ed25519 test keys (alice/bob/carol),
-// writes their private keys to /tmp/sshkey-test-key[-bob|-carol], and
-// builds a temp config dir containing rooms.toml + server.toml. The
+// setupFixtures creates three Ed25519 test keys (alice/bob/carol) in a
+// per-run temp directory and builds a temp config dir containing
+// rooms.toml + server.toml. The
 // generated user metadata is stashed in testFixtureUsers for later
 // seeding into users.db via store.InsertUser. Called lazily on first
 // test that needs the fixtures.
@@ -60,11 +58,16 @@ func setupFixtures() (string, []testFixtureUser, error) {
 }
 
 func generateTestFixtures() (string, []testFixtureUser, error) {
+	keyDir, err := os.MkdirTemp("", "sshkey-test-keys-")
+	if err != nil {
+		return "", nil, fmt.Errorf("temp key dir: %w", err)
+	}
+
 	// Generate the three test keys + pub keys
 	users := []testFixtureUser{
-		{UserID: "usr_alice_test", DisplayName: "alice", KeyPath: "/tmp/sshkey-test-key", Rooms: []string{"general", "engineering"}},
-		{UserID: "usr_bob_test", DisplayName: "bob", KeyPath: "/tmp/sshkey-test-key-bob", Rooms: []string{"general"}},
-		{UserID: "usr_carol_test", DisplayName: "carol", KeyPath: "/tmp/sshkey-test-key-carol", Rooms: []string{"general"}},
+		{UserID: "usr_alice_test", DisplayName: "alice", KeyPath: filepath.Join(keyDir, "alice_ed25519"), Rooms: []string{"general", "engineering"}},
+		{UserID: "usr_bob_test", DisplayName: "bob", KeyPath: filepath.Join(keyDir, "bob_ed25519"), Rooms: []string{"general"}},
+		{UserID: "usr_carol_test", DisplayName: "carol", KeyPath: filepath.Join(keyDir, "carol_ed25519"), Rooms: []string{"general"}},
 	}
 
 	tmpConfigDir, err := os.MkdirTemp("", "sshkey-test-config-")
@@ -111,13 +114,29 @@ func generateTestFixtures() (string, []testFixtureUser, error) {
 	return tmpConfigDir, users, nil
 }
 
+func fixtureKeyPath(t testing.TB, displayName string) string {
+	t.Helper()
+	_, users, err := setupFixtures()
+	if err != nil {
+		t.Fatalf("setup fixtures: %v", err)
+	}
+	for _, u := range users {
+		if strings.EqualFold(u.DisplayName, displayName) {
+			return u.KeyPath
+		}
+	}
+	t.Fatalf("fixture key not found for display name %q", displayName)
+	return ""
+}
+
 // testEnv holds a running server and its config for tests.
 type testEnv struct {
-	srv     *server.Server
-	cfg     *config.Config
-	port    int
-	dataDir string
-	t       *testing.T
+	srv       *server.Server
+	cfg       *config.Config
+	port      int
+	configDir string
+	dataDir   string
+	t         *testing.T
 }
 
 // roomID looks up a room nanoid from rooms.db by display name.
@@ -139,6 +158,15 @@ func (e *testEnv) roomID(displayName string) string {
 
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
+	return newTestEnvWithConfig(t, nil)
+}
+
+func newTestEnvWithConfig(t *testing.T, mutate func(*config.Config)) *testEnv {
+	t.Helper()
+	// Short mode keeps CI/dev fast by skipping full TCP+SSH integration setup.
+	if testing.Short() {
+		t.Skip("integration test — run without -short")
+	}
 	testConfigDir, fixtureUsers, err := setupFixtures()
 	if err != nil {
 		t.Fatalf("setup fixtures: %v", err)
@@ -148,6 +176,9 @@ func newTestEnv(t *testing.T) *testEnv {
 	cfg, err := config.Load(testConfigDir)
 	if err != nil {
 		t.Fatalf("load config: %v", err)
+	}
+	if mutate != nil {
+		mutate(cfg)
 	}
 
 	// Find a free port
@@ -205,7 +236,14 @@ func newTestEnv(t *testing.T) *testEnv {
 	t.Cleanup(func() { srv.Close() })
 	time.Sleep(200 * time.Millisecond)
 
-	return &testEnv{srv: srv, cfg: cfg, port: port, dataDir: testDataDir, t: t}
+	return &testEnv{
+		srv:       srv,
+		cfg:       cfg,
+		port:      port,
+		configDir: testConfigDir,
+		dataDir:   testDataDir,
+		t:         t,
+	}
 }
 
 // testClient is a connected protocol client.
@@ -335,7 +373,7 @@ func (tc *testClient) readMessage() (string, json.RawMessage) {
 
 func TestHandshake(t *testing.T) {
 	env := newTestEnv(t)
-	client := env.connect("/tmp/sshkey-test-key", "dev_handshake_test")
+	client := env.connect(fixtureKeyPath(t, "alice"), "dev_handshake_test")
 	_ = client
 	t.Log("handshake complete")
 }
@@ -346,8 +384,8 @@ func TestRoomMessaging(t *testing.T) {
 	engineeringID := env.roomID("engineering")
 
 	// Connect alice and bob
-	alice := env.connect("/tmp/sshkey-test-key", "dev_alice_001")
-	bob := env.connect("/tmp/sshkey-test-key-bob", "dev_bob_001")
+	alice := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_001")
+	bob := env.connect(fixtureKeyPath(t, "bob"), "dev_bob_001")
 
 	// Alice sends a message to general (both are members)
 	err := alice.enc.Encode(protocol.Send{
@@ -479,7 +517,7 @@ func TestSyncOnReconnect(t *testing.T) {
 	generalID := env.roomID("general")
 
 	// Connect alice, send some messages
-	alice := env.connect("/tmp/sshkey-test-key", "dev_alice_sync")
+	alice := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_sync")
 
 	for i := 0; i < 3; i++ {
 		alice.enc.Encode(protocol.Send{
@@ -497,7 +535,7 @@ func TestSyncOnReconnect(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Reconnect alice -- should get sync batch with the 3 messages
-	keyData, _ := os.ReadFile("/tmp/sshkey-test-key")
+	keyData, _ := os.ReadFile(fixtureKeyPath(t, "alice"))
 	signer, _ := ssh.ParsePrivateKey(keyData)
 
 	clientCfg := &ssh.ClientConfig{
@@ -586,7 +624,7 @@ func TestHistory(t *testing.T) {
 	env := newTestEnv(t)
 	generalID := env.roomID("general")
 
-	alice := env.connect("/tmp/sshkey-test-key", "dev_alice_hist")
+	alice := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_hist")
 
 	// Send 5 messages
 	var msgIDs []string
@@ -652,8 +690,8 @@ func TestHistory(t *testing.T) {
 func TestDMConversations(t *testing.T) {
 	env := newTestEnv(t)
 
-	alice := env.connect("/tmp/sshkey-test-key", "dev_alice_dm")
-	bob := env.connect("/tmp/sshkey-test-key-bob", "dev_bob_dm")
+	alice := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_dm")
+	bob := env.connect(fixtureKeyPath(t, "bob"), "dev_bob_dm")
 
 	// Alice creates a 1:1 DM with bob
 	alice.enc.Encode(protocol.CreateDM{
@@ -780,6 +818,443 @@ func TestDMConversations(t *testing.T) {
 	t.Log("DM conversations + silent leave fully verified")
 }
 
+func TestEdit_RoomEndToEnd(t *testing.T) {
+	env := newTestEnv(t)
+	roomID := env.roomID("general")
+
+	alice := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_edit_room")
+	bob := env.connect(fixtureKeyPath(t, "bob"), "dev_bob_edit_room")
+
+	if err := alice.enc.Encode(protocol.Send{
+		Type:      "send",
+		Room:      roomID,
+		Epoch:     1,
+		Payload:   "base64_room_original",
+		Signature: "base64_room_sig",
+	}); err != nil {
+		t.Fatalf("send room message: %v", err)
+	}
+
+	// Both room members receive the original message.
+	mt, raw := alice.readMessage()
+	if mt != "message" {
+		t.Fatalf("alice expected message, got %s", mt)
+	}
+	var original protocol.Message
+	if err := json.Unmarshal(raw, &original); err != nil {
+		t.Fatalf("unmarshal original room message: %v", err)
+	}
+	mt, _ = bob.readMessage()
+	if mt != "message" {
+		t.Fatalf("bob expected message, got %s", mt)
+	}
+
+	if err := alice.enc.Encode(protocol.Edit{
+		Type:      "edit",
+		ID:        original.ID,
+		Room:      roomID,
+		Epoch:     original.Epoch,
+		Payload:   "base64_room_edited",
+		Signature: "base64_room_sig_edit",
+	}); err != nil {
+		t.Fatalf("send room edit: %v", err)
+	}
+
+	mt, raw = alice.readMessage()
+	if mt != "edited" {
+		t.Fatalf("alice expected edited, got %s", mt)
+	}
+	var editedA protocol.Edited
+	if err := json.Unmarshal(raw, &editedA); err != nil {
+		t.Fatalf("unmarshal alice edited: %v", err)
+	}
+
+	mt, raw = bob.readMessage()
+	if mt != "edited" {
+		t.Fatalf("bob expected edited, got %s", mt)
+	}
+	var editedB protocol.Edited
+	if err := json.Unmarshal(raw, &editedB); err != nil {
+		t.Fatalf("unmarshal bob edited: %v", err)
+	}
+
+	if editedA.ID != original.ID || editedB.ID != original.ID {
+		t.Fatalf("edited IDs must match original: alice=%s bob=%s original=%s", editedA.ID, editedB.ID, original.ID)
+	}
+	if editedA.Payload != "base64_room_edited" || editedB.Payload != "base64_room_edited" {
+		t.Fatalf("edited payload mismatch: alice=%q bob=%q", editedA.Payload, editedB.Payload)
+	}
+	if editedA.EditedAt <= 0 || editedB.EditedAt <= 0 {
+		t.Fatalf("edited_at must be set: alice=%d bob=%d", editedA.EditedAt, editedB.EditedAt)
+	}
+	if editedA.TS != original.TS || editedB.TS != original.TS {
+		t.Fatalf("ts should stay original send timestamp: original=%d alice=%d bob=%d", original.TS, editedA.TS, editedB.TS)
+	}
+}
+
+func TestEdit_GroupEndToEnd(t *testing.T) {
+	env := newTestEnv(t)
+
+	alice := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_edit_group")
+	bob := env.connect(fixtureKeyPath(t, "bob"), "dev_bob_edit_group")
+
+	groupID := "group_edit_e2e"
+	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test", "usr_bob_test"}, "Edit Group"); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+
+	if err := alice.enc.Encode(protocol.SendGroup{
+		Type:  "send_group",
+		Group: groupID,
+		WrappedKeys: map[string]string{
+			"usr_alice_test": "wrapped_alice_orig",
+			"usr_bob_test":   "wrapped_bob_orig",
+		},
+		Payload:   "base64_group_original",
+		Signature: "base64_group_sig",
+	}); err != nil {
+		t.Fatalf("send group message: %v", err)
+	}
+
+	mt, raw := alice.readMessage()
+	if mt != "group_message" {
+		t.Fatalf("alice expected group_message, got %s", mt)
+	}
+	var original protocol.GroupMessage
+	if err := json.Unmarshal(raw, &original); err != nil {
+		t.Fatalf("unmarshal original group message: %v", err)
+	}
+	mt, _ = bob.readMessage()
+	if mt != "group_message" {
+		t.Fatalf("bob expected group_message, got %s", mt)
+	}
+
+	if err := alice.enc.Encode(protocol.EditGroup{
+		Type:  "edit_group",
+		ID:    original.ID,
+		Group: groupID,
+		WrappedKeys: map[string]string{
+			"usr_alice_test": "wrapped_alice_edit",
+			"usr_bob_test":   "wrapped_bob_edit",
+		},
+		Payload:   "base64_group_edited",
+		Signature: "base64_group_sig_edit",
+	}); err != nil {
+		t.Fatalf("send group edit: %v", err)
+	}
+
+	mt, raw = alice.readMessage()
+	if mt != "group_edited" {
+		t.Fatalf("alice expected group_edited, got %s", mt)
+	}
+	var editedA protocol.GroupEdited
+	if err := json.Unmarshal(raw, &editedA); err != nil {
+		t.Fatalf("unmarshal alice group_edited: %v", err)
+	}
+
+	mt, raw = bob.readMessage()
+	if mt != "group_edited" {
+		t.Fatalf("bob expected group_edited, got %s", mt)
+	}
+	var editedB protocol.GroupEdited
+	if err := json.Unmarshal(raw, &editedB); err != nil {
+		t.Fatalf("unmarshal bob group_edited: %v", err)
+	}
+
+	if editedA.ID != original.ID || editedB.ID != original.ID {
+		t.Fatalf("group edit IDs must match original: alice=%s bob=%s original=%s", editedA.ID, editedB.ID, original.ID)
+	}
+	if editedA.Payload != "base64_group_edited" || editedB.Payload != "base64_group_edited" {
+		t.Fatalf("group edited payload mismatch: alice=%q bob=%q", editedA.Payload, editedB.Payload)
+	}
+	if editedA.EditedAt <= 0 || editedB.EditedAt <= 0 {
+		t.Fatalf("group edited_at must be set: alice=%d bob=%d", editedA.EditedAt, editedB.EditedAt)
+	}
+	if editedA.WrappedKeys["usr_bob_test"] != "wrapped_bob_edit" || editedB.WrappedKeys["usr_bob_test"] != "wrapped_bob_edit" {
+		t.Fatalf("group wrapped_keys did not round-trip edit payload: alice=%q bob=%q",
+			editedA.WrappedKeys["usr_bob_test"], editedB.WrappedKeys["usr_bob_test"])
+	}
+	if editedA.TS != original.TS || editedB.TS != original.TS {
+		t.Fatalf("group ts should stay original: original=%d alice=%d bob=%d", original.TS, editedA.TS, editedB.TS)
+	}
+}
+
+func TestEdit_DMEndToEnd(t *testing.T) {
+	env := newTestEnv(t)
+
+	alice := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_edit_dm")
+	bob := env.connect(fixtureKeyPath(t, "bob"), "dev_bob_edit_dm")
+
+	if err := alice.enc.Encode(protocol.CreateDM{
+		Type:  "create_dm",
+		Other: "usr_bob_test",
+	}); err != nil {
+		t.Fatalf("create_dm: %v", err)
+	}
+
+	mt, raw := alice.readMessage()
+	if mt != "dm_created" {
+		t.Fatalf("alice expected dm_created, got %s", mt)
+	}
+	var created protocol.DMCreated
+	if err := json.Unmarshal(raw, &created); err != nil {
+		t.Fatalf("unmarshal dm_created: %v", err)
+	}
+	// bob receives the dm_created push too
+	for {
+		mt, _ = bob.readMessage()
+		if mt == "dm_created" {
+			break
+		}
+	}
+
+	if err := alice.enc.Encode(protocol.SendDM{
+		Type: "send_dm",
+		DM:   created.DM,
+		WrappedKeys: map[string]string{
+			"usr_alice_test": "wrapped_dm_alice_orig",
+			"usr_bob_test":   "wrapped_dm_bob_orig",
+		},
+		Payload:   "base64_dm_original",
+		Signature: "base64_dm_sig",
+	}); err != nil {
+		t.Fatalf("send dm message: %v", err)
+	}
+
+	mt, raw = alice.readMessage()
+	if mt != "dm" {
+		t.Fatalf("alice expected dm, got %s", mt)
+	}
+	var original protocol.DM
+	if err := json.Unmarshal(raw, &original); err != nil {
+		t.Fatalf("unmarshal original dm: %v", err)
+	}
+	mt, _ = bob.readMessage()
+	if mt != "dm" {
+		t.Fatalf("bob expected dm, got %s", mt)
+	}
+
+	if err := alice.enc.Encode(protocol.EditDM{
+		Type: "edit_dm",
+		ID:   original.ID,
+		DM:   created.DM,
+		WrappedKeys: map[string]string{
+			"usr_alice_test": "wrapped_dm_alice_edit",
+			"usr_bob_test":   "wrapped_dm_bob_edit",
+		},
+		Payload:   "base64_dm_edited",
+		Signature: "base64_dm_sig_edit",
+	}); err != nil {
+		t.Fatalf("send dm edit: %v", err)
+	}
+
+	mt, raw = alice.readMessage()
+	if mt != "dm_edited" {
+		t.Fatalf("alice expected dm_edited, got %s", mt)
+	}
+	var editedA protocol.DMEdited
+	if err := json.Unmarshal(raw, &editedA); err != nil {
+		t.Fatalf("unmarshal alice dm_edited: %v", err)
+	}
+
+	mt, raw = bob.readMessage()
+	if mt != "dm_edited" {
+		t.Fatalf("bob expected dm_edited, got %s", mt)
+	}
+	var editedB protocol.DMEdited
+	if err := json.Unmarshal(raw, &editedB); err != nil {
+		t.Fatalf("unmarshal bob dm_edited: %v", err)
+	}
+
+	if editedA.ID != original.ID || editedB.ID != original.ID {
+		t.Fatalf("dm edit IDs must match original: alice=%s bob=%s original=%s", editedA.ID, editedB.ID, original.ID)
+	}
+	if editedA.Payload != "base64_dm_edited" || editedB.Payload != "base64_dm_edited" {
+		t.Fatalf("dm edited payload mismatch: alice=%q bob=%q", editedA.Payload, editedB.Payload)
+	}
+	if editedA.EditedAt <= 0 || editedB.EditedAt <= 0 {
+		t.Fatalf("dm edited_at must be set: alice=%d bob=%d", editedA.EditedAt, editedB.EditedAt)
+	}
+	if editedA.DM != created.DM || editedB.DM != created.DM {
+		t.Fatalf("dm_edited carried wrong dm id: alice=%s bob=%s want=%s", editedA.DM, editedB.DM, created.DM)
+	}
+}
+
+func TestEdit_RateLimitEnforced(t *testing.T) {
+	env := newTestEnv(t)
+	roomID := env.roomID("general")
+	groupID := "group_edit_rl"
+
+	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test", "usr_bob_test"}, "Edit RL"); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	dm, err := env.srv.Store().CreateOrGetDirectMessage(store.GenerateID("dm_"), "usr_alice_test", "usr_bob_test")
+	if err != nil {
+		t.Fatalf("create dm: %v", err)
+	}
+	dmID := dm.ID
+
+	alice := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_edit_rl")
+
+	// Seed one message per context (same author, no follow-up sends), so each
+	// target remains "most recent" across repeated edits.
+	if err := alice.enc.Encode(protocol.Send{
+		Type:      "send",
+		Room:      roomID,
+		Epoch:     1,
+		Payload:   "base64_rl_room_seed",
+		Signature: "sig_rl_room_seed",
+	}); err != nil {
+		t.Fatalf("seed room send: %v", err)
+	}
+	mt, raw := alice.readMessage()
+	if mt != "message" {
+		t.Fatalf("expected room message seed echo, got %s", mt)
+	}
+	var roomSeed protocol.Message
+	if err := json.Unmarshal(raw, &roomSeed); err != nil {
+		t.Fatalf("unmarshal room seed: %v", err)
+	}
+
+	if err := alice.enc.Encode(protocol.SendGroup{
+		Type:  "send_group",
+		Group: groupID,
+		WrappedKeys: map[string]string{
+			"usr_alice_test": "wrapped_rl_group_alice_seed",
+			"usr_bob_test":   "wrapped_rl_group_bob_seed",
+		},
+		Payload:   "base64_rl_group_seed",
+		Signature: "sig_rl_group_seed",
+	}); err != nil {
+		t.Fatalf("seed group send: %v", err)
+	}
+	mt, raw = alice.readMessage()
+	if mt != "group_message" {
+		t.Fatalf("expected group message seed echo, got %s", mt)
+	}
+	var groupSeed protocol.GroupMessage
+	if err := json.Unmarshal(raw, &groupSeed); err != nil {
+		t.Fatalf("unmarshal group seed: %v", err)
+	}
+
+	if err := alice.enc.Encode(protocol.SendDM{
+		Type: "send_dm",
+		DM:   dmID,
+		WrappedKeys: map[string]string{
+			"usr_alice_test": "wrapped_rl_dm_alice_seed",
+			"usr_bob_test":   "wrapped_rl_dm_bob_seed",
+		},
+		Payload:   "base64_rl_dm_seed",
+		Signature: "sig_rl_dm_seed",
+	}); err != nil {
+		t.Fatalf("seed dm send: %v", err)
+	}
+	mt, raw = alice.readMessage()
+	if mt != "dm" {
+		t.Fatalf("expected dm seed echo, got %s", mt)
+	}
+	var dmSeed protocol.DM
+	if err := json.Unmarshal(raw, &dmSeed); err != nil {
+		t.Fatalf("unmarshal dm seed: %v", err)
+	}
+
+	type editAttempt struct {
+		kind string
+	}
+	// 11 edits total, interleaved across all three verbs. Default limit is
+	// 10/min on the shared edits bucket.
+	attempts := []editAttempt{
+		{kind: "room"},
+		{kind: "group"},
+		{kind: "dm"},
+		{kind: "room"},
+		{kind: "group"},
+		{kind: "dm"},
+		{kind: "room"},
+		{kind: "group"},
+		{kind: "dm"},
+		{kind: "room"},
+		{kind: "group"}, // should hit rate_limited here (11th)
+	}
+
+	for i, attempt := range attempts {
+		switch attempt.kind {
+		case "room":
+			if err := alice.enc.Encode(protocol.Edit{
+				Type:      "edit",
+				ID:        roomSeed.ID,
+				Room:      roomID,
+				Epoch:     roomSeed.Epoch,
+				Payload:   fmt.Sprintf("base64_rl_room_edit_%02d", i),
+				Signature: "sig_rl_room_edit",
+			}); err != nil {
+				t.Fatalf("room edit %d encode: %v", i+1, err)
+			}
+		case "group":
+			if err := alice.enc.Encode(protocol.EditGroup{
+				Type:  "edit_group",
+				ID:    groupSeed.ID,
+				Group: groupID,
+				WrappedKeys: map[string]string{
+					"usr_alice_test": "wrapped_rl_group_alice_edit",
+					"usr_bob_test":   "wrapped_rl_group_bob_edit",
+				},
+				Payload:   fmt.Sprintf("base64_rl_group_edit_%02d", i),
+				Signature: "sig_rl_group_edit",
+			}); err != nil {
+				t.Fatalf("group edit %d encode: %v", i+1, err)
+			}
+		case "dm":
+			if err := alice.enc.Encode(protocol.EditDM{
+				Type: "edit_dm",
+				ID:   dmSeed.ID,
+				DM:   dmID,
+				WrappedKeys: map[string]string{
+					"usr_alice_test": "wrapped_rl_dm_alice_edit",
+					"usr_bob_test":   "wrapped_rl_dm_bob_edit",
+				},
+				Payload:   fmt.Sprintf("base64_rl_dm_edit_%02d", i),
+				Signature: "sig_rl_dm_edit",
+			}); err != nil {
+				t.Fatalf("dm edit %d encode: %v", i+1, err)
+			}
+		default:
+			t.Fatalf("unknown attempt kind %q", attempt.kind)
+		}
+
+		mt, raw = alice.readMessage()
+		if i < 10 {
+			switch attempt.kind {
+			case "room":
+				if mt != "edited" {
+					t.Fatalf("edit #%d expected edited, got %s (%s)", i+1, mt, string(raw))
+				}
+			case "group":
+				if mt != "group_edited" {
+					t.Fatalf("edit #%d expected group_edited, got %s (%s)", i+1, mt, string(raw))
+				}
+			case "dm":
+				if mt != "dm_edited" {
+					t.Fatalf("edit #%d expected dm_edited, got %s (%s)", i+1, mt, string(raw))
+				}
+			}
+			continue
+		}
+
+		// 11th edit must be rejected by the shared bucket.
+		if mt != "error" {
+			t.Fatalf("edit #%d expected error (rate limit), got %s (%s)", i+1, mt, string(raw))
+		}
+		var errResp protocol.Error
+		if err := json.Unmarshal(raw, &errResp); err != nil {
+			t.Fatalf("unmarshal rate-limit error: %v", err)
+		}
+		if errResp.Code != protocol.ErrRateLimited {
+			t.Fatalf("edit #%d expected %s, got %s (%s)", i+1, protocol.ErrRateLimited, errResp.Code, errResp.Message)
+		}
+	}
+}
+
 // dmRowCutoffs reads the direct_messages row directly from data.db and
 // returns (user_a_left_at, user_b_left_at). Used by tests to verify
 // per-user cutoff state after leave / retirement. Returns (-1, -1) if
@@ -822,9 +1297,9 @@ func (e *testEnv) dmRowCutoffs(dmID string) (int64, int64) {
 func TestDMDelete_MultiDeviceSync(t *testing.T) {
 	env := newTestEnv(t)
 
-	aliceA := env.connect("/tmp/sshkey-test-key", "dev_alice_A")
-	aliceB := env.connect("/tmp/sshkey-test-key", "dev_alice_B")
-	bob := env.connect("/tmp/sshkey-test-key-bob", "dev_bob_delete")
+	aliceA := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_A")
+	aliceB := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_B")
+	bob := env.connect(fixtureKeyPath(t, "bob"), "dev_bob_delete")
 
 	// alice on device A creates the DM
 	aliceA.enc.Encode(protocol.CreateDM{Type: "create_dm", Other: "usr_bob_test"})
@@ -938,8 +1413,8 @@ func TestDMDelete_OfflineCatchupViaDMList(t *testing.T) {
 	env := newTestEnv(t)
 
 	// Phase 1: device1 creates, sends, then leaves
-	device1 := env.connect("/tmp/sshkey-test-key", "dev_alice_catchup1")
-	bob := env.connect("/tmp/sshkey-test-key-bob", "dev_bob_catchup")
+	device1 := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_catchup1")
+	bob := env.connect(fixtureKeyPath(t, "bob"), "dev_bob_catchup")
 
 	device1.enc.Encode(protocol.CreateDM{Type: "create_dm", Other: "usr_bob_test"})
 	msgType, raw := device1.readMessage()
@@ -965,7 +1440,7 @@ func TestDMDelete_OfflineCatchupViaDMList(t *testing.T) {
 	device1.ch.Close()
 
 	// Phase 2: device2 connects fresh, inspect the dm_list during handshake
-	device2key := "/tmp/sshkey-test-key"
+	device2key := fixtureKeyPath(t, "alice")
 	keyData, err := os.ReadFile(device2key)
 	if err != nil {
 		t.Fatalf("read alice key: %v", err)
@@ -1059,8 +1534,8 @@ func TestDMDelete_OfflineCatchupViaDMList(t *testing.T) {
 func TestRetirement_DMCutoffPropagation(t *testing.T) {
 	env := newTestEnv(t)
 
-	alice := env.connect("/tmp/sshkey-test-key", "dev_alice_retire")
-	bob := env.connect("/tmp/sshkey-test-key-bob", "dev_bob_retire")
+	alice := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_retire")
+	bob := env.connect(fixtureKeyPath(t, "bob"), "dev_bob_retire")
 
 	// Create a DM and drain the echoes
 	alice.enc.Encode(protocol.CreateDM{Type: "create_dm", Other: "usr_bob_test"})
@@ -1183,8 +1658,8 @@ func (e *testEnv) deletedGroupsForUser(userID string) []string {
 func TestDeleteGroup_HappyPath(t *testing.T) {
 	env := newTestEnv(t)
 
-	alice := env.connect("/tmp/sshkey-test-key", "dev_alice_dgrp")
-	bob := env.connect("/tmp/sshkey-test-key-bob", "dev_bob_dgrp")
+	alice := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_dgrp")
+	bob := env.connect(fixtureKeyPath(t, "bob"), "dev_bob_dgrp")
 
 	// alice creates a group with bob. Phase 14: promote bob to co-admin
 	// so alice isn't the sole admin when she /delete's — otherwise the
@@ -1258,7 +1733,7 @@ func TestDeleteGroup_HappyPath(t *testing.T) {
 func TestDeleteGroup_LastMemberCleanupAndOfflineCatchup(t *testing.T) {
 	env := newTestEnv(t)
 
-	deviceA := env.connect("/tmp/sshkey-test-key", "dev_alice_solo_A")
+	deviceA := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_solo_A")
 
 	// alice solo in a group
 	groupID := store.GenerateID("group_")
@@ -1295,7 +1770,7 @@ func TestDeleteGroup_LastMemberCleanupAndOfflineCatchup(t *testing.T) {
 
 	// Now device B (was offline) connects. It should observe the
 	// deleted_groups list during sync containing this group.
-	device2key := "/tmp/sshkey-test-key"
+	device2key := fixtureKeyPath(t, "alice")
 	keyData, err := os.ReadFile(device2key)
 	if err != nil {
 		t.Fatalf("read alice key: %v", err)
@@ -1369,9 +1844,9 @@ func TestDeleteGroup_LastMemberCleanupAndOfflineCatchup(t *testing.T) {
 func TestDeleteGroup_MultiDeviceLiveEcho(t *testing.T) {
 	env := newTestEnv(t)
 
-	deviceA := env.connect("/tmp/sshkey-test-key", "dev_alice_multi_A")
-	deviceB := env.connect("/tmp/sshkey-test-key", "dev_alice_multi_B")
-	bob := env.connect("/tmp/sshkey-test-key-bob", "dev_bob_multi")
+	deviceA := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_multi_A")
+	deviceB := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_multi_B")
+	bob := env.connect(fixtureKeyPath(t, "bob"), "dev_bob_multi")
 	_ = bob // bob is just here so the group has a remaining member
 
 	// Phase 14: promote bob to co-admin so alice isn't blocked by the
@@ -1417,7 +1892,7 @@ func TestDeleteGroup_MultiDeviceLiveEcho(t *testing.T) {
 func TestDeleteGroup_AlreadyLeft(t *testing.T) {
 	env := newTestEnv(t)
 
-	alice := env.connect("/tmp/sshkey-test-key", "dev_alice_already")
+	alice := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_already")
 
 	// Group exists but alice is NOT a member
 	groupID := "group_not_a_member"
@@ -1464,7 +1939,7 @@ func TestDeleteGroup_AlreadyLeft(t *testing.T) {
 // just proves the verb compiles through the stack end-to-end.
 func TestGroupAdmin_PromoteE2E(t *testing.T) {
 	env := newTestEnv(t)
-	alice := env.connect("/tmp/sshkey-test-key", "dev_alice_promote_e2e")
+	alice := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_promote_e2e")
 
 	groupID := "group_promote_e2e"
 	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test", "usr_bob_test"}, "PromoteE2E"); err != nil {
@@ -1497,7 +1972,7 @@ func TestGroupAdmin_PromoteE2E(t *testing.T) {
 // They must promote a successor first.
 func TestGroupAdmin_LastAdminRejectionOnLeave_E2E(t *testing.T) {
 	env := newTestEnv(t)
-	alice := env.connect("/tmp/sshkey-test-key", "dev_alice_lastadmin")
+	alice := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_lastadmin")
 
 	// alice is the sole admin of a 2-member group (she + bob regular member)
 	groupID := "group_lastadmin"

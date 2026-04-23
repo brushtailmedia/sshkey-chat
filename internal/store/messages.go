@@ -237,8 +237,7 @@ func updatePerContextMessageEdited(db *sql.DB, msgID, newPayload, newSignature s
 	// Clear reactions on the edited message. Matches the pattern used
 	// in deleteMessage at line 188 above. No pins clear — pins are
 	// rooms-only and rooms don't prohibit pinning edited messages.
-	db.Exec(`DELETE FROM reactions WHERE message_id = ?`, msgID)
-	return nil
+	return DeleteReactionsForMessage(db, msgID)
 }
 
 // UpdateGroupMessageEditedWithKeys replaces a group DM message's
@@ -282,8 +281,7 @@ func updatePerContextMessageEditedWithKeys(db *sql.DB, msgID, newPayload, newSig
 	if n == 0 {
 		return sql.ErrNoRows
 	}
-	db.Exec(`DELETE FROM reactions WHERE message_id = ?`, msgID)
-	return nil
+	return DeleteReactionsForMessage(db, msgID)
 }
 
 // GetUserMostRecentMessageIDRoom returns the id and ts of the user's
@@ -405,7 +403,9 @@ func deleteMessage(db *sql.DB, msgID, deletedBy string) ([]string, error) {
 		return nil, sql.ErrNoRows
 	}
 	// Clean up reactions and pins on the deleted message
-	db.Exec(`DELETE FROM reactions WHERE message_id = ?`, msgID)
+	if err := DeleteReactionsForMessage(db, msgID); err != nil {
+		return nil, err
+	}
 	db.Exec(`DELETE FROM pins WHERE message_id = ?`, msgID)
 
 	var fileIDs []string
@@ -416,6 +416,12 @@ func deleteMessage(db *sql.DB, msgID, deletedBy string) ([]string, error) {
 		}
 	}
 	return fileIDs, nil
+}
+
+// DeleteReactionsForMessage removes all reactions for a single message id.
+func DeleteReactionsForMessage(db *sql.DB, msgID string) error {
+	_, err := db.Exec(`DELETE FROM reactions WHERE message_id = ?`, msgID)
+	return err
 }
 
 // GetRoomMessagesBefore retrieves messages from a room before a specific message ID.

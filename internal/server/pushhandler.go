@@ -2,9 +2,15 @@ package server
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+)
+
+const (
+	minPushTokenLen = 8
+	maxPushTokenLen = 4096
 )
 
 // handlePushRegister processes a push token registration.
@@ -22,8 +28,20 @@ func (s *Server) handlePushRegister(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	token := strings.TrimSpace(msg.Token)
+	if len(token) < minPushTokenLen {
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "push_register", "push token too short",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "push token must be at least 8 characters"})
+		return
+	}
+	if len(token) > maxPushTokenLen {
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "push_register", "push token too long",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "push token too long"})
+		return
+	}
+
 	if s.store != nil {
-		if err := s.store.UpsertPushToken(c.UserID, c.DeviceID, msg.Platform, msg.Token); err != nil {
+		if err := s.store.UpsertPushToken(c.UserID, c.DeviceID, msg.Platform, token); err != nil {
 			s.logger.Error("failed to store push token", "user", c.UserID, "error", err)
 			return
 		}

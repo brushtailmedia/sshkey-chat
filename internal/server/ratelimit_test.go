@@ -72,14 +72,20 @@ func TestRateLimiter_AllowWithRetry_NeverReturnsZeroOnReject(t *testing.T) {
 	// omitempty-elide off the wire and be indistinguishable from "no
 	// hint", defeating the purpose.
 	rl := newRateLimiter()
-	// Very high rate — tokens refill fast but if we drain enough, reject still fires.
-	for i := 0; i < 1000; i++ {
-		rl.allowWithRetry("test_no_zero", 1.0)
+	// Drain until the first rejection rather than assuming a fixed number
+	// of iterations; keeps the test deterministic without t.Skip fallback.
+	var (
+		allowed bool
+		retry   int64
+	)
+	for i := 0; i < 100000; i++ {
+		allowed, retry = rl.allowWithRetry("test_no_zero", 1.0)
+		if !allowed {
+			break
+		}
 	}
-	// Bucket is drained. Next call rejects.
-	allowed, retry := rl.allowWithRetry("test_no_zero", 1.0)
 	if allowed {
-		t.Skip("bucket not drained — test setup issue, skip")
+		t.Fatal("expected reject after draining bucket")
 	}
 	if retry < 1 {
 		t.Errorf("retry_after_ms on reject = %d, want >= 1 (zero elides off wire)", retry)

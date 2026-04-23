@@ -529,3 +529,424 @@ func TestHandleEditDM_PrivacyResponsesIdentical(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleEditGroup_NotMostRecent_ReturnsSpecificError(t *testing.T) {
+	s := newTestServer(t)
+	groupID := store.GenerateID("group_")
+	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "recent"); err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+		ID: "msg_old", Sender: "alice", TS: 100, Payload: "old", Signature: "s",
+		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+	}); err != nil {
+		t.Fatalf("insert old: %v", err)
+	}
+	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+		ID: "msg_new", Sender: "alice", TS: 200, Payload: "new", Signature: "s",
+		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+	}); err != nil {
+		t.Fatalf("insert new: %v", err)
+	}
+
+	alice := testClientFor("alice", "dev_alice_group_recent")
+	raw, _ := json.Marshal(protocol.EditGroup{
+		Type:        "edit_group",
+		ID:          "msg_old",
+		Group:       groupID,
+		WrappedKeys: map[string]string{"alice": "wa2", "bob": "wb2"},
+		Payload:     "edited",
+		Signature:   "sig2",
+	})
+	s.handleEditGroup(alice.Client, raw)
+
+	msgs := alice.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(msgs))
+	}
+	var errResp protocol.Error
+	if err := json.Unmarshal(msgs[0], &errResp); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errResp.Code != protocol.ErrEditNotMostRecent {
+		t.Fatalf("code = %q, want %q", errResp.Code, protocol.ErrEditNotMostRecent)
+	}
+}
+
+func TestHandleEditGroup_DeletedMessage_CollapsedToUnknown(t *testing.T) {
+	s := newTestServer(t)
+	groupID := store.GenerateID("group_")
+	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "del"); err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+
+	baselineClient := testClientFor("alice", "dev_alice_group_base")
+	rawBaseline, _ := json.Marshal(protocol.EditGroup{
+		Type:        "edit_group",
+		ID:          "msg_missing",
+		Group:       groupID,
+		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		Payload:     "p",
+		Signature:   "s",
+	})
+	s.handleEditGroup(baselineClient.Client, rawBaseline)
+	baselineMsgs := baselineClient.messages()
+	if len(baselineMsgs) != 1 {
+		t.Fatalf("baseline expected 1 reply, got %d", len(baselineMsgs))
+	}
+
+	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+		ID: "msg_deleted", Sender: "alice", TS: 123, Payload: "body", Signature: "sig",
+		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if _, err := s.store.DeleteGroupMessage(groupID, "msg_deleted", "alice"); err != nil {
+		t.Fatalf("DeleteGroupMessage: %v", err)
+	}
+
+	probe := testClientFor("alice", "dev_alice_group_deleted")
+	rawProbe, _ := json.Marshal(protocol.EditGroup{
+		Type:        "edit_group",
+		ID:          "msg_deleted",
+		Group:       groupID,
+		WrappedKeys: map[string]string{"alice": "wa2", "bob": "wb2"},
+		Payload:     "new",
+		Signature:   "sig2",
+	})
+	s.handleEditGroup(probe.Client, rawProbe)
+	probeMsgs := probe.messages()
+	if len(probeMsgs) != 1 {
+		t.Fatalf("probe expected 1 reply, got %d", len(probeMsgs))
+	}
+	if !bytes.Equal(baselineMsgs[0], probeMsgs[0]) {
+		t.Fatalf("deleted-group response differs from unknown baseline\nbaseline: %s\nprobe:    %s", baselineMsgs[0], probeMsgs[0])
+	}
+}
+
+func TestHandleEditGroup_ClearsReactions(t *testing.T) {
+	s := newTestServer(t)
+	groupID := store.GenerateID("group_")
+	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "react"); err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+		ID: "msg_group_rx", Sender: "alice", TS: 100, Payload: "body", Signature: "sig",
+		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	db, err := s.store.GroupDB(groupID)
+	if err != nil {
+		t.Fatalf("GroupDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, payload) VALUES (?, ?, ?, ?, ?)`,
+		"react_group_1", "msg_group_rx", "bob", 150, "emoji_payload"); err != nil {
+		t.Fatalf("seed reaction: %v", err)
+	}
+
+	alice := testClientFor("alice", "dev_alice_group_rx")
+	raw, _ := json.Marshal(protocol.EditGroup{
+		Type:        "edit_group",
+		ID:          "msg_group_rx",
+		Group:       groupID,
+		WrappedKeys: map[string]string{"alice": "wa2", "bob": "wb2"},
+		Payload:     "new",
+		Signature:   "newsig",
+	})
+	s.handleEditGroup(alice.Client, raw)
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, "msg_group_rx").Scan(&count); err != nil {
+		t.Fatalf("count reactions: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("reactions not cleared after group edit: %d", count)
+	}
+}
+
+func TestHandleEditGroup_InvalidWrappedKeys(t *testing.T) {
+	s := newTestServer(t)
+	groupID := store.GenerateID("group_")
+	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "keys"); err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+		ID: "msg_group_keys", Sender: "alice", TS: 100, Payload: "body", Signature: "sig",
+		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	alice := testClientFor("alice", "dev_alice_group_keys")
+	raw, _ := json.Marshal(protocol.EditGroup{
+		Type:        "edit_group",
+		ID:          "msg_group_keys",
+		Group:       groupID,
+		WrappedKeys: map[string]string{"alice": "only_one"},
+		Payload:     "new",
+		Signature:   "newsig",
+	})
+	s.handleEditGroup(alice.Client, raw)
+
+	msgs := alice.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(msgs))
+	}
+	var errResp protocol.Error
+	if err := json.Unmarshal(msgs[0], &errResp); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errResp.Code != protocol.ErrInvalidWrappedKeys {
+		t.Fatalf("code = %q, want %q", errResp.Code, protocol.ErrInvalidWrappedKeys)
+	}
+}
+
+func TestHandleEditDM_HappyPath(t *testing.T) {
+	s := newTestServer(t)
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	if err != nil {
+		t.Fatalf("CreateOrGetDirectMessage: %v", err)
+	}
+	if err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
+		ID: "msg_dm_happy", Sender: "alice", TS: 500, Payload: "orig", Signature: "sig",
+		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	alice := testClientFor("alice", "dev_alice_dm_happy")
+	bob := testClientFor("bob", "dev_bob_dm_happy")
+	s.mu.Lock()
+	s.clients["dev_alice_dm_happy"] = alice.Client
+	s.clients["dev_bob_dm_happy"] = bob.Client
+	s.mu.Unlock()
+
+	raw, _ := json.Marshal(protocol.EditDM{
+		Type:        "edit_dm",
+		ID:          "msg_dm_happy",
+		DM:          dm.ID,
+		WrappedKeys: map[string]string{"alice": "wa2", "bob": "wb2"},
+		Payload:     "new_payload",
+		Signature:   "new_sig",
+	})
+	s.handleEditDM(alice.Client, raw)
+
+	got, err := s.store.GetDMMessageByID(dm.ID, "msg_dm_happy")
+	if err != nil {
+		t.Fatalf("GetDMMessageByID: %v", err)
+	}
+	if got.Payload != "new_payload" {
+		t.Fatalf("payload = %q, want new_payload", got.Payload)
+	}
+	if got.WrappedKeys["alice"] != "wa2" || got.WrappedKeys["bob"] != "wb2" {
+		t.Fatalf("wrapped keys not updated: %+v", got.WrappedKeys)
+	}
+	if got.EditedAt == 0 {
+		t.Fatal("edited_at should be set")
+	}
+
+	aliceMsgs := alice.messages()
+	bobMsgs := bob.messages()
+	if len(aliceMsgs) != 1 || len(bobMsgs) != 1 {
+		t.Fatalf("expected one dm_edited per party, got alice=%d bob=%d", len(aliceMsgs), len(bobMsgs))
+	}
+	var aOut, bOut protocol.DMEdited
+	if err := json.Unmarshal(aliceMsgs[0], &aOut); err != nil {
+		t.Fatalf("unmarshal alice dm_edited: %v", err)
+	}
+	if err := json.Unmarshal(bobMsgs[0], &bOut); err != nil {
+		t.Fatalf("unmarshal bob dm_edited: %v", err)
+	}
+	if aOut.Type != "dm_edited" || bOut.Type != "dm_edited" {
+		t.Fatalf("unexpected broadcast types: alice=%q bob=%q", aOut.Type, bOut.Type)
+	}
+}
+
+func TestHandleEditDM_NotMostRecent(t *testing.T) {
+	s := newTestServer(t)
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	if err != nil {
+		t.Fatalf("CreateOrGetDirectMessage: %v", err)
+	}
+	if err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
+		ID: "msg_dm_old", Sender: "alice", TS: 100, Payload: "old", Signature: "s",
+		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+	}); err != nil {
+		t.Fatalf("insert old: %v", err)
+	}
+	if err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
+		ID: "msg_dm_new", Sender: "alice", TS: 200, Payload: "new", Signature: "s",
+		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+	}); err != nil {
+		t.Fatalf("insert new: %v", err)
+	}
+
+	alice := testClientFor("alice", "dev_alice_dm_recent")
+	raw, _ := json.Marshal(protocol.EditDM{
+		Type:        "edit_dm",
+		ID:          "msg_dm_old",
+		DM:          dm.ID,
+		WrappedKeys: map[string]string{"alice": "wa2", "bob": "wb2"},
+		Payload:     "edited",
+		Signature:   "sig2",
+	})
+	s.handleEditDM(alice.Client, raw)
+
+	msgs := alice.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(msgs))
+	}
+	var errResp protocol.Error
+	if err := json.Unmarshal(msgs[0], &errResp); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errResp.Code != protocol.ErrEditNotMostRecent {
+		t.Fatalf("code = %q, want %q", errResp.Code, protocol.ErrEditNotMostRecent)
+	}
+}
+
+func TestHandleEditDM_DeletedMessage_CollapsedToUnknown(t *testing.T) {
+	s := newTestServer(t)
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	if err != nil {
+		t.Fatalf("CreateOrGetDirectMessage: %v", err)
+	}
+
+	baseline := testClientFor("alice", "dev_alice_dm_base")
+	rawBaseline, _ := json.Marshal(protocol.EditDM{
+		Type:        "edit_dm",
+		ID:          "msg_missing",
+		DM:          dm.ID,
+		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		Payload:     "p",
+		Signature:   "s",
+	})
+	s.handleEditDM(baseline.Client, rawBaseline)
+	baseMsgs := baseline.messages()
+	if len(baseMsgs) != 1 {
+		t.Fatalf("baseline expected 1 reply, got %d", len(baseMsgs))
+	}
+
+	if err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
+		ID: "msg_dm_deleted", Sender: "alice", TS: 123, Payload: "body", Signature: "sig",
+		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if _, err := s.store.DeleteDMMessage(dm.ID, "msg_dm_deleted", "alice"); err != nil {
+		t.Fatalf("DeleteDMMessage: %v", err)
+	}
+
+	probe := testClientFor("alice", "dev_alice_dm_deleted")
+	rawProbe, _ := json.Marshal(protocol.EditDM{
+		Type:        "edit_dm",
+		ID:          "msg_dm_deleted",
+		DM:          dm.ID,
+		WrappedKeys: map[string]string{"alice": "wa2", "bob": "wb2"},
+		Payload:     "new",
+		Signature:   "sig2",
+	})
+	s.handleEditDM(probe.Client, rawProbe)
+	probeMsgs := probe.messages()
+	if len(probeMsgs) != 1 {
+		t.Fatalf("probe expected 1 reply, got %d", len(probeMsgs))
+	}
+	if !bytes.Equal(baseMsgs[0], probeMsgs[0]) {
+		t.Fatalf("deleted-dm response differs from unknown baseline\nbaseline: %s\nprobe:    %s", baseMsgs[0], probeMsgs[0])
+	}
+}
+
+func TestHandleEditDM_ClearsReactions(t *testing.T) {
+	s := newTestServer(t)
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	if err != nil {
+		t.Fatalf("CreateOrGetDirectMessage: %v", err)
+	}
+	if err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
+		ID: "msg_dm_rx", Sender: "alice", TS: 100, Payload: "body", Signature: "sig",
+		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	db, err := s.store.DMDB(dm.ID)
+	if err != nil {
+		t.Fatalf("DMDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, payload) VALUES (?, ?, ?, ?, ?)`,
+		"react_dm_1", "msg_dm_rx", "bob", 150, "emoji_payload"); err != nil {
+		t.Fatalf("seed reaction: %v", err)
+	}
+
+	alice := testClientFor("alice", "dev_alice_dm_rx")
+	raw, _ := json.Marshal(protocol.EditDM{
+		Type:        "edit_dm",
+		ID:          "msg_dm_rx",
+		DM:          dm.ID,
+		WrappedKeys: map[string]string{"alice": "wa2", "bob": "wb2"},
+		Payload:     "new",
+		Signature:   "newsig",
+	})
+	s.handleEditDM(alice.Client, raw)
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, "msg_dm_rx").Scan(&count); err != nil {
+		t.Fatalf("count reactions: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("reactions not cleared after dm edit: %d", count)
+	}
+}
+
+func TestHandleEditDM_FrozenCallerRejected(t *testing.T) {
+	s := newTestServer(t)
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	if err != nil {
+		t.Fatalf("CreateOrGetDirectMessage: %v", err)
+	}
+	if err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
+		ID: "msg_dm_frozen", Sender: "alice", TS: 100, Payload: "body", Signature: "sig",
+		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// Baseline unknown-DM response for byte-identical comparison.
+	baseline := testClientFor("alice", "dev_alice_dm_frozen_base")
+	rawBaseline, _ := json.Marshal(protocol.EditDM{
+		Type:        "edit_dm",
+		ID:          "msg_any",
+		DM:          store.GenerateID("dm_"),
+		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		Payload:     "p",
+		Signature:   "s",
+	})
+	s.handleEditDM(baseline.Client, rawBaseline)
+	baseMsgs := baseline.messages()
+	if len(baseMsgs) != 1 {
+		t.Fatalf("baseline expected 1 reply, got %d", len(baseMsgs))
+	}
+
+	if err := s.store.SetDMLeftAt(dm.ID, "alice", time.Now().Unix()); err != nil {
+		t.Fatalf("SetDMLeftAt: %v", err)
+	}
+
+	alice := testClientFor("alice", "dev_alice_dm_frozen")
+	raw, _ := json.Marshal(protocol.EditDM{
+		Type:        "edit_dm",
+		ID:          "msg_dm_frozen",
+		DM:          dm.ID,
+		WrappedKeys: map[string]string{"alice": "wa2", "bob": "wb2"},
+		Payload:     "new",
+		Signature:   "newsig",
+	})
+	s.handleEditDM(alice.Client, raw)
+
+	msgs := alice.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(msgs))
+	}
+	if !bytes.Equal(baseMsgs[0], msgs[0]) {
+		t.Fatalf("frozen-caller response differs from unknown baseline\nbaseline: %s\nfrozen:   %s", baseMsgs[0], msgs[0])
+	}
+}

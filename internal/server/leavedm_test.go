@@ -108,6 +108,75 @@ func TestHandleLeaveDM_PrivacyResponsesIdentical(t *testing.T) {
 	}
 }
 
+// TestHandleSendDM_PrivacyResponsesIdentical locks in the same
+// byte-identical privacy invariant for handleSendDM: probing an
+// unknown DM ID and probing a real DM as a non-party must produce the
+// same wire response.
+func TestHandleSendDM_PrivacyResponsesIdentical(t *testing.T) {
+	s := newTestServer(t)
+
+	if _, err := s.store.CreateOrGetDirectMessage("dm_ab", "alice", "bob"); err != nil {
+		t.Fatalf("create DM: %v", err)
+	}
+
+	probe := testClientFor("carol", "dev_carol_1")
+	rawProbe, _ := json.Marshal(protocol.SendDM{
+		Type: "send_dm", DM: "dm_does_not_exist",
+		WrappedKeys: map[string]string{"carol": "x"},
+		Payload:     "p", Signature: "s",
+	})
+	s.handleSendDM(probe.Client, rawProbe)
+
+	nonMember := testClientFor("carol", "dev_carol_2")
+	rawReal, _ := json.Marshal(protocol.SendDM{
+		Type: "send_dm", DM: "dm_ab",
+		WrappedKeys: map[string]string{"carol": "x"},
+		Payload:     "p", Signature: "s",
+	})
+	s.handleSendDM(nonMember.Client, rawReal)
+
+	probeMsgs := probe.messages()
+	nonMemberMsgs := nonMember.messages()
+	if len(probeMsgs) != 1 || len(nonMemberMsgs) != 1 {
+		t.Fatalf("expected 1 reply each, got probe=%d nonMember=%d",
+			len(probeMsgs), len(nonMemberMsgs))
+	}
+	if !bytes.Equal(probeMsgs[0], nonMemberMsgs[0]) {
+		t.Errorf("privacy leak: handleSendDM unknown-DM and non-member responses differ\nunknown:    %s\nnon-member: %s",
+			probeMsgs[0], nonMemberMsgs[0])
+	}
+}
+
+// TestHandleHistory_DMPrivacyResponsesIdentical locks the DM branch of
+// handleHistory to the same privacy contract: unknown-DM and
+// non-member probes must return byte-identical ErrUnknownDM frames.
+func TestHandleHistory_DMPrivacyResponsesIdentical(t *testing.T) {
+	s := newTestServer(t)
+
+	if _, err := s.store.CreateOrGetDirectMessage("dm_ab", "alice", "bob"); err != nil {
+		t.Fatalf("create DM: %v", err)
+	}
+
+	probe := testClientFor("carol", "dev_carol_1")
+	rawProbe, _ := json.Marshal(protocol.History{Type: "history", DM: "dm_does_not_exist", Limit: 10})
+	s.handleHistory(probe.Client, rawProbe)
+
+	nonMember := testClientFor("carol", "dev_carol_2")
+	rawReal, _ := json.Marshal(protocol.History{Type: "history", DM: "dm_ab", Limit: 10})
+	s.handleHistory(nonMember.Client, rawReal)
+
+	probeMsgs := probe.messages()
+	nonMemberMsgs := nonMember.messages()
+	if len(probeMsgs) != 1 || len(nonMemberMsgs) != 1 {
+		t.Fatalf("expected 1 reply each, got probe=%d nonMember=%d",
+			len(probeMsgs), len(nonMemberMsgs))
+	}
+	if !bytes.Equal(probeMsgs[0], nonMemberMsgs[0]) {
+		t.Errorf("privacy leak: handleHistory(DM) unknown-DM and non-member responses differ\nunknown:    %s\nnon-member: %s",
+			probeMsgs[0], nonMemberMsgs[0])
+	}
+}
+
 // TestHandleLeaveDM_MemberSucceeds verifies the happy path: a real party can
 // leave, their cutoff advances, the other party's cutoff is untouched, and
 // only the leaver's session receives the dm_left echo (silent semantics).

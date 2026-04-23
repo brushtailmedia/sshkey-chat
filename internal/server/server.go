@@ -458,6 +458,39 @@ func (s *Server) Store() *store.Store {
 	return s.store
 }
 
+// CounterSnapshotForTesting returns the current per-signal counter map.
+// Exposed for integration-test assertions that need to verify launch-gate
+// "no misbehavior signals" contracts against a running server instance.
+func (s *Server) CounterSnapshotForTesting() map[string]map[string]int64 {
+	if s == nil || s.counters == nil {
+		return map[string]map[string]int64{}
+	}
+	return s.counters.Snapshot()
+}
+
+// CounterIncForTesting increments a counter entry directly. This is test-only
+// plumbing used by integration tests that need to drive the auto-revoke
+// pipeline across all signals without crafting one protocol-level trigger
+// frame per signal.
+func (s *Server) CounterIncForTesting(signal, deviceID string) {
+	if s == nil || s.counters == nil {
+		return
+	}
+	s.counters.Inc(signal, deviceID)
+}
+
+// ProcessAutoRevokeForTesting runs a single synchronous auto-revoke evaluation
+// tick. Exposed so integration tests don't need to sleep for poll intervals.
+func (s *Server) ProcessAutoRevokeForTesting() {
+	s.processAutoRevoke()
+}
+
+// ProcessPendingDeviceRevocationsForTesting drains pending revocations once.
+// Integration tests use this to deterministically kick sessions immediately.
+func (s *Server) ProcessPendingDeviceRevocationsForTesting() {
+	s.processPendingDeviceRevocations()
+}
+
 func (s *Server) Close() error {
 	// Audit
 	if s.audit != nil {
