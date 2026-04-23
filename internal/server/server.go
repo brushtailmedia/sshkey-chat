@@ -55,8 +55,8 @@ type Server struct {
 	// server bounce resets all counts.
 	counters *counters.Counters
 
-	mu       sync.RWMutex
-	clients  map[string]*Client // device_id -> Client
+	mu      sync.RWMutex
+	clients map[string]*Client // device_id -> Client
 
 	// dmCleanupMu serializes 1:1 DM cleanup against handleCreateDM. When
 	// both parties leave a DM, handleLeaveDM holds this mutex while it
@@ -737,9 +737,16 @@ func (s *Server) logPendingKey(fingerprint, remote string) {
 				FirstSeen:   firstSeen,
 			})
 
-			// Append to flat log file only on first attempt
-			dataDir := filepath.Join(filepath.Dir(s.cfg.Dir), "data")
-			logPath := filepath.Join(dataDir, "pending-keys.log")
+			// Append to flat log file only on first attempt.
+			// Keep this path aligned with sshkey-ctl pending:
+			// <dataDir>/data/pending-keys.log.
+			baseDir := s.dataDir
+			if baseDir == "" {
+				// Defensive fallback for tests that construct Server
+				// without a dataDir.
+				baseDir = filepath.Dir(s.cfg.Dir)
+			}
+			logPath := filepath.Join(baseDir, "data", "pending-keys.log")
 			f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
 			if err != nil {
 				s.logger.Error("failed to open pending-keys.log", "error", err)

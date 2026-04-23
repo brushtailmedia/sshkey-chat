@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
 
 // dropTable runs a DROP TABLE on the server's primary dataDB.
@@ -85,6 +86,110 @@ func TestHandleSend_DBFailure_AbortsBroadcastAndRespondsInternal(t *testing.T) {
 	}
 	if got.Code != protocol.CodeInternal {
 		t.Errorf("code = %q, want %q", got.Code, protocol.CodeInternal)
+	}
+}
+
+func TestHandleSendGroup_DBFailure_AbortsBroadcastAndRespondsInternal(t *testing.T) {
+	s := newTestServer(t)
+
+	groupID := store.GenerateID("group_")
+	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "FailGroup"); err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+
+	// Drop the messages table in the group DB so InsertGroupMessage fails.
+	groupDB, err := s.store.GroupDB(groupID)
+	if err != nil {
+		t.Fatalf("GroupDB: %v", err)
+	}
+	if _, err := groupDB.Exec(`DROP TABLE messages`); err != nil {
+		t.Fatalf("drop messages: %v", err)
+	}
+
+	alice := testClientFor("alice", "dev_alice_failgroup")
+	bob := testClientFor("bob", "dev_bob_failgroup")
+	s.clients[alice.DeviceID] = alice.Client
+	s.clients[bob.DeviceID] = bob.Client
+
+	raw, _ := json.Marshal(protocol.SendGroup{
+		Type:  "send_group",
+		Group: groupID,
+		WrappedKeys: map[string]string{
+			"alice": "wrapped_for_alice",
+			"bob":   "wrapped_for_bob",
+		},
+		Payload:   "dGVzdA==",
+		Signature: "c2ln",
+		CorrID:    "corr_ABCDEFGHIJKLMNOPQRSTU",
+	})
+	s.handleSendGroup(alice.Client, raw)
+
+	aliceMsgs := alice.messages()
+	if len(aliceMsgs) != 1 {
+		t.Fatalf("expected 1 response for alice, got %d", len(aliceMsgs))
+	}
+	var got protocol.Error
+	if err := json.Unmarshal(aliceMsgs[0], &got); err != nil {
+		t.Fatalf("unmarshal alice response: %v", err)
+	}
+	if got.Type != "error" || got.Code != protocol.CodeInternal {
+		t.Fatalf("alice response = %#v, want error/internal", got)
+	}
+
+	if msgs := bob.messages(); len(msgs) != 0 {
+		t.Fatalf("expected no broadcast to bob on store failure, got %d", len(msgs))
+	}
+}
+
+func TestHandleSendDM_DBFailure_AbortsBroadcastAndRespondsInternal(t *testing.T) {
+	s := newTestServer(t)
+
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	if err != nil {
+		t.Fatalf("CreateOrGetDirectMessage: %v", err)
+	}
+
+	// Drop the messages table in the DM DB so InsertDMMessage fails.
+	dmDB, err := s.store.DMDB(dm.ID)
+	if err != nil {
+		t.Fatalf("DMDB: %v", err)
+	}
+	if _, err := dmDB.Exec(`DROP TABLE messages`); err != nil {
+		t.Fatalf("drop messages: %v", err)
+	}
+
+	alice := testClientFor("alice", "dev_alice_faildm")
+	bob := testClientFor("bob", "dev_bob_faildm")
+	s.clients[alice.DeviceID] = alice.Client
+	s.clients[bob.DeviceID] = bob.Client
+
+	raw, _ := json.Marshal(protocol.SendDM{
+		Type: "send_dm",
+		DM:   dm.ID,
+		WrappedKeys: map[string]string{
+			"alice": "wrapped_for_alice",
+			"bob":   "wrapped_for_bob",
+		},
+		Payload:   "dGVzdA==",
+		Signature: "c2ln",
+		CorrID:    "corr_ABCDEFGHIJKLMNOPQRSTU",
+	})
+	s.handleSendDM(alice.Client, raw)
+
+	aliceMsgs := alice.messages()
+	if len(aliceMsgs) != 1 {
+		t.Fatalf("expected 1 response for alice, got %d", len(aliceMsgs))
+	}
+	var got protocol.Error
+	if err := json.Unmarshal(aliceMsgs[0], &got); err != nil {
+		t.Fatalf("unmarshal alice response: %v", err)
+	}
+	if got.Type != "error" || got.Code != protocol.CodeInternal {
+		t.Fatalf("alice response = %#v, want error/internal", got)
+	}
+
+	if msgs := bob.messages(); len(msgs) != 0 {
+		t.Fatalf("expected no broadcast to bob on store failure, got %d", len(msgs))
 	}
 }
 

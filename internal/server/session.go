@@ -1099,6 +1099,8 @@ func (s *Server) handleSendGroup(c *Client, raw json.RawMessage) {
 		})
 		if err != nil {
 			s.logger.Error("failed to store group message", "group", msg.Group, "error", err)
+			s.respondError(c, msg.CorrID, protocol.CodeInternal, "", 0)
+			return
 		}
 	}
 
@@ -3024,6 +3026,8 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 		WrappedKeys: outMsg.WrappedKeys,
 	}); err != nil {
 		s.logger.Error("failed to store DM", "dm", dm.ID, "error", err)
+		s.respondError(c, msg.CorrID, protocol.CodeInternal, "", 0)
+		return
 	}
 
 	// Broadcast to both members' active sessions.
