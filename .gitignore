@@ -49,7 +49,6 @@ docker/keys/*
 
 # Design docs (internal working files, not checked in)
 refactor_plan.md
-rooms_toml_removal_init_plan.md
 docs/security/*
 
 # OS
