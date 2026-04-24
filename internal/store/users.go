@@ -84,11 +84,10 @@ func (s *Store) UsersDBEmpty() bool {
 	return count == 0
 }
 
-// Phase 16 Gap 4: SeedUsers (and the matching users.toml seeding path
-// in server.go) was removed. Users are now exclusively created via
-// `sshkey-ctl approve` (for users who SSH in with their own key) or
-// `sshkey-ctl bootstrap-admin` (for admin keypair generation on the
-// server side). The TOML file no longer exists in any role.
+// Users are created exclusively via `sshkey-ctl approve` (for users
+// who SSH in with their own key) or `sshkey-ctl bootstrap-admin` (for
+// admin keypair generation on the server side). There is no seed-file
+// entry point.
 
 // --- Reads ---
 

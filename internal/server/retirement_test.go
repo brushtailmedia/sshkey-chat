@@ -55,8 +55,7 @@ enabled = false
 		}
 	})
 
-	// Phase 23: rooms.toml support is removed. Seed test rooms via
-	// store API before user membership setup.
+	// Seed test rooms via the store API before user membership setup.
 	if _, err := s.store.SeedRooms(map[string]store.RoomSeed{
 		"general":     {Topic: "General"},
 		"engineering": {Topic: "Engineering"},
@@ -73,9 +72,8 @@ enabled = false
 	return s
 }
 
-// seedTestUser inserts a user row + sets admin flag + adds room
-// memberships via the public store API. Replaces the users.toml
-// seeding path that Phase 16 Gap 4 deleted.
+// seedTestUser inserts a user row, sets the admin flag, and adds the
+// requested room memberships via the public store API.
 func seedTestUser(t *testing.T, s *Server, userID, sshKey, displayName string, admin bool, rooms []string) {
 	t.Helper()
 
@@ -208,9 +206,9 @@ func TestFindRetiredMember_UnknownUsersIgnored(t *testing.T) {
 
 func TestHandleRetirement_ClearsRooms(t *testing.T) {
 	s := newTestServer(t)
-	// Bob was in "general" (seeded from users.toml into rooms.db).
-	// Use the actual room ID nanoid, not the display name — handleRetirement
-	// dispatches per-room via performRoomLeave which expects IDs.
+	// Bob was seeded into "general" by newTestServer. Use the actual
+	// room ID nanoid, not the display name — handleRetirement dispatches
+	// per-room via performRoomLeave which expects IDs.
 	bobRooms := s.store.GetUserRoomIDs("bob")
 	if len(bobRooms) == 0 {
 		t.Fatal("precondition: bob has rooms")

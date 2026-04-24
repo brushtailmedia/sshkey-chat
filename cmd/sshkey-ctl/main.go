@@ -380,14 +380,9 @@ func cmdApprove(configDir, dataDir string, args []string) error {
 	if defaultRoomsAdded > 0 {
 		fmt.Printf("  Default rooms auto-joined: %d\n", defaultRoomsAdded)
 	}
-	// The printed message below used to say "the server will detect the
-	// change and apply it automatically" — a Phase 9 artifact from when
-	// users lived in users.toml and the file watcher picked up changes
-	// on reload. After the users.db migration (Phase 9), the file
-	// watcher no longer covers user data. But for approve this is fine:
-	// a newly-approved user has zero active sessions, so there's nothing
-	// to notify. Next time they SSH in, the server reads their key from
-	// users.db and authenticates them. No broadcast needed.
+	// No broadcast needed: a newly-approved user has zero active
+	// sessions, so there's nothing to notify. Next time they SSH in,
+	// the server reads their key from users.db and authenticates them.
 	fmt.Println("\nThe user can now connect.")
 	return nil
 }
@@ -464,35 +459,28 @@ func cmdListUsers(dataDir string) error {
 	return nil
 }
 
-// Phase 16 Gap 3: cmdRemoveUser was deleted. It was a pre-Phase-9
-// holdover from when users lived in users.toml and the only way to
-// "get rid of" an account was to delete the TOML entry. Phase 12
-// added retirement (tombstone + cascade) which is the correct
-// invariant-preserving path, and Phase 14 locked in the "user rows
-// are permanent" invariant that the groups admin model depends on
-// (every group_members / room_members / message authorship /
-// reaction / delivery receipt row FKs back to users.id). Hard-deleting
-// a user row breaks every one of those invariants.
+// User rows are permanent: group_members, room_members, message
+// authorship, reactions, and delivery receipts all FK back to users.id,
+// and the groups admin model relies on that invariant. There is no
+// CLI command to hard-delete a user.
 //
-// Use cases that previously called for remove-user, and what to use
-// instead:
+// Use cases and the right command for each:
 //
-//   - "Undo a mistaken approve" → use `reject` (pre-approval) or
+//   - "Undo a mistaken approve" → `reject` (pre-approval) or
 //     `retire-user --reason admin_mistake` (post-approval). Both
-//     safer, both preserve audit trail.
-//   - "Stop a retired user showing up" → retirement cascade already
-//     removes them from all member lists. Historical messages still
-//     show their `[retired]` marker (correct behavior).
+//     preserve the audit trail.
+//   - "Stop a retired user showing up" → the retirement cascade
+//     already removes them from all member lists. Historical messages
+//     still show the `[retired]` marker (correct behavior).
 //   - "GDPR right-to-erasure" → would need a dedicated `purge-user`
 //     with full cascade delete of messages/reactions/receipts/DMs.
-//     Not Phase 16 scope; separate design discussion if/when real
-//     compliance is required.
+//     Separate design; not currently implemented.
 //   - "Clean up test accounts during development" → drop the data
 //     dir entirely.
 //
-// The store.DeleteUser helper is still kept for bootstrap-admin's
-// cleanup-on-error path (insert user → SetAdmin fails → delete the
-// orphan row). It's not exposed via the CLI anymore.
+// `store.DeleteUser` is retained for bootstrap-admin's cleanup-on-error
+// path (insert user → SetAdmin fails → delete the orphan row). It is
+// not exposed via the CLI.
 
 func cmdRetireUser(dataDir string, args []string) error {
 	if len(args) == 0 {

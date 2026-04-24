@@ -25,10 +25,9 @@ import (
 )
 
 // Test fixture keys generated once per test run under a temp dir.
-// Phase 16 Gap 4 removed users.toml support, so the fixture code no
-// longer writes a users.toml file — instead, user metadata is stored in
-// testFixtureUsers and seeded into users.db directly via
-// store.InsertUser inside newTestEnv after the server is created.
+// User metadata lives in testFixtureUsers and is seeded into users.db
+// directly via store.InsertUser inside newTestEnv after the server
+// is created.
 type testFixtureUser struct {
 	UserID      string // nanoid-style internal ID
 	DisplayName string
@@ -196,7 +195,6 @@ func newTestEnvWithConfig(t *testing.T, mutate func(*config.Config)) *testEnv {
 		t.Fatalf("create server: %v", err)
 	}
 
-	// Phase 16/23: users.toml and rooms.toml seeding were removed.
 	// Seed rooms + users directly through the store API after
 	// server.New has initialized schemas. Pass testDataDir
 	// (not testDataDir+"/data") because store.Open creates the "data"
@@ -901,7 +899,7 @@ func TestEdit_GroupEndToEnd(t *testing.T) {
 	alice := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_edit_group")
 	bob := env.connect(fixtureKeyPath(t, "bob"), "dev_bob_edit_group")
 
-	groupID := "group_edit_e2e"
+	groupID := store.GenerateID("group_")
 	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test", "usr_bob_test"}, "Edit Group"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
@@ -1086,7 +1084,7 @@ func TestEdit_DMEndToEnd(t *testing.T) {
 func TestEdit_RateLimitEnforced(t *testing.T) {
 	env := newTestEnv(t)
 	roomID := env.roomID("general")
-	groupID := "group_edit_rl"
+	groupID := store.GenerateID("group_")
 
 	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test", "usr_bob_test"}, "Edit RL"); err != nil {
 		t.Fatalf("create group: %v", err)
@@ -1164,20 +1162,18 @@ func TestEdit_RateLimitEnforced(t *testing.T) {
 	type editAttempt struct {
 		kind string
 	}
-	// 11 edits total, interleaved across all three verbs. Default limit is
-	// 10/min on the shared edits bucket.
+	// 6 edits total, interleaved across all three verbs. The shared edits
+	// bucket has a burst floor of 5 tokens (see rateLimiter.allowWithRetry:
+	// `if burst < 5 { burst = 5 }`), so with any EditsPerMinute value below
+	// 5/sec the effective burst cap is 5 — 5 back-to-back edits consume all
+	// tokens and the 6th must be rate-limited before a refill arrives.
 	attempts := []editAttempt{
 		{kind: "room"},
 		{kind: "group"},
 		{kind: "dm"},
 		{kind: "room"},
 		{kind: "group"},
-		{kind: "dm"},
-		{kind: "room"},
-		{kind: "group"},
-		{kind: "dm"},
-		{kind: "room"},
-		{kind: "group"}, // should hit rate_limited here (11th)
+		{kind: "dm"}, // should hit rate_limited here (6th)
 	}
 
 	for i, attempt := range attempts {
@@ -1226,7 +1222,7 @@ func TestEdit_RateLimitEnforced(t *testing.T) {
 		}
 
 		mt, raw = alice.readMessage()
-		if i < 10 {
+		if i < 5 {
 			switch attempt.kind {
 			case "room":
 				if mt != "edited" {
@@ -1244,7 +1240,7 @@ func TestEdit_RateLimitEnforced(t *testing.T) {
 			continue
 		}
 
-		// 11th edit must be rejected by the shared bucket.
+		// 6th edit must be rejected by the shared bucket (burst floor = 5).
 		if mt != "error" {
 			t.Fatalf("edit #%d expected error (rate limit), got %s (%s)", i+1, mt, string(raw))
 		}

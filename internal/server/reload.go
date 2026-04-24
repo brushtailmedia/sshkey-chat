@@ -66,12 +66,6 @@ func (s *Server) reloadConfig(changedFile string) {
 	s.logger.Info("config change detected", "file", base)
 
 	switch base {
-	case "users.toml":
-		// Phase 16 Gap 4: users.toml has been removed. If the file
-		// still exists in the config dir from a pre-Phase-16 install,
-		// log a warning so the operator knows it's no longer doing
-		// anything and can safely delete it.
-		s.logger.Warn("users.toml is no longer supported and is ignored — delete the file. Use `sshkey-ctl bootstrap-admin` to create the first admin on a fresh deployment.")
 	case "server.toml":
 		s.reloadServerConfig()
 	default:

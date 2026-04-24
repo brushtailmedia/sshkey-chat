@@ -126,7 +126,7 @@ docker exec sshkey-chat sshkey-ctl revoke-device --user usr_abc123 --device dev_
 docker logs -f sshkey-chat
 ```
 
-> **Note:** `rooms.toml` is removed. First-run setup is `sshkey-ctl init`; room lifecycle is managed through `sshkey-ctl` commands (`add-room`, `rename-room`, `set-default-room`, etc). First admin bootstrap is `sshkey-ctl bootstrap-admin <name> [--out DIR]`.
+> **Setup:** first-run is `sshkey-ctl init`; ongoing room lifecycle is managed through `sshkey-ctl` (`add-room`, `rename-room`, `set-default-room`, etc). First admin is provisioned with `sshkey-ctl bootstrap-admin <name> [--out DIR]`.
 
 ### Install
 

@@ -1,7 +1,6 @@
 package config
 
-// Phase 16 + Phase 23 removed users.toml and rooms.toml support.
-// Load now parses server.toml only.
+// Load parses server.toml only.
 
 import (
 	"os"
@@ -24,8 +23,7 @@ bind = "0.0.0.0"
 	return dir
 }
 
-// TestLoadMinimal verifies the basic load path still works after the
-// users.toml removal.
+// TestLoadMinimal verifies the basic load path.
 func TestLoadMinimal(t *testing.T) {
 	dir := writeMinimalConfig(t)
 	cfg, err := Load(dir)
@@ -37,18 +35,12 @@ func TestLoadMinimal(t *testing.T) {
 	}
 }
 
-// TestLoadIgnoresUsersTomlIfPresent verifies that a stray users.toml
-// file in the config directory does NOT break Load. Phase 16 Gap 4
-// removed the users.toml parsing path entirely, so the file is just
-// ignored — operators upgrading from a pre-Phase-16 install will see
-// a warning in the server logs (from reload.go) but Load itself
-// shouldn't even look at the file.
 // TestDockerReferenceServerToml_LoadsCleanly locks in that the
 // operator-facing reference TOML shipped in docker/config/server.toml
-// parses successfully through the full Load + Validate pipeline —
-// including Phase 17b's [server.auto_revoke] validator. Regression
-// guard: future changes to the config schema that drop or rename a
-// documented key will fail this test before reaching CI.
+// parses successfully through the full Load + Validate pipeline,
+// including the [server.auto_revoke] validator. Regression guard:
+// future changes to the config schema that drop or rename a documented
+// key will fail this test before reaching CI.
 func TestDockerReferenceServerToml_LoadsCleanly(t *testing.T) {
 	// Copy the reference server.toml into a temp dir and Load.
 	// Reference is at ../../docker/config/server.toml
@@ -97,18 +89,19 @@ func TestDockerReferenceServerToml_LoadsCleanly(t *testing.T) {
 	}
 }
 
-func TestLoadIgnoresUsersTomlIfPresent(t *testing.T) {
+// TestLoadIgnoresUnknownFiles verifies Load tolerates extra files in
+// the config directory and parses only server.toml.
+func TestLoadIgnoresUnknownFiles(t *testing.T) {
 	dir := writeMinimalConfig(t)
-	// Put a junk users.toml in the directory.
-	os.WriteFile(filepath.Join(dir, "users.toml"), []byte(`
-[alice]
-key = "ssh-ed25519 AAAA-bogus"
-display_name = "Alice"
+	// Drop an unrelated file into the config dir.
+	os.WriteFile(filepath.Join(dir, "extra.toml"), []byte(`
+[whatever]
+unused = true
 `), 0644)
 
 	cfg, err := Load(dir)
 	if err != nil {
-		t.Fatalf("Load should ignore stray users.toml, got error: %v", err)
+		t.Fatalf("Load should ignore unknown files in config dir, got error: %v", err)
 	}
 	if cfg == nil {
 		t.Fatal("Load returned nil config")

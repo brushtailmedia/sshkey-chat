@@ -1154,7 +1154,7 @@ grace_period = "10s"             # time to finish in-flight transfers on shutdow
 sshkey-ctl bootstrap-admin admin-name
 ```
 
-This generates an Ed25519 keypair (interactive passphrase prompt, zxcvbn score ≥ 3 required), inserts the user row into `users.db` with `is_admin = true`, and writes the encrypted private key to the current directory. Subsequent users join via the normal pending-keys + `sshkey-ctl approve` flow. `users.toml` seed support was removed in Phase 16 Gap 4 — a stray `users.toml` in the config dir is ignored at startup with a one-time WARN log.
+This generates an Ed25519 keypair (interactive passphrase prompt, zxcvbn score ≥ 3 required), inserts the user row into `users.db` with `is_admin = true`, and writes the encrypted private key to the current directory (or `--out DIR`). Subsequent users join via the normal pending-keys + `sshkey-ctl approve` flow.
 
 **Docker onboarding flow:**
 - one-time host preflight for key export mount:

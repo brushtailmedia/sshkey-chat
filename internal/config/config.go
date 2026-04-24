@@ -1,14 +1,9 @@
 // Package config handles parsing of server.toml.
 //
-// Phase 16 Gap 4 removed users.toml support entirely. Users are now
-// created exclusively via `sshkey-ctl approve` (for users who SSH in
-// with their own key) or `sshkey-ctl bootstrap-admin` (for admin
-// keypair generation on the server side). The TOML file no longer
-// exists in any role.
-//
-// Phase 23 removes rooms.toml support entirely. Rooms are created and
-// managed through store-backed CLI commands (init/add-room/etc), not
-// seed files.
+// User accounts are created via `sshkey-ctl approve` (for users who
+// SSH in with their own key) or `sshkey-ctl bootstrap-admin` (for
+// admin keypair generation on the server side). Rooms are created
+// via `sshkey-ctl init` or `sshkey-ctl add-room`. No seed files.
 package config
 
 import (
@@ -43,6 +38,12 @@ func ParseSize(s string) (int64, error) {
 	} else if strings.HasSuffix(s, "KB") {
 		multiplier = 1024
 		s = strings.TrimSuffix(s, "KB")
+	} else if strings.HasSuffix(s, "B") {
+		// Bare "B" suffix (e.g. "100B") — accepted as a
+		// human-readable alternative to the bare integer form.
+		// Multiplier stays 1. Kept AFTER the GB/MB/KB checks so
+		// compound suffixes match first.
+		s = strings.TrimSuffix(s, "B")
 	}
 
 	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
@@ -453,11 +454,8 @@ func (c ServerConfig) Validate() (warnings []string, err error) {
 }
 
 // Config holds all loaded configuration. Safe for concurrent reads via RLock/RUnlock.
-//
-// Phase 16 Gap 4 removed the `Users map[string]User` field — users.toml
-// is no longer supported. Operators must use `sshkey-ctl bootstrap-admin`
-// to create the first admin on a fresh deployment, and the normal approve
-// flow for everyone else.
+// The first admin on a fresh server is created via `sshkey-ctl bootstrap-admin`;
+// additional users join via the pending-keys + `sshkey-ctl approve` flow.
 type Config struct {
 	sync.RWMutex
 	Server ServerConfig
@@ -465,11 +463,8 @@ type Config struct {
 }
 
 // Load reads all config files from the given directory.
-//
-// Phase 16 Gap 4: users.toml support has been removed entirely.
-// Phase 23: rooms.toml support has been removed entirely.
-// The first admin on a fresh server is created via `sshkey-ctl
-// bootstrap-admin`, NOT by editing a TOML file.
+// Only server.toml is read; the first admin is created via
+// `sshkey-ctl bootstrap-admin`.
 func Load(dir string) (*Config, error) {
 	serverPath := filepath.Join(dir, "server.toml")
 

@@ -263,12 +263,6 @@ func TestRoomDisplayNameToID(t *testing.T) {
 	}
 }
 
-// Phase 16 Gap 4: TestSeedRoomMembers_* and the SeedRoomMembers
-// helper they exercised were removed when users.toml support was
-// deleted. Room memberships for new users are now established via
-// `sshkey-ctl add-to-room` after approval, and that path is covered
-// by TestAddRoomMember below.
-
 func TestRoomMembersEmpty(t *testing.T) {
 	dir := t.TempDir()
 	st, err := Open(dir)

@@ -221,6 +221,24 @@ func (s *Server) handleAutoRevokeCrossing(enabled bool, rule config.ThresholdRul
 		return
 	}
 
+	// Two-step revocation, same order as cmdRevokeDevice / ops.go prune:
+	//  (1) RevokeDevice writes to revoked_devices, blocking future
+	//      logins at the data layer. This is what IsDeviceRevoked
+	//      reads and what enforce_revocation consults at handshake.
+	//  (2) RecordPendingDeviceRevocation enqueues a row so the
+	//      revocation drain tick kicks any live session.
+	// If step (1) fails we never reach step (2) — the device is
+	// still misbehaving but no queue row is written, and the next
+	// tick will retry both. If step (2) fails after step (1)
+	// succeeds the device is still blocked from future logins;
+	// the live session will only close on its own until the next
+	// tick's re-attempt (handled by the idempotent IsDeviceRevoked
+	// check above — a second tick sees it already revoked and skips).
+	if err := s.store.RevokeDevice(userID, deviceID, reason); err != nil {
+		s.logger.Error("auto_revoke: RevokeDevice failed",
+			"user", userID, "device", deviceID, "signal", rule.Signal, "error", err)
+		return
+	}
 	if err := s.store.RecordPendingDeviceRevocation(userID, deviceID, reason, "server:auto_revoke"); err != nil {
 		s.logger.Error("auto_revoke: enqueue failed",
 			"user", userID, "device", deviceID, "signal", rule.Signal, "error", err)

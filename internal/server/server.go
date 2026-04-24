@@ -241,21 +241,12 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		s.files = newFileManager(dir)
 		s.audit = newAuditLog(dir)
 
-		// Phase 16 Gap 4: users.toml seeding has been removed entirely.
-		// Operators create the first admin via `sshkey-ctl bootstrap-admin`
-		// on a fresh deployment, then add other users via `sshkey-ctl
-		// approve` after they SSH in with their own key. Room memberships
-		// are established via `sshkey-ctl add-to-room` or via the default
-		// rooms feature. Existing deployments with data in users.db are
-		// unaffected — `users.db` was already the source of truth post
-		// Phase 9, the TOML file was only first-boot seed convenience.
-		//
-		// Empty-users.db warning: fire at startup so a fresh docker /
-		// systemd deploy has a visible signal in the logs pointing at
-		// the next step. Without this, an operator sees "server started"
-		// and no error, but every SSH connection silently lands in
-		// pending-keys.log with no admin to triage it. Non-fatal — the
-		// server still runs; bootstrap-admin can be invoked any time.
+		// Empty-users.db warning: fire at startup so a fresh deploy
+		// has a visible signal in the logs pointing at the next step.
+		// Without this, an operator sees "server started" and no error,
+		// but every SSH connection silently lands in pending-keys.log
+		// with no admin to triage it. Non-fatal — the server still
+		// runs; bootstrap-admin can be invoked any time.
 		if st.UsersDBEmpty() {
 			logger.Warn("no users in users.db — run `sshkey-ctl bootstrap-admin <name>` against the data directory to create the first admin; the server will accept no logins until an admin exists",
 				"data_dir", dir,

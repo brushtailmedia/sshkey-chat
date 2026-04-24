@@ -1,38 +1,32 @@
 package main
 
-// Phase 16 Gap 4 — bootstrap-admin command.
+// bootstrap-admin — provision a new admin account with a server-generated
+// Ed25519 keypair. Works on fresh DBs (first-admin bootstrap) and on
+// existing DBs (disaster recovery, pre-provisioning, service accounts).
 //
-// Provisions a new admin account with a server-generated keypair.
-// Replaces the `users.toml` first-boot seeding path that Phase 9 left
-// behind. Works on fresh DBs (the first-admin bootstrap case) AND on
-// existing DBs (disaster recovery, pre-provisioning, service accounts)
-// — not first-admin-specific.
+// Server-side keygen is asymmetric with the approve flow (which expects
+// users to bring their own keys). The trade-off is accepted for admins
+// because:
 //
-// Why server-side keygen for admins (asymmetric with the approve flow
-// which expects users to bring their own keys):
-//
-//   - Admin set is small (typically 1-5 people) and operationally aware
-//   - Bootstrap-from-nothing is a real operational need (fresh server,
-//     disaster recovery, headless deployments where there's no user
-//     yet to SSH in and trigger pending)
-//   - Server-generated keys are an acceptable trade-off for this narrow
-//     population. Regular users always go through `approve` to preserve
-//     the "user controls their own key material from generation"
-//     property.
+//   - Admin set is small and operationally aware.
+//   - Bootstrap-from-nothing is a real need — fresh servers, disaster
+//     recovery, headless deployments with no user available yet to SSH in
+//     and trigger pending-keys.
+//   - Regular users still go through `approve` so they control their own
+//     key material from generation.
 //
 // Order of operations is DB-first, then file writes:
-//   1. Validate display name not in use
-//   2. Validate output file path not in use
-//   3. Prompt for passphrase (interactive, hidden, with strength check)
-//   4. Generate Ed25519 keypair in process memory
-//   5. Insert user row + flip admin flag (single transaction)
-//   6. Write audit log entry
-//   7. Marshal encrypted private key + write files to CWD
+//   1. Validate display name not in use.
+//   2. Validate output file path not in use.
+//   3. Prompt for passphrase (interactive, hidden, with strength check).
+//   4. Generate Ed25519 keypair in process memory.
+//   5. Insert user row + flip admin flag in a single transaction.
+//   6. Write audit log entry.
+//   7. Marshal encrypted private key and write files to --out (or CWD).
 //
-// "User row without key files" is a recoverable state (operator deletes
-// the row and re-runs). "Key files without user row" looks like an
-// intrusion artifact in the audit log, so DB-first is the deliberate
-// choice.
+// "User row without key files" is a recoverable state (delete the row
+// and re-run). "Key files without user row" would look like an intrusion
+// artifact in the audit log, so DB-first is the deliberate choice.
 
 import (
 	"crypto/ed25519"

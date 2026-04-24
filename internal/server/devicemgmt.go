@@ -172,8 +172,18 @@ func (s *Server) handleRevokeDevice(c *Client, raw json.RawMessage) {
 
 // kickRevokedDeviceSession finds any connected client whose UserID +
 // DeviceID match the revoked device, sends them a device_revoked
-// event so the TUI can show a notice before disconnect, and closes
-// the SSH channel to terminate the session.
+// event so the TUI can show a notice before disconnect, and tears
+// down the entire SSH connection for that session.
+//
+// Why close the SSH conn (not just the NDJSON channel): a client
+// session holds up to three SSH channels on the same conn — NDJSON
+// protocol (ch1), downloads (ch2), uploads (ch3). Closing only ch1
+// leaves a revoked device able to continue streaming bytes through
+// ch2/ch3 until its own client happens to notice ch1 closed and
+// voluntarily hang up. That's a weak eviction for a verb whose
+// explicit intent is "this device is no longer trusted." Closing
+// the SSH conn forces all three channels down in one step and makes
+// the eviction observable to an admin test via conn.Wait().
 //
 // Idempotent: if no matching client is connected, this is a no-op.
 //
@@ -185,7 +195,7 @@ func (s *Server) handleRevokeDevice(c *Client, raw json.RawMessage) {
 // sharing the helper enforces that by construction.
 func (s *Server) kickRevokedDeviceSession(userID, deviceID, reason string) {
 	// Phase 17 Step 3: lock-release pattern. Encode via fanOut outside the
-	// lock, then iterate targets to call Channel.Close().
+	// lock, then iterate targets to close channel + conn.
 	s.mu.RLock()
 	var targets []*Client
 	for _, client := range s.clients {
@@ -202,6 +212,13 @@ func (s *Server) kickRevokedDeviceSession(userID, deviceID, reason string) {
 	}
 	s.fanOut("device_revoked", revoked, targets)
 	for _, client := range targets {
+		// Close the NDJSON channel first so any in-flight encode
+		// returns with an error rather than wedging on a closed
+		// conn; then close the underlying SSH conn to tear down all
+		// three channels.
 		client.Channel.Close()
+		if client.Conn != nil {
+			client.Conn.Close()
+		}
 	}
 }

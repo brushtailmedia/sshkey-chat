@@ -117,11 +117,9 @@ func (s *Store) RoomMembersEmpty() bool {
 	return count == 0
 }
 
-// Phase 16 Gap 4: SeedRoomMembers was removed alongside SeedUsers
-// when users.toml support was deleted. Room memberships for new users
-// are now established via `sshkey-ctl add-to-room` after approval, or
-// via the default-rooms feature (see Phase 16 default rooms scope).
-// Existing deployments that have data in room_members are unaffected.
+// Room memberships are established via `sshkey-ctl add-to-room` after
+// approval, or automatically for rooms flagged as defaults via
+// `sshkey-ctl set-default-room`.
 
 // AddRoomMember adds a user to a room. Idempotent (INSERT OR IGNORE).
 func (s *Store) AddRoomMember(roomID, userID string, firstEpoch int64) error {

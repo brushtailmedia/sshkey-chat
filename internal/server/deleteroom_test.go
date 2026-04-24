@@ -249,7 +249,7 @@ func TestHandleDeleteRoom_LastMemberCleanupCascade(t *testing.T) {
 	s := newTestServer(t)
 	enableActiveRoomLeave(t, s)
 
-	// engineering has only alice in the seed (via users.toml)
+	// engineering has only alice per the test-server seeding in newTestServer
 	engineeringID := s.store.RoomDisplayNameToID("engineering")
 	members := s.store.GetRoomMemberIDsByRoomID(engineeringID)
 	if len(members) != 1 || members[0] != "alice" {

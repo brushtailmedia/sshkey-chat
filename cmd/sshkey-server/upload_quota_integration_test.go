@@ -139,7 +139,7 @@ func TestUploadQuota_BlockEnforcementEndToEnd(t *testing.T) {
 	roomID := e.roomIDByName("general")
 
 	payloadA := bytes.Repeat([]byte("a"), 100)
-	completeA, upErr, err := legacyUploadOnce(alice, uploadStartForPayload("up_quota_a", roomID, payloadA), payloadA)
+	completeA, upErr, err := legacyUploadOnce(alice, uploadStartForPayload(store.GenerateID("up_"), roomID, payloadA), payloadA)
 	if err != nil {
 		t.Fatalf("first upload failed: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestUploadQuota_BlockEnforcementEndToEnd(t *testing.T) {
 	}
 
 	payloadB := bytes.Repeat([]byte("b"), 40)
-	completeB, upErr, err := legacyUploadOnce(alice, uploadStartForPayload("up_quota_b", roomID, payloadB), payloadB)
+	completeB, upErr, err := legacyUploadOnce(alice, uploadStartForPayload(store.GenerateID("up_"), roomID, payloadB), payloadB)
 	if err != nil {
 		t.Fatalf("second upload round-trip failed: %v", err)
 	}
@@ -220,8 +220,8 @@ func TestUploadQuota_TOCTOURejectsSecondUploadAndCleansArtifacts(t *testing.T) {
 
 	payload1 := bytes.Repeat([]byte("x"), 100)
 	payload2 := bytes.Repeat([]byte("y"), 100)
-	start1 := uploadStartForPayload("up_toctou_a", roomID, payload1)
-	start2 := uploadStartForPayload("up_toctou_b", roomID, payload2)
+	start1 := uploadStartForPayload(store.GenerateID("up_"), roomID, payload1)
+	start2 := uploadStartForPayload(store.GenerateID("up_"), roomID, payload2)
 
 	if ready, upErr, err := legacyUploadStart(alice, start1); err != nil || upErr != nil || ready == nil {
 		t.Fatalf("start1 failed: ready=%v errResp=%v err=%v", ready != nil, upErr, err)
@@ -261,16 +261,27 @@ func TestUploadQuota_TOCTOURejectsSecondUploadAndCleansArtifacts(t *testing.T) {
 		t.Fatalf("second upload code = %q, want %q", upErr.Code, protocol.ErrDailyQuotaExceeded)
 	}
 
-	msgType, raw := bob.readMessage()
-	if msgType != "admin_notify" {
-		t.Fatalf("bob expected admin_notify quota_block, got %s: %s", msgType, string(raw))
-	}
+	// Upload 1 (100B) crossed the warn threshold (64B) and fires
+	// admin_notify quota_warn first. Upload 2's TOCTOU reject fires
+	// admin_notify quota_block second. Read messages until we find
+	// the quota_block event — warn is a permitted predecessor here,
+	// any other admin_notify event or non-admin_notify message is
+	// a failure.
 	var notify protocol.AdminNotifyQuota
-	if err := json.Unmarshal(raw, &notify); err != nil {
-		t.Fatalf("unmarshal admin_notify: %v", err)
-	}
-	if notify.Event != "quota_block" {
-		t.Fatalf("admin_notify event = %q, want quota_block", notify.Event)
+	for {
+		msgType, raw := bob.readMessage()
+		if msgType != "admin_notify" {
+			t.Fatalf("bob expected admin_notify events, got %s: %s", msgType, string(raw))
+		}
+		if err := json.Unmarshal(raw, &notify); err != nil {
+			t.Fatalf("unmarshal admin_notify: %v", err)
+		}
+		if notify.Event == "quota_block" {
+			break
+		}
+		if notify.Event != "quota_warn" {
+			t.Fatalf("unexpected admin_notify event before quota_block: %q", notify.Event)
+		}
 	}
 	if notify.User != "usr_alice_test" {
 		t.Fatalf("admin_notify user = %q, want usr_alice_test", notify.User)
@@ -325,7 +336,7 @@ func TestUploadQuota_WarnNotifyFiresOncePerDay(t *testing.T) {
 	roomID := e.roomIDByName("general")
 
 	first := bytes.Repeat([]byte("w"), 120)
-	complete, upErr, err := legacyUploadOnce(alice, uploadStartForPayload("up_warn_a", roomID, first), first)
+	complete, upErr, err := legacyUploadOnce(alice, uploadStartForPayload(store.GenerateID("up_"), roomID, first), first)
 	if err != nil {
 		t.Fatalf("first warn upload: %v", err)
 	}
@@ -346,7 +357,7 @@ func TestUploadQuota_WarnNotifyFiresOncePerDay(t *testing.T) {
 	}
 
 	second := bytes.Repeat([]byte("z"), 10)
-	complete, upErr, err = legacyUploadOnce(alice, uploadStartForPayload("up_warn_b", roomID, second), second)
+	complete, upErr, err = legacyUploadOnce(alice, uploadStartForPayload(store.GenerateID("up_"), roomID, second), second)
 	if err != nil {
 		t.Fatalf("second upload: %v", err)
 	}
@@ -405,7 +416,7 @@ func TestUploadQuota_SustainedPatternFiresQuotaSustained(t *testing.T) {
 	roomID := e.roomIDByName("general")
 
 	payload := bytes.Repeat([]byte("s"), 120)
-	complete, upErr, err := legacyUploadOnce(alice, uploadStartForPayload("up_sustained", roomID, payload), payload)
+	complete, upErr, err := legacyUploadOnce(alice, uploadStartForPayload(store.GenerateID("up_"), roomID, payload), payload)
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
@@ -442,7 +453,7 @@ func TestUploadQuota_EnabledTransitionDoesNotCorruptAccounting(t *testing.T) {
 	roomID := e.roomIDByName("general")
 
 	base := bytes.Repeat([]byte("b"), 100)
-	complete, upErr, err := legacyUploadOnce(alice, uploadStartForPayload("up_toggle_a", roomID, base), base)
+	complete, upErr, err := legacyUploadOnce(alice, uploadStartForPayload(store.GenerateID("up_"), roomID, base), base)
 	if err != nil || upErr != nil || complete == nil {
 		t.Fatalf("base upload failed: complete=%v upErr=%v err=%v", complete != nil, upErr, err)
 	}
@@ -452,7 +463,7 @@ func TestUploadQuota_EnabledTransitionDoesNotCorruptAccounting(t *testing.T) {
 	e.cfg.Unlock()
 
 	whileDisabled := bytes.Repeat([]byte("d"), 80)
-	complete, upErr, err = legacyUploadOnce(alice, uploadStartForPayload("up_toggle_b", roomID, whileDisabled), whileDisabled)
+	complete, upErr, err = legacyUploadOnce(alice, uploadStartForPayload(store.GenerateID("up_"), roomID, whileDisabled), whileDisabled)
 	if err != nil || upErr != nil || complete == nil {
 		t.Fatalf("upload while disabled should succeed: complete=%v upErr=%v err=%v", complete != nil, upErr, err)
 	}
@@ -462,7 +473,7 @@ func TestUploadQuota_EnabledTransitionDoesNotCorruptAccounting(t *testing.T) {
 	e.cfg.Unlock()
 
 	afterReenable := bytes.Repeat([]byte("e"), 40) // 100 + 40 > 128, should reject
-	complete, upErr, err = legacyUploadOnce(alice, uploadStartForPayload("up_toggle_c", roomID, afterReenable), afterReenable)
+	complete, upErr, err = legacyUploadOnce(alice, uploadStartForPayload(store.GenerateID("up_"), roomID, afterReenable), afterReenable)
 	if err != nil {
 		t.Fatalf("post-reenable upload failed unexpectedly: %v", err)
 	}

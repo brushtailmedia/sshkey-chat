@@ -13,6 +13,7 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
 
 func waitForClientDisconnect(t *testing.T, tc *testClient, timeout time.Duration) {
@@ -303,7 +304,7 @@ func TestAutoRevoke_LaunchGateRepresentativeFlow_NoMisbehaviorSignals(t *testing
 		t.Fatalf("bob expected reaction_removed, got %s", mt)
 	}
 
-	groupID := "group_launch_gate"
+	groupID := store.GenerateID("group_")
 	if err := e.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test", "usr_bob_test"}, "Launch Gate Group"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
@@ -416,7 +417,7 @@ func TestAutoRevoke_LaunchGateRepresentativeFlow_NoMisbehaviorSignals(t *testing
 	}
 
 	uploadPayload := []byte("launch-gate-upload")
-	upComplete, upErr, err := legacyUploadOnce(alice, uploadStartForPayload("up_launch_gate", roomID, uploadPayload), uploadPayload)
+	upComplete, upErr, err := legacyUploadOnce(alice, uploadStartForPayload(store.GenerateID("up_"), roomID, uploadPayload), uploadPayload)
 	if err != nil {
 		t.Fatalf("upload round-trip: %v", err)
 	}

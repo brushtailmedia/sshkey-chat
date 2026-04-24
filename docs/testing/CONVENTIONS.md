@@ -31,7 +31,7 @@ This document is the prescriptive test policy for `sshkey-chat` only.
 
 ## Fixtures and Data Seeding
 
-- Seed users with `store.InsertUser` into `users.db`; never through `users.toml`.
+- Seed users with `store.InsertUser` into `users.db`.
 - Use `testFixtureUsers` and per-test seeding helpers.
 - Temporary fixtures must use `t.TempDir()` (no hardcoded `/tmp/sshkey-test-*` paths).
 

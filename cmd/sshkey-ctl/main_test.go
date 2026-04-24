@@ -41,13 +41,10 @@ func genTestKey(t *testing.T, comment string) (string, string) {
 	return authKey, ssh.FingerprintSHA256(sshPub)
 }
 
-// testUser is a local stand-in for the deleted config.User struct.
-// Phase 16 Gap 4 removed users.toml support, so the tests can no
-// longer load users from a TOML file. Instead they use this struct
-// to describe a user, and setupDataDir seeds users.db / rooms.db
+// testUser describes a user fixture for setupDataDir. Tests construct
+// one or more testUsers and setupDataDir seeds users.db / rooms.db
 // directly via the public store API (InsertUser, SetUserRetired,
-// AddRoomMember). Same field shape as the old config.User so the
-// existing test bodies barely change.
+// AddRoomMember).
 type testUser struct {
 	Key           string
 	DisplayName   string
@@ -58,9 +55,7 @@ type testUser struct {
 }
 
 // setupDataDir creates a temp data dir with rooms.db and users.db seeded
-// directly via the store API. Phase 16 Gap 4 removed the SeedUsers /
-// SeedRoomMembers helpers, so this helper now uses InsertUser +
-// SetUserRetired + AddRoomMember instead.
+// directly via the store API (InsertUser + SetUserRetired + AddRoomMember).
 func setupDataDir(t *testing.T, rooms map[string]store.RoomSeed, users ...map[string]testUser) string {
 	t.Helper()
 	dir := t.TempDir()
