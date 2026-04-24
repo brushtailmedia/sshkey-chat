@@ -4,6 +4,96 @@ import (
 	"testing"
 )
 
+// --- Phase 17 Step 6: allowWithRetry / allowPerMinuteWithRetry tests ---
+
+func TestRateLimiter_AllowWithRetry_HappyPath(t *testing.T) {
+	rl := newRateLimiter()
+	// First call should be allowed with retry_after_ms = 0.
+	allowed, retry := rl.allowWithRetry("test_happy", 5.0)
+	if !allowed {
+		t.Error("first call should be allowed")
+	}
+	if retry != 0 {
+		t.Errorf("retry_after_ms on allow = %d, want 0", retry)
+	}
+}
+
+func TestRateLimiter_AllowWithRetry_RejectReturnsPositiveMs(t *testing.T) {
+	rl := newRateLimiter()
+	// Drain the burst (5 tokens at <5 rate, clamped to 5 burst).
+	for i := 0; i < 5; i++ {
+		rl.allowWithRetry("test_drain", 0.1) // 0.1 tokens/sec, burst=5
+	}
+	// 6th should be rejected with positive retry_after_ms.
+	allowed, retry := rl.allowWithRetry("test_drain", 0.1)
+	if allowed {
+		t.Error("6th call should be denied after burst drain")
+	}
+	if retry <= 0 {
+		t.Errorf("retry_after_ms on reject = %d, want > 0", retry)
+	}
+	// At 0.1 tokens/sec, 1 full token takes 10s = 10000ms. Allow
+	// wide tolerance for float drift; just assert ballpark.
+	if retry < 1000 || retry > 15000 {
+		t.Errorf("retry_after_ms = %d, want in [1000, 15000] for 0.1 tok/sec rate", retry)
+	}
+}
+
+func TestRateLimiter_AllowPerMinuteWithRetry_HappyPath(t *testing.T) {
+	rl := newRateLimiter()
+	allowed, retry := rl.allowPerMinuteWithRetry("test_pm_happy", 60)
+	if !allowed {
+		t.Error("first call should be allowed")
+	}
+	if retry != 0 {
+		t.Errorf("retry_after_ms on allow = %d, want 0", retry)
+	}
+}
+
+func TestRateLimiter_AllowPerMinuteWithRetry_RejectReturnsSensibleMs(t *testing.T) {
+	rl := newRateLimiter()
+	// 6/min = 0.1 tokens/sec, burst = 5. Drain + 1 over.
+	for i := 0; i < 5; i++ {
+		rl.allowPerMinuteWithRetry("test_pm_drain", 6)
+	}
+	allowed, retry := rl.allowPerMinuteWithRetry("test_pm_drain", 6)
+	if allowed {
+		t.Error("6th call should be denied")
+	}
+	// 6/min = 10 seconds per token, so retry_after_ms should be around 10000.
+	// Allow wide tolerance for bucket state + timing.
+	if retry < 5000 || retry > 15000 {
+		t.Errorf("retry_after_ms = %d, want ~10000 (10s at 6/min)", retry)
+	}
+}
+
+func TestRateLimiter_AllowWithRetry_NeverReturnsZeroOnReject(t *testing.T) {
+	// Reject paths must always return retry_after_ms >= 1. Zero would
+	// omitempty-elide off the wire and be indistinguishable from "no
+	// hint", defeating the purpose.
+	rl := newRateLimiter()
+	// Drain until the first rejection rather than assuming a fixed number
+	// of iterations; keeps the test deterministic without t.Skip fallback.
+	var (
+		allowed bool
+		retry   int64
+	)
+	for i := 0; i < 100000; i++ {
+		allowed, retry = rl.allowWithRetry("test_no_zero", 1.0)
+		if !allowed {
+			break
+		}
+	}
+	if allowed {
+		t.Fatal("expected reject after draining bucket")
+	}
+	if retry < 1 {
+		t.Errorf("retry_after_ms on reject = %d, want >= 1 (zero elides off wire)", retry)
+	}
+}
+
+// --- Pre-existing tests below ---
+
 func TestRateLimiter_AllowBasic(t *testing.T) {
 	rl := newRateLimiter()
 

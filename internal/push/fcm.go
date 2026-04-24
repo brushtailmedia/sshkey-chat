@@ -11,21 +11,21 @@ import (
 	"sync"
 	"time"
 
-	"github.com/brushtailmedia/sshkey-chat/internal/config"
-	"github.com/golang-jwt/jwt/v5"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"github.com/brushtailmedia/sshkey-chat/internal/config"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 // FCMSender sends push notifications via Firebase Cloud Messaging v1 API.
 type FCMSender struct {
-	projectID  string
-	serviceKey *rsa.PrivateKey
+	projectID   string
+	serviceKey  *rsa.PrivateKey
 	clientEmail string
-	endpoint   string
-	client     *http.Client
-	logger     *slog.Logger
+	endpoint    string
+	client      *http.Client
+	logger      *slog.Logger
 
 	mu       sync.Mutex
 	token    string
@@ -124,7 +124,7 @@ func (f *FCMSender) Send(token string) (bool, error) {
 	json.Unmarshal(respBody, &errResp)
 	for _, d := range errResp.Error.Details {
 		if d.ErrorCode == "UNREGISTERED" {
-			f.logger.Info("FCM token unregistered", "token", token[:8]+"...")
+			f.logger.Info("FCM token unregistered", "token", tokenLogValue(token))
 			return false, nil
 		}
 	}

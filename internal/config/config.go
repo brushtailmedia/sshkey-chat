@@ -1,9 +1,14 @@
-// Package config handles parsing of server.toml, users.toml, and rooms.toml.
+// Package config handles parsing of server.toml.
+//
+// User accounts are created via `sshkey-ctl approve` (for users who
+// SSH in with their own key) or `sshkey-ctl bootstrap-admin` (for
+// admin keypair generation on the server side). Rooms are created
+// via `sshkey-ctl init` or `sshkey-ctl add-room`. No seed files.
 package config
 
 import (
-	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -33,6 +38,12 @@ func ParseSize(s string) (int64, error) {
 	} else if strings.HasSuffix(s, "KB") {
 		multiplier = 1024
 		s = strings.TrimSuffix(s, "KB")
+	} else if strings.HasSuffix(s, "B") {
+		// Bare "B" suffix (e.g. "100B") — accepted as a
+		// human-readable alternative to the bare integer form.
+		// Multiplier stays 1. Kept AFTER the GB/MB/KB checks so
+		// compound suffixes match first.
+		s = strings.TrimSuffix(s, "B")
 	}
 
 	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
@@ -50,16 +61,48 @@ type ServerConfig struct {
 	Sync       SyncSection       `toml:"sync"`
 	Files      FilesSection      `toml:"files"`
 	Devices    DevicesSection    `toml:"devices"`
+	Groups     GroupsSection     `toml:"groups"`
 	RateLimits RateLimitsSection `toml:"rate_limits"`
 	Shutdown   ShutdownSection   `toml:"shutdown"`
 	Logging    LoggingSection    `toml:"logging"`
 	Push       PushSection       `toml:"push"`
+	Backup     BackupSection     `toml:"backup"` // Phase 19 — scheduled backup + retention
 }
 
 type ServerSection struct {
-	Port   int      `toml:"port"`
-	Bind   string   `toml:"bind"`
-	Admins []string `toml:"admins"`
+	Port int    `toml:"port"`
+	Bind string `toml:"bind"`
+
+	// AllowSelfLeaveRooms controls whether users can voluntarily leave
+	// active rooms via /leave. Default false preserves the admin-managed
+	// membership model — when disabled, room membership is changed only
+	// via sshkey-ctl add-to-room / remove-from-room. When enabled, users
+	// can self-leave and the server broadcasts a room_event leave to
+	// remaining members. Hot-reloadable.
+	AllowSelfLeaveRooms bool `toml:"allow_self_leave_rooms"`
+
+	// AllowSelfLeaveRetiredRooms controls whether users can clean up
+	// retired rooms from their sidebar via /leave or /delete. Default true
+	// because retired rooms are dead — there's no membership decision to
+	// preserve, just sidebar housekeeping. Inert until Phase 12 introduces
+	// room retirement. Hot-reloadable.
+	AllowSelfLeaveRetiredRooms bool `toml:"allow_self_leave_retired_rooms"`
+
+	// AutoRevoke configures Phase 17b auto-revoke on sustained
+	// misbehavior. See internal/config/autorevoke.go for the full
+	// schema + validation rules. Nested as [server.auto_revoke] in
+	// server.toml.
+	AutoRevoke AutoRevokeSection `toml:"auto_revoke"`
+
+	// Quotas configures per-user daily upload caps (originally
+	// designed as Phase 25, shipped 2026-04-19 as out-of-phase fix).
+	// Default-on: DefaultServerConfig populates [server.quotas.user]
+	// with Enabled = true and 1GB warn / 5GB block / 30-day retention.
+	// Operators opt out with `[server.quotas.user] enabled = false`.
+	// Mirrors the Phase 17b auto-revoke + Phase 19 backup default-on
+	// pattern. See internal/config/quotas.go for the schema +
+	// validation. Nested as [server.quotas] in server.toml.
+	Quotas QuotasSection `toml:"quotas"`
 }
 
 type MessagesSection struct {
@@ -77,28 +120,125 @@ type SyncSection struct {
 }
 
 type FilesSection struct {
-	MaxFileSize       string   `toml:"max_file_size"`
-	MaxAvatarSize     string   `toml:"max_avatar_size"`
+	MaxFileSize        string   `toml:"max_file_size"`
+	MaxAvatarSize      string   `toml:"max_avatar_size"`
 	AllowedAvatarTypes []string `toml:"allowed_avatar_types"`
+
+	// MaxFileIDsPerMessage bounds the envelope-level file_ids[] array
+	// at message-send time (handleSend / handleSendGroup / handleSendDM).
+	// Phase 17 Step 4c DoS defense; also fires SignalFileIDsOverCap for
+	// Phase 17b auto-revoke observability. Default 20 — matches the
+	// WhatsApp batch-send ceiling and sits comfortably above "here are
+	// today's photos" use cases for chat. Terminal clients today only
+	// exercise single-attach (/upload <path>), so this cap is primarily
+	// protocol-layer defense against hostile crafted envelopes; a
+	// deployment that grows a multi-attach UX may need to raise it.
+	MaxFileIDsPerMessage int `toml:"max_file_ids_per_message"`
 }
 
 type DevicesSection struct {
 	MaxPerUser int `toml:"max_per_user"`
 }
 
+// GroupsSection governs per-group policy knobs. Phase 17 Step 4d.
+//
+// MaxMembers is the hard cap on group-DM membership — enforced at
+// create_group and add_to_group, and is the upper bound on the
+// wrapped_keys envelope size (a 10M-entry map that passes the
+// per-member ECDH check would otherwise exhaust memory). Default 150
+// matches the pre-Phase-17 hardcoded value and PROTOCOL.md
+// documentation. At 150 members, each send costs ~12KB of wrapped-key
+// material on the wire and ~15ms of crypto. Operators running smaller
+// deployments may tune down; operators with hardware to match may
+// tune up.
+type GroupsSection struct {
+	MaxMembers int `toml:"max_members"`
+}
+
 type RateLimitsSection struct {
-	MessagesPerSecond    int `toml:"messages_per_second"`
-	UploadsPerMinute     int `toml:"uploads_per_minute"`
-	ConnectionsPerMinute int `toml:"connections_per_minute"`
-	FailedAuthPerMinute  int `toml:"failed_auth_per_minute"`
-	TypingPerSecond      int `toml:"typing_per_second"`
-	HistoryPerMinute     int `toml:"history_per_minute"`
+	MessagesPerSecond     int `toml:"messages_per_second"`
+	UploadsPerMinute      int `toml:"uploads_per_minute"`
+	ConnectionsPerMinute  int `toml:"connections_per_minute"`
+	FailedAuthPerMinute   int `toml:"failed_auth_per_minute"`
+	TypingPerSecond       int `toml:"typing_per_second"`
+	HistoryPerMinute      int `toml:"history_per_minute"`
 	DeletesPerMinute      int `toml:"deletes_per_minute"`
 	AdminDeletesPerMinute int `toml:"admin_deletes_per_minute"`
 	ReactionsPerMinute    int `toml:"reactions_per_minute"`
-	DMCreatesPerMinute   int `toml:"dm_creates_per_minute"`
-	ProfilesPerMinute    int `toml:"profiles_per_minute"`
-	PinsPerMinute        int `toml:"pins_per_minute"`
+	DMCreatesPerMinute    int `toml:"dm_creates_per_minute"`
+	ProfilesPerMinute     int `toml:"profiles_per_minute"`
+	PinsPerMinute         int `toml:"pins_per_minute"`
+	// Phase 17 Step 5: rate-limit coverage for 4 previously-unlimited
+	// handlers.
+	// RoomMembersPerMinute bounds info-panel room_members refreshes.
+	// Default 6 (one per 10s) matches refresh-UX cadence; mashing
+	// refresh is rate-limited.
+	RoomMembersPerMinute int `toml:"room_members_per_minute"`
+	// DeviceListPerMinute bounds settings-panel device_list refreshes.
+	// Same 6/min default rationale as RoomMembersPerMinute.
+	DeviceListPerMinute int `toml:"device_list_per_minute"`
+	// DownloadRequestsPerMinute bounds per-user download verbs.
+	// Default 60/min (1/sec) — higher than other refresh verbs
+	// because attachment-heavy chat views legitimately fire many
+	// requests when opened.
+	DownloadRequestsPerMinute int `toml:"download_requests_per_minute"`
+
+	// IdleTimeoutSeconds is the Phase 17b Step 5a NDJSON idle
+	// watchdog threshold. If a client connection sends no complete
+	// protocol frame for this many seconds, the server closes the
+	// SSH channel. 0 disables (default) — operators tune post-launch
+	// once legitimate user idle patterns are observed. Slow-loris
+	// defense; SSH-layer keepalive (30s) already kills dead TCP
+	// connections independently.
+	IdleTimeoutSeconds int `toml:"idle_timeout_seconds"`
+
+	// PerClientWriteBufferSize is the Phase 17b Step 5b per-connection
+	// outbound message queue depth. fanOut broadcasts non-blocking-
+	// enqueue into each recipient's queue; a slow reader whose queue
+	// fills causes drops (counted as SignalBroadcastDropped) rather
+	// than blocking the sender. Default 256 absorbs ~50 seconds of
+	// a chatty room's worth of broadcasts. Raise for deployments
+	// with very large rooms or sustained broadcast storms; lower
+	// only if memory pressure demands it (size × active connections
+	// is the memory budget).
+	PerClientWriteBufferSize int `toml:"per_client_write_buffer_size"`
+
+	// ConsecutiveDropDisconnectThreshold is the Phase 17b Step 5b
+	// cutoff for "slow-reader" disconnects. After a client's
+	// outbound queue has been full for this many consecutive
+	// fanOut attempts, the server closes their SSH channel.
+	// Disconnect (not auto-revoke) is the remedy — the client can
+	// reconnect with a clean slate and sync-catchup. Default 10.
+	// 0 disables disconnect-on-drops (drops still counted, but the
+	// channel stays open — not recommended).
+	ConsecutiveDropDisconnectThreshold int `toml:"consecutive_drop_disconnect_threshold"`
+
+	// ErrorResponsesPerMinute is the Phase 17c Step 1 per-device cap
+	// on outbound error response volume. respondError consults this
+	// before sending; on exceed the error is silently dropped (no
+	// wire bytes, no log) and the per-device SignalErrorFlood
+	// counter increments — Phase 17b auto-revoke picks up
+	// cross-connection abusers via `[server.auto_revoke.thresholds]
+	// error_flood = "10:60"` (typical). Default 60 matches the
+	// downloads_per_minute cadence; bounds a legitimate burst
+	// (e.g. opening a busy room with stale epochs). 0 disables the
+	// check entirely.
+	ErrorResponsesPerMinute int `toml:"error_responses_per_minute"`
+	// AdminActionsPerMinute caps the rate at which a single user can issue
+	// in-group admin verbs (add_to_group, remove_from_group, promote_group_admin,
+	// demote_group_admin, rename_group) against a single group. Scoped per
+	// user per group so one noisy admin can't starve another group. Default
+	// 20/min is generous enough for any realistic kick-spree but tight enough
+	// to bound abuse. Server-initiated paths (retirement cascade, last-member
+	// cleanup) are exempt — this limit only applies to wire-level verbs.
+	AdminActionsPerMinute int `toml:"admin_actions_per_minute"`
+	// EditsPerMinute caps the rate at which a single user can issue
+	// message-edit verbs (edit, edit_group, edit_dm). Shared bucket per
+	// user across all three contexts — one bucket, not three — so a
+	// user can't bypass the limit by interleaving edits across rooms
+	// and DMs. Default 10/min is tight enough to bound abuse while
+	// generous enough for realistic typo fixes. Phase 15.
+	EditsPerMinute int `toml:"edits_per_minute"`
 }
 
 type ShutdownSection struct {
@@ -133,34 +273,53 @@ type FCMConfig struct {
 	ProjectID       string `toml:"project_id"`
 }
 
-// User represents a single user entry from users.toml.
-//
-// Retirement: When Retired is true, the account is permanently ended. The key
-// no longer authenticates, the user is removed from all rooms and DMs, and
-// other users see their messages in history marked [retired]. Retirement is
-// monotonic and irreversible at the protocol level — a retired account can
-// only be succeeded by a new account (same or different username) added by
-// an admin. See PROJECT.md "Account Retirement" for the full model.
-type User struct {
-	Key            string   `toml:"key"`
-	DisplayName    string   `toml:"display_name"`
-	Rooms          []string `toml:"rooms"`
-	Retired        bool     `toml:"retired,omitempty"`
-	RetiredAt      string   `toml:"retired_at,omitempty"`      // RFC3339 timestamp
-	RetiredReason  string   `toml:"retired_reason,omitempty"`  // self_compromise | admin | key_lost
-}
-
-// Room represents a single room entry from rooms.toml.
-type Room struct {
-	Topic string `toml:"topic"`
-}
-
 // DefaultServerConfig returns a ServerConfig with all defaults applied.
 func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
 		Server: ServerSection{
-			Port: 2222,
-			Bind: "0.0.0.0",
+			Port:                       2222,
+			Bind:                       "0.0.0.0",
+			AllowSelfLeaveRooms:        false, // explicit: admin-managed by default
+			AllowSelfLeaveRetiredRooms: true,  // explicit: retired-room cleanup allowed
+			AutoRevoke: AutoRevokeSection{
+				// Phase 17b default-on. See refactor_plan.md
+				// §Phase 17b for the "Single-stage shipping,
+				// default-on" rationale — every auto-revoke
+				// signal has a zero legitimate baseline so
+				// enabling by default does not false-positive
+				// legitimate clients. Operators disable via
+				// enabled = false + restart if unusual
+				// behavior occurs.
+				Enabled:         true,
+				PruneAfterHours: 168, // 7 days — comfortably exceeds the typical 60s window
+				Thresholds:      nil, // operator populates via [server.auto_revoke.thresholds]
+			},
+			Quotas: QuotasSection{
+				// Per-user upload quotas — default-on
+				// (revised 2026-04-19 same day after
+				// consistency review against Phase 17b
+				// auto-revoke + Phase 19 backups, both of
+				// which ship default-on with the same
+				// asymmetry-of-harm argument). Operators
+				// who don't want quotas set
+				// `[server.quotas.user] enabled = false`.
+				//
+				// AllowExemptUsers default false — the
+				// per-user `quota_exempt` escape hatch is
+				// admin-managed-by-default. Set
+				// `allow_exempt_users = true` in server.toml
+				// to enable `sshkey-ctl user quota-exempt
+				// <user> --on`. Mirrors the
+				// AllowSelfLeaveRooms = false pattern.
+				User: UserQuotaSection{
+					Enabled:               true,
+					AllowExemptUsers:      false,
+					DailyUploadBytesWarn:  "1GB",
+					DailyUploadBytesBlock: "5GB",
+					FlagConsecutiveDays:   2,
+					RetentionDays:         30,
+				},
+			},
 		},
 		Messages: MessagesSection{
 			MaxBodySize: "16KB",
@@ -174,26 +333,41 @@ func DefaultServerConfig() ServerConfig {
 			HistoryPageSize: 100,
 		},
 		Files: FilesSection{
-			MaxFileSize:       "50MB",
-			MaxAvatarSize:     "256KB",
-			AllowedAvatarTypes: []string{"image/png", "image/jpeg"},
+			MaxFileSize:          "50MB",
+			MaxAvatarSize:        "256KB",
+			AllowedAvatarTypes:   []string{"image/png", "image/jpeg"},
+			MaxFileIDsPerMessage: 20, // Phase 17 Step 4c: chat-app-appropriate ceiling
 		},
 		Devices: DevicesSection{
 			MaxPerUser: 10,
 		},
+		Groups: GroupsSection{
+			MaxMembers: 150, // Phase 17 Step 4d: matches pre-17 hardcoded cap + PROTOCOL.md
+		},
 		RateLimits: RateLimitsSection{
-			MessagesPerSecond:    5,
-			UploadsPerMinute:     60,
-			ConnectionsPerMinute: 20,
-			FailedAuthPerMinute:  5,
-			TypingPerSecond:      1,
-			HistoryPerMinute:     50,
+			MessagesPerSecond:     5,
+			UploadsPerMinute:      60,
+			ConnectionsPerMinute:  20,
+			FailedAuthPerMinute:   5,
+			TypingPerSecond:       1,
+			HistoryPerMinute:      50,
 			DeletesPerMinute:      10,
 			AdminDeletesPerMinute: 50,
 			ReactionsPerMinute:    30,
-			DMCreatesPerMinute:   5,
-			ProfilesPerMinute:    5,
-			PinsPerMinute:        10,
+			DMCreatesPerMinute:    5,
+			ProfilesPerMinute:     5,
+			PinsPerMinute:         10,
+			AdminActionsPerMinute: 20, // Phase 14: per user per group
+			EditsPerMinute:        10, // Phase 15: shared bucket per user across edit/edit_group/edit_dm
+			// Phase 17 Step 5: new rate-limit coverage
+			RoomMembersPerMinute:      6,  // info-panel refresh cadence
+			DeviceListPerMinute:       6,  // settings-panel refresh cadence
+			DownloadRequestsPerMinute: 60, // attachment-heavy chat tolerance
+			// Phase 17b Step 5b: per-client outbound queue
+			PerClientWriteBufferSize:           256, // ~50s of chatty-room traffic
+			ConsecutiveDropDisconnectThreshold: 10,  // disconnect slow readers
+			// Phase 17c Step 1: error-response rate limit per device
+			ErrorResponsesPerMinute: 60, // bounds legit error bursts; 0 disables
 		},
 		Shutdown: ShutdownSection{
 			GracePeriod: "10s",
@@ -205,206 +379,105 @@ func DefaultServerConfig() ServerConfig {
 			MaxFiles:  5,
 			Format:    "json",
 		},
+		Backup: BackupSection{
+			// Phase 19 default-on. See refactor_plan.md §Phase 19
+			// decision #11 for the asymmetry rationale — the cost
+			// of "wrong default on" is ~30KB of disk on an unused
+			// test server; the cost of "wrong default off" is
+			// total data loss on disk failure in production.
+			// skip_if_idle = true neutralizes the default-on
+			// cost on truly-idle deployments.
+			Enabled:            true,
+			Interval:           "24h",
+			DestDir:            "backups", // relative → <dataDir>/backups/
+			RetentionCount:     10,
+			RetentionAge:       "720h", // 30 days
+			Compress:           true,
+			SkipIfIdle:         true,
+			IncludeConfigFiles: true,
+		},
 	}
 }
 
 // LoadServerConfig reads and parses server.toml, applying defaults for missing fields.
+//
+// Phase 17b Step 1: calls ServerConfig.Validate() after decode. Validation
+// failures abort startup with a descriptive error; non-fatal warnings are
+// emitted via slog.Warn so operators see misconfigurations without hard-
+// failing startup.
 func LoadServerConfig(path string) (ServerConfig, error) {
 	cfg := DefaultServerConfig()
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
 		return cfg, fmt.Errorf("load server.toml: %w", err)
 	}
+	warnings, err := cfg.Validate()
+	if err != nil {
+		return cfg, fmt.Errorf("validate server.toml: %w", err)
+	}
+	for _, w := range warnings {
+		slog.Warn("server.toml validation warning", "message", w)
+	}
 	return cfg, nil
 }
 
-// LoadUsers reads and parses users.toml. Returns a map of username -> User.
-func LoadUsers(path string) (map[string]User, error) {
-	var raw map[string]User
-	if _, err := toml.DecodeFile(path, &raw); err != nil {
-		return nil, fmt.Errorf("load users.toml: %w", err)
-	}
-	return raw, nil
-}
-
-// WriteUsers writes the users map back to users.toml atomically (write to
-// temp file, then rename). Used by the retirement flow when the server needs
-// to persist a retirement flag set via the protocol.
+// Validate runs cross-section validation on a loaded ServerConfig.
+// Returns startup warnings (non-fatal; caller should surface to
+// operator) and hard errors (abort startup).
 //
-// Because the config directory is watched via fsnotify, this write will
-// trigger a reload. The reload is idempotent: the in-memory state is updated
-// first, so the reload loads the same state it finds in memory and computes
-// an empty diff.
-func WriteUsers(path string, users map[string]User) error {
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+// Phase 17b Step 1 adds [server.auto_revoke] validation.
+// Phase 19 Step 1 adds [backup] validation. Future cross-section
+// checks land here too.
+func (c ServerConfig) Validate() (warnings []string, err error) {
+	_, warn, err := c.Server.AutoRevoke.ParseAndValidate()
 	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
+		return nil, err
 	}
-	enc := toml.NewEncoder(f)
-	if err := enc.Encode(users); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return fmt.Errorf("encode users.toml: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("close temp file: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("rename temp file: %w", err)
-	}
-	return nil
-}
+	warnings = append(warnings, warn...)
 
-// LoadRooms reads and parses rooms.toml. Returns a map of room name -> Room.
-func LoadRooms(path string) (map[string]Room, error) {
-	var raw map[string]Room
-	if _, err := toml.DecodeFile(path, &raw); err != nil {
-		return nil, fmt.Errorf("load rooms.toml: %w", err)
+	_, warnBackup, err := c.Backup.ParseAndValidate()
+	if err != nil {
+		return nil, err
 	}
-	return raw, nil
+	warnings = append(warnings, warnBackup...)
+
+	// Per-user upload quotas (out-of-phase 2026-04-19, default-on).
+	// DefaultServerConfig populates Enabled=true + sensible defaults,
+	// so even an operator who omits the section entirely gets a
+	// validated config. Explicit `enabled = false` short-circuits
+	// validation and disables the feature. Invalid fields under
+	// Enabled=true → hard error.
+	if _, err := c.Server.Quotas.User.ParseAndValidate(); err != nil {
+		return nil, err
+	}
+
+	return warnings, nil
 }
 
 // Config holds all loaded configuration. Safe for concurrent reads via RLock/RUnlock.
+// The first admin on a fresh server is created via `sshkey-ctl bootstrap-admin`;
+// additional users join via the pending-keys + `sshkey-ctl approve` flow.
 type Config struct {
 	sync.RWMutex
 	Server ServerConfig
-	Users  map[string]User
-	Rooms  map[string]Room
 	Dir    string // config directory path
 }
 
 // Load reads all config files from the given directory.
+// Only server.toml is read; the first admin is created via
+// `sshkey-ctl bootstrap-admin`.
 func Load(dir string) (*Config, error) {
 	serverPath := filepath.Join(dir, "server.toml")
-	usersPath := filepath.Join(dir, "users.toml")
-	roomsPath := filepath.Join(dir, "rooms.toml")
 
 	server, err := LoadServerConfig(serverPath)
 	if err != nil {
 		return nil, err
 	}
 
-	users, err := LoadUsers(usersPath)
-	if err != nil {
-		return nil, err
-	}
-
-	rooms, err := LoadRooms(roomsPath)
-	if err != nil {
-		return nil, err
-	}
-
-	// Validate: all user room assignments reference existing rooms.
-	// Retired users' room lists are ignored (should be empty; stale entries
-	// are tolerated so admin mis-edits don't block server startup).
-	for username, user := range users {
-		if user.Retired {
-			continue
-		}
-		for _, room := range user.Rooms {
-			if _, ok := rooms[room]; !ok {
-				return nil, fmt.Errorf("user %q references unknown room %q", username, room)
-			}
-		}
-	}
-
-	// Validate: all admin users exist and are not retired
-	for _, admin := range server.Server.Admins {
-		u, ok := users[admin]
-		if !ok {
-			return nil, fmt.Errorf("admin %q not found in users.toml", admin)
-		}
-		if u.Retired {
-			return nil, fmt.Errorf("admin %q is retired — remove from server.toml admins or un-retire", admin)
-		}
-	}
-
-	// Validate: all user keys are Ed25519 and parseable
-	// (retired users are still required to have a valid key — it's preserved
-	// for historical attribution and auditability; it just doesn't authenticate)
-	for username, user := range users {
-		if len(user.Key) == 0 {
-			return nil, fmt.Errorf("user %q has no key", username)
-		}
-		if !isEd25519Key(user.Key) {
-			return nil, fmt.Errorf("user %q: only Ed25519 keys are supported (got %q)", username, keyType(user.Key))
-		}
-		if err := validateSSHKey(user.Key); err != nil {
-			return nil, fmt.Errorf("user %q: invalid SSH key: %w", username, err)
-		}
-	}
-
 	return &Config{
 		Server: server,
-		Users:  users,
-		Rooms:  rooms,
 		Dir:    dir,
 	}, nil
 }
-
-// isEd25519Key checks if the key string starts with ssh-ed25519.
-func isEd25519Key(key string) bool {
-	return len(key) > 11 && key[:11] == "ssh-ed25519"
-}
-
-// keyType extracts the key type prefix from an SSH public key string.
-func keyType(key string) string {
-	for i, c := range key {
-		if c == ' ' {
-			return key[:i]
-		}
-	}
-	return key
-}
-
-// validateSSHKey checks that the key string can be parsed as a valid SSH public key.
-func validateSSHKey(key string) error {
-	_, err := parseSSHKey(key)
-	return err
-}
-
-// parseSSHKey parses an SSH authorized_key format string.
-func parseSSHKey(key string) ([]byte, error) {
-	fields := splitFields(key)
-	if len(fields) < 2 {
-		return nil, fmt.Errorf("invalid key format")
-	}
-	// Decode the base64 key data to validate it
-	data, err := base64Decode(fields[1])
-	if err != nil {
-		return nil, fmt.Errorf("invalid base64 in key: %w", err)
-	}
-	return data, nil
-}
-
-// splitFields splits a string on whitespace (simple, no allocation for small fields).
-func splitFields(s string) []string {
-	var fields []string
-	start := -1
-	for i, c := range s {
-		if c == ' ' || c == '\t' {
-			if start >= 0 {
-				fields = append(fields, s[start:i])
-				start = -1
-			}
-		} else if start < 0 {
-			start = i
-		}
-	}
-	if start >= 0 {
-		fields = append(fields, s[start:])
-	}
-	return fields
-}
-
-// base64Decode decodes standard base64.
-func base64Decode(s string) ([]byte, error) {
-	return base64Std.DecodeString(s)
-}
-
-var base64Std = base64.StdEncoding
 
 // EnsureDataDir creates the data directory if it doesn't exist.
 func EnsureDataDir(path string) error {

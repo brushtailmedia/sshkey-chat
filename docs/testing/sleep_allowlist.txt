@@ -1,0 +1,20 @@
+# Baseline allowlist for existing test time.Sleep callsites.
+# Format:
+#   path:line | owner | rationale
+
+cmd/sshkey-server/main_test.go:237 | phase22 | server startup handshake stabilization in integration harness
+cmd/sshkey-server/main_test.go:535 | phase22 | reconnect propagation timing in integration flow
+cmd/sshkey-server/main_test.go:1133 | phase22 | multi-device propagation stabilization in integration flow
+cmd/sshkey-server/main_test.go:1586 | phase22 | retirement write-out ordering window before cutoff assertion
+internal/counters/counters_test.go:210 | phase22 | wall-clock expiry boundary assertion
+internal/server/backup_scheduler_test.go:256 | phase22 | scheduler tick timing verification
+internal/server/backup_scheduler_test.go:260 | phase22 | scheduler tick timing verification
+internal/server/backup_scheduler_test.go:561 | phase22 | wait for async scheduler side-effect
+internal/server/idle_watchdog_test.go:98 | phase22 | watchdog goroutine scheduling window
+internal/server/idle_watchdog_test.go:136 | phase22 | watchdog timeout boundary
+internal/server/idle_watchdog_test.go:164 | phase22 | watchdog timeout boundary
+internal/server/idle_watchdog_test.go:189 | phase22 | intentional single tick wait
+internal/server/idle_watchdog_test.go:232 | phase22 | watchdog timeout boundary
+internal/server/send_queue_test.go:117 | phase22 | queue/writer goroutine interleave window
+internal/server/send_queue_test.go:347 | phase22 | queue/writer goroutine interleave window
+internal/store/room_deletion_test.go:59 | phase22 | fs timestamp granularity boundary in deletion test

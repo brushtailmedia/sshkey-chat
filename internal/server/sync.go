@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
@@ -43,25 +44,31 @@ func (s *Server) sendSync(c *Client, lastSyncedAt string) {
 		sinceTS = windowCutoff
 	}
 
-	s.cfg.RLock()
-	rooms := s.cfg.Users[c.Username].Rooms
-	s.cfg.RUnlock()
+	rooms := s.store.GetUserRoomIDs(c.UserID)
 
 	// Sync room messages
-	for _, room := range rooms {
-		s.syncRoom(c, room, sinceTS, windowMessages)
+	for _, roomID := range rooms {
+		s.syncRoom(c, roomID, sinceTS, windowMessages)
 	}
 
-	// Sync DM conversations
-	convs, err := s.store.GetUserConversations(c.Username)
+	// Sync group DMs
+	groups, err := s.store.GetUserGroups(c.UserID)
 	if err == nil {
-		for _, conv := range convs {
-			s.syncConversation(c, conv.ID, sinceTS, windowMessages)
+		for _, g := range groups {
+			s.syncGroup(c, g.ID, sinceTS, windowMessages)
+		}
+	}
+
+	// Sync 1:1 DMs
+	dms, dmErr := s.store.GetDirectMessagesForUser(c.UserID)
+	if dmErr == nil {
+		for _, dm := range dms {
+			s.syncDM(c, dm.ID, sinceTS, windowMessages)
 		}
 	}
 
 	// Update device sync watermark
-	s.store.UpdateDeviceSync(c.Username, c.DeviceID)
+	s.store.UpdateDeviceSync(c.UserID, c.DeviceID)
 
 	c.Encoder.Encode(protocol.SyncComplete{
 		Type:     "sync_complete",
@@ -69,17 +76,21 @@ func (s *Server) sendSync(c *Client, lastSyncedAt string) {
 	})
 }
 
-// syncRoom sends a sync batch for a single room.
-func (s *Server) syncRoom(c *Client, room string, sinceTS int64, limit int) {
+// syncRoom sends a sync batch for a single room. Phase 20 extended
+// this to pack room_events (leave / join / topic / rename / retire)
+// alongside messages, mirroring syncGroup's event packing. Both use
+// the same first_seen gate so pre-join audit is never served.
+func (s *Server) syncRoom(c *Client, roomID string, sinceTS int64, limit int) {
 	// Apply first_seen filter — new users only see post-join messages
-	firstSeen, firstEpoch, _ := s.store.GetUserRoom(c.Username, room)
+	// AND post-join audit events (Phase 20). Same gate covers both.
+	firstSeen, firstEpoch, _ := s.store.GetUserRoom(c.UserID, roomID)
 	if firstSeen > 0 && firstSeen > sinceTS {
 		sinceTS = firstSeen
 	}
 
-	msgs, err := s.store.GetRoomMessagesSince(room, sinceTS, limit)
+	msgs, err := s.store.GetRoomMessagesSince(roomID, sinceTS, limit)
 	if err != nil {
-		s.logger.Error("sync room failed", "room", room, "error", err)
+		s.logger.Error("sync room failed", "room", roomID, "error", err)
 		return
 	}
 
@@ -94,7 +105,17 @@ func (s *Server) syncRoom(c *Client, room string, sinceTS int64, limit int) {
 		msgs = filtered
 	}
 
-	if len(msgs) == 0 {
+	// Phase 20: fetch room_events for replay. Events are unencrypted
+	// metadata (server-authored audit — see encryption_boundaries
+	// memory note) so there's no first_epoch filter; the first_seen
+	// gate above is sufficient.
+	events, eventsErr := s.store.GetRoomEventsSince(roomID, sinceTS)
+	if eventsErr != nil {
+		s.logger.Error("sync room events failed", "room", roomID, "error", eventsErr)
+		events = nil
+	}
+
+	if len(msgs) == 0 && len(events) == 0 {
 		return
 	}
 
@@ -103,11 +124,11 @@ func (s *Server) syncRoom(c *Client, room string, sinceTS int64, limit int) {
 	var epochKeys []protocol.SyncEpochKey
 
 	if minEpoch > 0 || maxEpoch > 0 {
-		keys, err := s.store.GetEpochKeysForUser(room, c.Username, minEpoch, maxEpoch)
+		keys, err := s.store.GetEpochKeysForUser(roomID, c.UserID, minEpoch, maxEpoch)
 		if err == nil {
 			for epoch, wrappedKey := range keys {
 				epochKeys = append(epochKeys, protocol.SyncEpochKey{
-					Room:       room,
+					Room:       roomID,
 					Epoch:      epoch,
 					WrappedKey: wrappedKey,
 				})
@@ -116,31 +137,161 @@ func (s *Server) syncRoom(c *Client, room string, sinceTS int64, limit int) {
 	}
 
 	// Convert to protocol messages
-	protoMsgs := storedToRawMessages(msgs, room, "")
+	protoMsgs := storedToRawMessages(msgs, roomID, "")
 
 	// Fetch reactions for these messages
 	var protoReactions []json.RawMessage
 	if msgIDs := collectMessageIDs(msgs); len(msgIDs) > 0 {
-		if reactions, err := s.store.GetRoomReactionsForMessages(room, msgIDs); err == nil && len(reactions) > 0 {
-			protoReactions = storedReactionsToRaw(reactions, room, "")
+		if reactions, err := s.store.GetRoomReactionsForMessages(roomID, msgIDs); err == nil && len(reactions) > 0 {
+			protoReactions = storedReactionsToRaw(reactions, roomID, "")
 		}
+	}
+
+	// Phase 20: pack room_events into SyncBatch.Events so the client
+	// replays audit entries through the same dispatch path used for
+	// live room_event broadcasts.
+	var protoEvents []json.RawMessage
+	if len(events) > 0 {
+		protoEvents = roomEventsToRaw(events, roomID)
 	}
 
 	c.Encoder.Encode(protocol.SyncBatch{
 		Type:      "sync_batch",
 		Messages:  protoMsgs,
 		Reactions: protoReactions,
+		Events:    protoEvents,
 		EpochKeys: epochKeys,
 		Page:      1,
 		HasMore:   false,
 	})
 }
 
-// syncConversation sends a sync batch for a single DM conversation.
-func (s *Server) syncConversation(c *Client, convID string, sinceTS int64, limit int) {
-	msgs, err := s.store.GetConvMessagesSince(convID, sinceTS, limit)
+// roomEventsToRaw converts per-room group_events rows to protocol
+// RoomEvent raw messages for inclusion in SyncBatch.Events. Mirror of
+// groupEventsToRaw for rooms. Phase 20.
+func roomEventsToRaw(events []store.GroupEventRow, roomID string) []json.RawMessage {
+	result := make([]json.RawMessage, 0, len(events))
+	for _, e := range events {
+		msg := protocol.RoomEvent{
+			Type:   "room_event",
+			Room:   roomID,
+			Event:  e.Event,
+			User:   e.User,
+			By:     e.By,
+			Reason: e.Reason,
+			Name:   e.Name,
+		}
+		data, err := json.Marshal(msg)
+		if err != nil {
+			continue
+		}
+		result = append(result, data)
+	}
+	return result
+}
+
+// syncGroup sends a sync batch for a single group DM. Phase 14 extended
+// this to also pack group_events (admin actions) alongside messages and
+// reactions so clients that were offline during admin changes catch up
+// on the event stream via sync_batch. The events table and messages
+// table both live inside the per-group DB file, both use INTEGER unix
+// second timestamps, and both are queried by the same sinceTS — one
+// watermark, two data sources.
+//
+// A group may have new events even when no new messages exist (e.g. an
+// admin /rename'd the group but nobody sent anything since), so the
+// early return is gated on BOTH message count AND event count.
+func (s *Server) syncGroup(c *Client, groupID string, sinceTS int64, limit int) {
+	// Apply joined_at filter — new members only see post-join messages
+	// and events. Mirrors syncRoom's first_seen gate. The wrapped-key
+	// crypto model already prevents a new member from DECRYPTING pre-join
+	// messages, but the server must also not SERVE them: timestamps,
+	// sender IDs, and event replay (pre-join /promote, /rename, /kick
+	// audit entries) are social-graph metadata leaks even without
+	// plaintext. One raise here covers both branches of the sync batch
+	// (GetGroupMessagesSince and GetGroupEventsSince) — both use the same
+	// sinceTS watermark, so the filter is free on the events side.
+	joinedAt, _ := s.store.GetUserGroupJoinedAt(c.UserID, groupID)
+	if joinedAt > 0 && joinedAt > sinceTS {
+		sinceTS = joinedAt
+	}
+
+	msgs, err := s.store.GetGroupMessagesSince(groupID, sinceTS, limit)
 	if err != nil {
-		s.logger.Error("sync conversation failed", "conversation", convID, "error", err)
+		s.logger.Error("sync group failed", "group", groupID, "error", err)
+		return
+	}
+
+	// Phase 14: fetch recent group_events for replay. Best-effort — event
+	// replay failures do not block the message sync path.
+	events, eventsErr := s.store.GetGroupEventsSince(groupID, sinceTS)
+	if eventsErr != nil {
+		s.logger.Error("sync group events failed", "group", groupID, "error", eventsErr)
+		// Fall through — we still want to deliver messages even if events
+		// couldn't be fetched.
+		events = nil
+	}
+
+	if len(msgs) == 0 && len(events) == 0 {
+		return
+	}
+
+	// Group DMs carry their own wrapped keys -- no epoch_keys needed
+	protoMsgs := storedToRawMessages(msgs, "", groupID)
+
+	var protoReactions []json.RawMessage
+	if msgIDs := collectMessageIDs(msgs); len(msgIDs) > 0 {
+		if reactions, err := s.store.GetGroupReactionsForMessages(groupID, msgIDs); err == nil && len(reactions) > 0 {
+			protoReactions = storedReactionsToRaw(reactions, "", groupID)
+		}
+	}
+
+	var protoEvents []json.RawMessage
+	if len(events) > 0 {
+		protoEvents = groupEventsToRaw(events, groupID)
+	}
+
+	c.Encoder.Encode(protocol.SyncBatch{
+		Type:      "sync_batch",
+		Messages:  protoMsgs,
+		Reactions: protoReactions,
+		Events:    protoEvents,
+		EpochKeys: nil,
+		Page:      1,
+		HasMore:   false,
+	})
+}
+
+// groupEventsToRaw converts per-group group_events rows to protocol
+// GroupEvent raw messages for inclusion in SyncBatch.Events. Clients
+// route each entry through the same dispatch path used for live
+// group_event broadcasts, so persisted replay and live delivery produce
+// identical local state.
+func groupEventsToRaw(events []store.GroupEventRow, groupID string) []json.RawMessage {
+	result := make([]json.RawMessage, 0, len(events))
+	for _, e := range events {
+		msg := protocol.GroupEvent{
+			Type:   "group_event",
+			Group:  groupID,
+			Event:  e.Event,
+			User:   e.User,
+			By:     e.By,
+			Reason: e.Reason,
+			Name:   e.Name,
+			Quiet:  e.Quiet,
+		}
+		data, _ := json.Marshal(msg)
+		result = append(result, json.RawMessage(data))
+	}
+	return result
+}
+
+// syncDM sends a sync batch for a single 1:1 DM, respecting the per-user
+// history cutoff. After the cutoff, the leaver sees nothing.
+func (s *Server) syncDM(c *Client, dmID string, sinceTS int64, limit int) {
+	msgs, err := s.store.GetDMMessagesSince(dmID, c.UserID, sinceTS, limit)
+	if err != nil {
+		s.logger.Error("sync DM failed", "dm", dmID, "error", err)
 		return
 	}
 
@@ -148,13 +299,22 @@ func (s *Server) syncConversation(c *Client, convID string, sinceTS int64, limit
 		return
 	}
 
-	// DMs carry their own wrapped keys -- no epoch_keys needed
-	protoMsgs := storedToRawMessages(msgs, "", convID)
+	// 1:1 DMs carry their own wrapped keys -- no epoch_keys needed
+	protoMsgs := storedToRawDMMessages(msgs, dmID)
 
 	var protoReactions []json.RawMessage
 	if msgIDs := collectMessageIDs(msgs); len(msgIDs) > 0 {
-		if reactions, err := s.store.GetConvReactionsForMessages(convID, msgIDs); err == nil && len(reactions) > 0 {
-			protoReactions = storedReactionsToRaw(reactions, "", convID)
+		if reactions, err := s.store.GetDMReactionsForMessages(dmID, msgIDs); err == nil && len(reactions) > 0 {
+			protoReactions = storedReactionsToRaw(reactions, "", "")
+			// Patch DM field onto each reaction (storedReactionsToRaw takes room/group)
+			for i := range protoReactions {
+				var r protocol.Reaction
+				if json.Unmarshal(protoReactions[i], &r) == nil {
+					r.DM = dmID
+					data, _ := json.Marshal(r)
+					protoReactions[i] = data
+				}
+			}
 		}
 	}
 
@@ -168,16 +328,55 @@ func (s *Server) syncConversation(c *Client, convID string, sinceTS int64, limit
 	})
 }
 
+// storedToRawDMMessages converts stored messages to protocol DM raw messages.
+func storedToRawDMMessages(msgs []store.StoredMessage, dmID string) []json.RawMessage {
+	result := make([]json.RawMessage, 0, len(msgs))
+	for _, m := range msgs {
+		var data []byte
+		if m.Deleted {
+			tombstone := protocol.Deleted{
+				Type:      "deleted",
+				ID:        m.ID,
+				DeletedBy: m.Sender,
+				TS:        m.TS,
+				DM:        dmID,
+			}
+			data, _ = json.Marshal(tombstone)
+		} else {
+			msg := protocol.DM{
+				Type:        "dm",
+				ID:          m.ID,
+				From:        m.Sender,
+				DM:          dmID,
+				TS:          m.TS,
+				WrappedKeys: m.WrappedKeys,
+				Payload:     m.Payload,
+				FileIDs:     m.FileIDs,
+				Signature:   m.Signature,
+				EditedAt:    m.EditedAt, // Phase 15
+			}
+			data, _ = json.Marshal(msg)
+		}
+		result = append(result, json.RawMessage(data))
+	}
+	return result
+}
+
 // handleHistory processes a history (scroll-back) request.
 func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
-	if !s.limiter.allowPerMinute("history:"+c.Username, s.cfg.Server.RateLimits.HistoryPerMinute) {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many requests — wait a moment"})
+	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("history:"+c.UserID, s.cfg.Server.RateLimits.HistoryPerMinute); !allowed {
+		s.rejectAndLog(c, counters.SignalRateLimited, "history", "history rate limit exceeded",
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many requests — wait a moment", RetryAfterMs: retryMs})
 		return
 	}
 
 	var req protocol.History
 	if err := json.Unmarshal(raw, &req); err != nil {
-		c.Encoder.Encode(protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed history"})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "history", "malformed history frame",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed history"})
+		return
+	}
+	if !s.validateCorrIDOrReject(c, "history", req.CorrID) {
 		return
 	}
 
@@ -195,21 +394,9 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 
 	if req.Room != "" {
 		// Verify access
-		s.cfg.RLock()
-		user := s.cfg.Users[c.Username]
-		s.cfg.RUnlock()
-		inRoom := false
-		for _, r := range user.Rooms {
-			if r == req.Room {
-				inRoom = true
-				break
-			}
-		}
+		inRoom := s.store != nil && s.store.IsRoomMemberByID(req.Room, c.UserID)
 		if !inRoom {
-			c.Encoder.Encode(protocol.Error{
-				Type: "error", Code: protocol.ErrNotAuthorized,
-				Message: "You don't have access to room: " + req.Room,
-			})
+			s.respondError(c, req.CorrID, protocol.ErrNotAuthorized, "You don't have access to room: "+req.Room, 0)
 			return
 		}
 
@@ -220,7 +407,7 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 		}
 
 		// Apply first_seen/first_epoch filter
-		firstSeen, firstEpoch, _ := s.store.GetUserRoom(c.Username, req.Room)
+		firstSeen, firstEpoch, _ := s.store.GetUserRoom(c.UserID, req.Room)
 		if firstSeen > 0 || firstEpoch > 0 {
 			filtered := msgs[:0]
 			for _, m := range msgs {
@@ -244,7 +431,7 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 		var epochKeys []protocol.SyncEpochKey
 		if len(msgs) > 0 {
 			minEpoch, maxEpoch := store.GetEpochRange(msgs)
-			keys, err := s.store.GetEpochKeysForUser(req.Room, c.Username, minEpoch, maxEpoch)
+			keys, err := s.store.GetEpochKeysForUser(req.Room, c.UserID, minEpoch, maxEpoch)
 			if err == nil {
 				for epoch, wrappedKey := range keys {
 					epochKeys = append(epochKeys, protocol.SyncEpochKey{
@@ -270,22 +457,72 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 			Reactions: roomReactions,
 			EpochKeys: epochKeys,
 			HasMore:   hasMore,
+			CorrID:    req.CorrID, // Phase 17c
 		})
 
-	} else if req.Conversation != "" {
+	} else if req.Group != "" {
 		// Verify membership
-		isMember, err := s.store.IsConversationMember(req.Conversation, c.Username)
+		isMember, err := s.store.IsGroupMember(req.Group, c.UserID)
 		if err != nil || !isMember {
-			c.Encoder.Encode(protocol.Error{
-				Type: "error", Code: protocol.ErrUnknownConversation,
-				Message: "You are not a member of this conversation",
-			})
+			s.respondError(c, req.CorrID, protocol.ErrUnknownGroup, "You are not a member of this group", 0)
 			return
 		}
 
-		msgs, err := s.store.GetConvMessagesBefore(req.Conversation, req.Before, limit+1)
+		msgs, err := s.store.GetGroupMessagesBefore(req.Group, req.Before, limit+1)
 		if err != nil {
-			s.logger.Error("history failed", "conversation", req.Conversation, "error", err)
+			s.logger.Error("history failed", "group", req.Group, "error", err)
+			return
+		}
+
+		// Apply joined_at filter — post-query filter (not sinceTS raise)
+		// because GetGroupMessagesBefore is id+limit shaped, not
+		// timestamp-shaped. Mirrors the rooms history branch which does
+		// the same post-filter on first_seen/first_epoch. Messages at
+		// exactly joined_at are kept (strict less-than).
+		joinedAt, _ := s.store.GetUserGroupJoinedAt(c.UserID, req.Group)
+		if joinedAt > 0 {
+			filtered := msgs[:0]
+			for _, m := range msgs {
+				if m.TS < joinedAt {
+					continue
+				}
+				filtered = append(filtered, m)
+			}
+			msgs = filtered
+		}
+
+		hasMore := len(msgs) > limit
+		if hasMore {
+			msgs = msgs[:limit]
+		}
+
+		var groupReactions []json.RawMessage
+		if msgIDs := collectMessageIDs(msgs); len(msgIDs) > 0 {
+			if reactions, err := s.store.GetGroupReactionsForMessages(req.Group, msgIDs); err == nil && len(reactions) > 0 {
+				groupReactions = storedReactionsToRaw(reactions, "", req.Group)
+			}
+		}
+
+		c.Encoder.Encode(protocol.HistoryResult{
+			Type:      "history_result",
+			Group:     req.Group,
+			Messages:  storedToRawMessages(msgs, "", req.Group),
+			Reactions: groupReactions,
+			HasMore:   hasMore,
+			CorrID:    req.CorrID, // Phase 17c
+		})
+
+	} else if req.DM != "" {
+		// Verify caller is a party to this DM
+		dm, err := s.store.GetDirectMessage(req.DM)
+		if err != nil || dm == nil || (dm.UserA != c.UserID && dm.UserB != c.UserID) {
+			s.respondError(c, req.CorrID, protocol.ErrUnknownDM, "You are not a party to this DM", 0)
+			return
+		}
+
+		msgs, err := s.store.GetDMMessagesBeforeForUser(req.DM, c.UserID, req.Before, limit+1)
+		if err != nil {
+			s.logger.Error("history failed", "dm", req.DM, "error", err)
 			return
 		}
 
@@ -294,19 +531,29 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 			msgs = msgs[:limit]
 		}
 
-		var convReactions []json.RawMessage
+		var dmReactions []json.RawMessage
 		if msgIDs := collectMessageIDs(msgs); len(msgIDs) > 0 {
-			if reactions, err := s.store.GetConvReactionsForMessages(req.Conversation, msgIDs); err == nil && len(reactions) > 0 {
-				convReactions = storedReactionsToRaw(reactions, "", req.Conversation)
+			if reactions, err := s.store.GetDMReactionsForMessages(req.DM, msgIDs); err == nil && len(reactions) > 0 {
+				dmReactions = storedReactionsToRaw(reactions, "", "")
+				// Patch DM field
+				for i := range dmReactions {
+					var r protocol.Reaction
+					if json.Unmarshal(dmReactions[i], &r) == nil {
+						r.DM = req.DM
+						data, _ := json.Marshal(r)
+						dmReactions[i] = data
+					}
+				}
 			}
 		}
 
 		c.Encoder.Encode(protocol.HistoryResult{
-			Type:         "history_result",
-			Conversation: req.Conversation,
-			Messages:     storedToRawMessages(msgs, "", req.Conversation),
-			Reactions:    convReactions,
-			HasMore:      hasMore,
+			Type:      "history_result",
+			DM:        req.DM,
+			Messages:  storedToRawDMMessages(msgs, req.DM),
+			Reactions: dmReactions,
+			HasMore:   hasMore,
+			CorrID:    req.CorrID, // Phase 17c
 		})
 	}
 }
@@ -325,15 +572,15 @@ func collectMessageIDs(msgs []store.StoredMessage) []string {
 }
 
 // storedReactionsToRaw converts stored reactions to protocol Reaction raw messages.
-func storedReactionsToRaw(reactions []store.StoredReaction, room, conversation string) []json.RawMessage {
+func storedReactionsToRaw(reactions []store.StoredReaction, roomID, groupID string) []json.RawMessage {
 	result := make([]json.RawMessage, 0, len(reactions))
 	for _, r := range reactions {
 		msg := protocol.Reaction{
 			Type:        "reaction",
 			ReactionID:  r.ReactionID,
 			ID:          r.MessageID,
-			Room:        room,
-			Conversation: conversation,
+			Room:        roomID,
+			Group:       groupID,
 			User:        r.User,
 			TS:          r.TS,
 			Epoch:       r.Epoch,
@@ -347,7 +594,7 @@ func storedReactionsToRaw(reactions []store.StoredReaction, room, conversation s
 	return result
 }
 
-func storedToRawMessages(msgs []store.StoredMessage, room, conversation string) []json.RawMessage {
+func storedToRawMessages(msgs []store.StoredMessage, roomID, groupID string) []json.RawMessage {
 	result := make([]json.RawMessage, 0, len(msgs))
 
 	for _, m := range msgs {
@@ -355,38 +602,40 @@ func storedToRawMessages(msgs []store.StoredMessage, room, conversation string) 
 
 		if m.Deleted {
 			tombstone := protocol.Deleted{
-				Type:         "deleted",
-				ID:           m.ID,
-				DeletedBy:    m.Sender, // sender field repurposed for deleted_by on tombstones
-				TS:           m.TS,
-				Room:         room,
-				Conversation: conversation,
+				Type:      "deleted",
+				ID:        m.ID,
+				DeletedBy: m.Sender, // sender field repurposed for deleted_by on tombstones
+				TS:        m.TS,
+				Room:      roomID,
+				Group:     groupID,
 			}
 			data, _ = json.Marshal(tombstone)
-		} else if room != "" {
+		} else if roomID != "" {
 			msg := protocol.Message{
 				Type:      "message",
 				ID:        m.ID,
 				From:      m.Sender,
-				Room:      room,
+				Room:      roomID,
 				TS:        m.TS,
 				Epoch:     m.Epoch,
 				Payload:   m.Payload,
 				FileIDs:   m.FileIDs,
 				Signature: m.Signature,
+				EditedAt:  m.EditedAt, // Phase 15: 0 on unedited rows (omitempty)
 			}
 			data, _ = json.Marshal(msg)
 		} else {
-			msg := protocol.DM{
-				Type:         "dm",
-				ID:           m.ID,
-				From:         m.Sender,
-				Conversation: conversation,
-				TS:           m.TS,
-				WrappedKeys:  m.WrappedKeys,
-				Payload:      m.Payload,
-				FileIDs:      m.FileIDs,
-				Signature:    m.Signature,
+			msg := protocol.GroupMessage{
+				Type:        "group_message",
+				ID:          m.ID,
+				From:        m.Sender,
+				Group:       groupID,
+				TS:          m.TS,
+				WrappedKeys: m.WrappedKeys,
+				Payload:     m.Payload,
+				FileIDs:     m.FileIDs,
+				Signature:   m.Signature,
+				EditedAt:    m.EditedAt, // Phase 15
 			}
 			data, _ = json.Marshal(msg)
 		}

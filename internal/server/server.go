@@ -2,7 +2,6 @@
 package server
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
@@ -11,16 +10,25 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
+	"github.com/brushtailmedia/sshkey-chat/internal/counters"
+	"github.com/brushtailmedia/sshkey-chat/internal/lockfile"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/push"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
+
+// lockfileName is the filename (inside dataDir) of the server process
+// lockfile. Phase 19 Step 2 — prevents double-start on the same dataDir
+// and gates `sshkey-ctl restore` from running against a live server.
+// CLI consumers read the file at the same path.
+const lockfileName = "sshkey-server.pid"
 
 // Server is the sshkey-chat SSH server.
 type Server struct {
@@ -38,9 +46,157 @@ type Server struct {
 	listener net.Listener
 	dataDir  string
 
-	mu       sync.RWMutex
-	clients  map[string]*Client // device_id -> Client
+	// counters tracks per-(signal, device) rejection events for
+	// observability and (via Phase 17b) the auto-revoke sliding-window
+	// policy. Introduced in Phase 17 Step 2. Written by rejectAndLog
+	// from every Step 4-6 rejection site; read by Phase 17b's threshold
+	// checker (not yet implemented) and by `counters.Snapshot()` for
+	// tests / future admin tooling. In-memory only — no persistence; a
+	// server bounce resets all counts.
+	counters *counters.Counters
+
+	mu      sync.RWMutex
+	clients map[string]*Client // device_id -> Client
+
+	// dmCleanupMu serializes 1:1 DM cleanup against handleCreateDM. When
+	// both parties leave a DM, handleLeaveDM holds this mutex while it
+	// deletes the row + dm-<id>.db file. Concurrent handleCreateDM calls
+	// fail-fast with ErrServerBusy via TryLock so the client can retry,
+	// avoiding the race where dedup returns a row that is about to be
+	// (or has just been) deleted.
+	dmCleanupMu sync.Mutex
+
+	// roomRetirementStop signals the room retirement processor goroutine
+	// to stop. Closed by Close() during shutdown. The processor polls
+	// pending_room_retirements every roomRetirementPollInterval and
+	// broadcasts room_retired to connected members for each queued row.
+	// The queue + polling pattern exists because sshkey-ctl runs locally
+	// on the server box only — it cannot send protocol messages to the
+	// running server, so CLI → server coordination happens via shared
+	// SQLite tables. Phase 12.
+	roomRetirementStop chan struct{}
+
+	// userRetirementStop is the user-level analog of roomRetirementStop.
+	// Closed by Close() during shutdown. The processor polls
+	// pending_user_retirements every userRetirementPollInterval and
+	// runs handleRetirement for each queued row (per-room leaves,
+	// group exits with last-admin succession, DM cutoffs, the
+	// user_retired broadcast, and active session termination). Same
+	// queue + polling pattern as room retirement. Phase 16 Gap 1.
+	userRetirementStop chan struct{}
+
+	// userUnretirementStop is the inverse of userRetirementStop —
+	// signals the unretirement processor to stop. Closed by Close()
+	// during shutdown. The processor polls pending_user_unretirements
+	// and broadcasts user_unretired so connected clients flush the
+	// [retired] marker from their profile cache. Phase 16 Gap 1.
+	userUnretirementStop chan struct{}
+
+	// adminStateChangeStop signals the shared promote/demote/rename-user
+	// processor to stop. Closed by Close() during shutdown. The
+	// processor polls pending_admin_state_changes and broadcasts a
+	// fresh protocol.Profile event for each row so connected clients
+	// pick up admin badge changes and display name renames live.
+	// Phase 16 Gap 1.
+	adminStateChangeStop chan struct{}
+
+	// roomUpdateStop signals the shared update-topic/rename-room
+	// processor to stop. Closed by Close() during shutdown. The
+	// processor polls pending_room_updates and broadcasts a fresh
+	// room_updated event to members of the affected room so they
+	// pick up topic and display name changes live. Phase 16 Gap 1.
+	roomUpdateStop chan struct{}
+
+	// deviceRevocationStop signals the revoke-device processor to
+	// stop. Closed by Close() during shutdown. The processor polls
+	// pending_device_revocations and terminates any active SSH
+	// session matching (user, device) — different shape from the
+	// other Phase 16 Gap 1 processors because it operates on live
+	// session state rather than broadcasting a state change.
+	// Phase 16 Gap 1.
+	deviceRevocationStop chan struct{}
+
+	// removeFromRoomStop signals the remove-from-room processor to
+	// stop. Closed by Close() during shutdown. The processor drains
+	// the pending_remove_from_room queue and dispatches each row
+	// through performRoomLeave (removes from members, writes the
+	// user_left_rooms history row, records the room_event audit,
+	// broadcasts room_event{leave}, echoes room_left, and marks for
+	// epoch rotation). Phase 20 (Option D) split this queue out from
+	// the previously dual-purpose user_left_rooms table — see
+	// refactor_plan.md.
+	removeFromRoomStop chan struct{}
+
+	// autoRevokeStop signals the auto-revoke processor to stop.
+	// Closed by Close() during shutdown. The processor evaluates
+	// configured [server.auto_revoke] thresholds against the
+	// counter sliding windows every autoRevokePollInterval and
+	// enqueues revocations into pending_device_revocations for
+	// devices that cross. Different shape from the Phase 16 Gap 1
+	// processors: this one WRITES into an existing queue rather
+	// than draining a dedicated one. Phase 17b.
+	autoRevokeStop chan struct{}
+
+	// stateFixMu guards stateFixLast.
+	stateFixMu sync.Mutex
+
+	// stateFixLast (Phase 17c Step 4 Category B) tracks the last
+	// state-fix push time per (deviceID, verb) key. Prevents a
+	// client from DoS'ing the server via invalid_epoch spam that
+	// would elicit a fresh epoch_key push on every error. 1s TTL:
+	// repeated pushes within 1s are no-ops; the client's retry
+	// logic applies the previous push.
+	stateFixLast map[string]int64
+
+	// backupSchedulerStop signals the backup scheduler goroutine
+	// to stop. Closed by Close() during shutdown. The scheduler
+	// runs backup.Run on a configurable interval (default 24h)
+	// alongside the 7 Phase 16 Gap 1 processors. Phase 19 Step 5.
+	backupSchedulerStop chan struct{}
+
+	// backupMu serializes scheduler ticks against manual
+	// `sshkey-ctl backup` invocations within the same process AND
+	// against subsequent scheduler ticks (long-running backup
+	// against a small interval). Acquired via TryLock — losing
+	// contender skips this tick rather than queueing.
+	//
+	// Cross-process contention (server scheduler vs. CLI in
+	// another shell) is NOT covered by this mutex — that would
+	// need a file lock on dest_dir. In practice the CLI and
+	// scheduler producing tarballs simultaneously is harmless
+	// (different timestamps, no filename collision; SQLite Online
+	// Backup tolerates concurrent readers). The mutex's job is to
+	// stop two backups in the same process from racing on the
+	// same staging dir + temp file path.
+	backupMu sync.Mutex
+
+	// backupSkipState tracks the data.db PRAGMA data_version and
+	// the max mtime of data/files/ at the time of the last
+	// successful backup. The next scheduler tick compares current
+	// values against these; if both are unchanged AND
+	// skip_if_idle is true, the tick is skipped. In-memory only —
+	// after restart the first scheduler tick always runs (a
+	// restart often coincides with deployment changes worth
+	// snapshotting). Phase 19 Step 5.
+	backupSkipState backupSkipState
 }
+
+// backupSkipState is the per-Server state used by the skip_if_idle
+// check. Reset on Server start (in-memory only).
+type backupSkipState struct {
+	mu              sync.Mutex
+	initialized     bool
+	lastDataVersion int64
+	lastFilesMtime  time.Time
+}
+
+// roomRetirementPollInterval is how often the room retirement
+// processor checks the pending_room_retirements queue. Five seconds is
+// fine because the retirement takes effect at the data layer
+// immediately (CLI mutates rooms.db directly via SetRoomRetired) — this
+// polling interval just determines the live-notification latency for
+// connected members.
+const roomRetirementPollInterval = 5 * time.Second
 
 // New creates a new server with the given config and data directory.
 func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, error) {
@@ -50,13 +206,30 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 	}
 
 	s := &Server{
-		cfg:     cfg,
-		logger:  logger,
-		epochs:  newEpochManager(),
-		limiter: newRateLimiter(),
-		clients: make(map[string]*Client),
-		dataDir: dir,
+		cfg:                  cfg,
+		logger:               logger,
+		epochs:               newEpochManager(),
+		limiter:              newRateLimiter(),
+		counters:             counters.New(),
+		clients:              make(map[string]*Client),
+		dataDir:              dir,
+		roomRetirementStop:   make(chan struct{}),
+		userRetirementStop:   make(chan struct{}),
+		userUnretirementStop: make(chan struct{}),
+		adminStateChangeStop: make(chan struct{}),
+		roomUpdateStop:       make(chan struct{}),
+		deviceRevocationStop: make(chan struct{}),
+		removeFromRoomStop:   make(chan struct{}),
+		autoRevokeStop:       make(chan struct{}),
+		stateFixLast:         make(map[string]int64),
+		backupSchedulerStop:  make(chan struct{}),
 	}
+
+	// Phase 17b Step 4: propagate prune_after_hours from config to
+	// the counters package. Sets the stale-entry TTL that drives
+	// opportunistic pruning + Get/Snapshot/DevicesFor stale-filter.
+	// 0 disables pruning (entries persist until restart).
+	s.counters.SetTTLHours(cfg.Server.Server.AutoRevoke.PruneAfterHours)
 
 	// Open storage if data directory provided
 	if dir != "" {
@@ -68,9 +241,42 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		s.files = newFileManager(dir)
 		s.audit = newAuditLog(dir)
 
+		// Empty-users.db warning: fire at startup so a fresh deploy
+		// has a visible signal in the logs pointing at the next step.
+		// Without this, an operator sees "server started" and no error,
+		// but every SSH connection silently lands in pending-keys.log
+		// with no admin to triage it. Non-fatal — the server still
+		// runs; bootstrap-admin can be invoked any time.
+		if st.UsersDBEmpty() {
+			logger.Warn("no users in users.db — run `sshkey-ctl bootstrap-admin <name>` against the data directory to create the first admin; the server will accept no logins until an admin exists",
+				"data_dir", dir,
+			)
+		}
+
 		// Remove orphan files from crashed uploads (files on disk with
 		// no hash record in the DB — they never completed successfully)
 		s.cleanOrphanFiles()
+
+		// Prune old per-user daily upload quota rows (out-of-phase
+		// 2026-04-19, originally Phase 25). No-op when quotas are
+		// disabled in config. Same family as cleanOrphanFiles —
+		// bounded maintenance, runs once at startup.
+		s.pruneOldQuotaRows()
+
+		// Phase 19 Step 2: write the server-process lockfile. Refuses
+		// to start if another server instance is running against this
+		// dataDir (double-start protection). Stale lockfiles from prior
+		// crashes are overwritten automatically — the Write path does
+		// the PID-alive check internally.
+		//
+		// The lockfile gates `sshkey-ctl restore` from running against
+		// a live server (primary purpose) and powers reliable
+		// running-vs-not reporting in `sshkey-ctl status`. Removed on
+		// graceful shutdown via Server.Close.
+		lockPath := filepath.Join(dir, lockfileName)
+		if err := lockfile.Write(lockPath); err != nil {
+			return nil, fmt.Errorf("lockfile: %w", err)
+		}
 	}
 
 	// Initialize push relay (nil if not configured)
@@ -108,6 +314,93 @@ func (s *Server) ListenAndServe() error {
 	// Start config file watcher
 	s.watchConfig()
 
+	// Start the room retirement processor (Phase 12). Polls
+	// pending_room_retirements every roomRetirementPollInterval and
+	// broadcasts room_retired to connected members of each
+	// newly-retired room. On startup, runs one immediate consume pass
+	// before entering the ticker loop to handle any rows that were
+	// queued while the server was down.
+	s.processPendingRoomRetirements()
+	go s.runRoomRetirementProcessor()
+
+	// Start the user retirement processor (Phase 16 Gap 1). Polls
+	// pending_user_retirements every userRetirementPollInterval and
+	// runs handleRetirement (per-room leaves, group exits, DM cutoffs,
+	// user_retired broadcast, active session termination) for each
+	// queued row. Same architectural pattern as the room retirement
+	// processor above, applied to user retirements queued via
+	// sshkey-ctl retire-user. Immediate consume pass on startup
+	// catches any rows queued while the server was down.
+	s.processPendingUserRetirements()
+	go s.runUserRetirementProcessor()
+
+	// Start the user unretirement processor (Phase 16 Gap 1).
+	// Inverse of the retirement processor — drains
+	// pending_user_unretirements and broadcasts user_unretired so
+	// connected clients flush the [retired] marker from their
+	// profile cache. Immediate consume pass + ticker loop, same
+	// shape as every other Phase 16 Gap 1 processor.
+	s.processPendingUserUnretirements()
+	go s.runUserUnretirementProcessor()
+
+	// Start the admin state change processor (Phase 16 Gap 1).
+	// Shared by promote, demote, and rename-user — drains
+	// pending_admin_state_changes and broadcasts a fresh
+	// protocol.Profile event for each row so connected clients
+	// pick up admin badge changes and display name renames live.
+	// Critical for the support story that relies on members-list
+	// admin badges being current.
+	s.processPendingAdminStateChanges()
+	go s.runAdminStateChangeProcessor()
+
+	// Start the room updates processor (Phase 16 Gap 1). Shared by
+	// update-topic and rename-room — drains pending_room_updates
+	// and broadcasts a fresh room_updated event to members of the
+	// affected room. Closes Phase 18's deferred topic-write path:
+	// topic changes via CLI now propagate to connected clients
+	// immediately instead of only on next reconnect.
+	s.processPendingRoomUpdates()
+	go s.runRoomUpdatesProcessor()
+
+	// Start the device revocation processor (Phase 16 Gap 1).
+	// Drains pending_device_revocations and terminates any active
+	// SSH session matching the (user, device) pair. Different shape
+	// from the broadcast processors above: this one operates on
+	// live session state (open SSH channels), not on persisted
+	// protocol state. The data-layer revocation already happened
+	// before enqueue; the processor's job is to kick the live
+	// session.
+	s.processPendingDeviceRevocations()
+	go s.runDeviceRevocationProcessor()
+
+	// Start the remove-from-room processor (Phase 16 Gap 1, restructured
+	// in Phase 20). Drains the pending_remove_from_room queue and
+	// dispatches each row through performRoomLeave (which writes the
+	// user_left_rooms history row for Phase 20 catchup as a side effect).
+	s.processPendingRemoveFromRoom()
+	go s.runRemoveFromRoomProcessor()
+
+	// Start the auto-revoke processor (Phase 17b). Evaluates
+	// configured [server.auto_revoke] thresholds against counter
+	// sliding windows every autoRevokePollInterval. Enqueues
+	// revocations for devices that cross; the existing
+	// runDeviceRevocationProcessor drains them. Goroutine starts
+	// unconditionally — observer mode (enabled=false) keeps the
+	// loop running and logs "auto_revoke_would_fire" without
+	// enqueuing, so operators can diagnose false positives with
+	// the breaker disarmed.
+	go s.runAutoRevokeProcessor()
+
+	// Start the backup scheduler goroutine (Phase 19 Step 5).
+	// Runs internal/backup.Run on a configurable interval (default
+	// 24h) with retention pruning. Skipped if [backup].enabled =
+	// false (the scheduler logs and returns immediately, the
+	// goroutine just exits — manual `sshkey-ctl backup` still works
+	// regardless of the enabled flag). 60-second startup grace
+	// period before the first immediate backup so the server has
+	// time to settle before the IO spike.
+	go s.runBackupScheduler()
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -138,6 +431,46 @@ func (s *Server) ListenAndServe() error {
 }
 
 // Close shuts down the server gracefully.
+// Store returns the underlying Store. Used by tests that need to seed
+// or inspect persistent state directly without going through the
+// protocol surface.
+func (s *Server) Store() *store.Store {
+	return s.store
+}
+
+// CounterSnapshotForTesting returns the current per-signal counter map.
+// Exposed for integration-test assertions that need to verify launch-gate
+// "no misbehavior signals" contracts against a running server instance.
+func (s *Server) CounterSnapshotForTesting() map[string]map[string]int64 {
+	if s == nil || s.counters == nil {
+		return map[string]map[string]int64{}
+	}
+	return s.counters.Snapshot()
+}
+
+// CounterIncForTesting increments a counter entry directly. This is test-only
+// plumbing used by integration tests that need to drive the auto-revoke
+// pipeline across all signals without crafting one protocol-level trigger
+// frame per signal.
+func (s *Server) CounterIncForTesting(signal, deviceID string) {
+	if s == nil || s.counters == nil {
+		return
+	}
+	s.counters.Inc(signal, deviceID)
+}
+
+// ProcessAutoRevokeForTesting runs a single synchronous auto-revoke evaluation
+// tick. Exposed so integration tests don't need to sleep for poll intervals.
+func (s *Server) ProcessAutoRevokeForTesting() {
+	s.processAutoRevoke()
+}
+
+// ProcessPendingDeviceRevocationsForTesting drains pending revocations once.
+// Integration tests use this to deterministically kick sessions immediately.
+func (s *Server) ProcessPendingDeviceRevocationsForTesting() {
+	s.processPendingDeviceRevocations()
+}
+
 func (s *Server) Close() error {
 	// Audit
 	if s.audit != nil {
@@ -157,16 +490,114 @@ func (s *Server) Close() error {
 		}
 	}
 
-	// Broadcast shutdown to all connected clients
+	// Stop the room retirement processor goroutine
+	if s.roomRetirementStop != nil {
+		select {
+		case <-s.roomRetirementStop:
+			// already closed
+		default:
+			close(s.roomRetirementStop)
+		}
+	}
+
+	// Stop the user retirement processor goroutine (Phase 16 Gap 1)
+	if s.userRetirementStop != nil {
+		select {
+		case <-s.userRetirementStop:
+			// already closed
+		default:
+			close(s.userRetirementStop)
+		}
+	}
+
+	// Stop the user unretirement processor goroutine (Phase 16 Gap 1)
+	if s.userUnretirementStop != nil {
+		select {
+		case <-s.userUnretirementStop:
+			// already closed
+		default:
+			close(s.userUnretirementStop)
+		}
+	}
+
+	// Stop the admin state change processor goroutine (Phase 16 Gap 1)
+	if s.adminStateChangeStop != nil {
+		select {
+		case <-s.adminStateChangeStop:
+			// already closed
+		default:
+			close(s.adminStateChangeStop)
+		}
+	}
+
+	// Stop the room updates processor goroutine (Phase 16 Gap 1)
+	if s.roomUpdateStop != nil {
+		select {
+		case <-s.roomUpdateStop:
+			// already closed
+		default:
+			close(s.roomUpdateStop)
+		}
+	}
+
+	// Stop the device revocation processor goroutine (Phase 16 Gap 1)
+	if s.deviceRevocationStop != nil {
+		select {
+		case <-s.deviceRevocationStop:
+			// already closed
+		default:
+			close(s.deviceRevocationStop)
+		}
+	}
+
+	// Stop the remove-from-room processor goroutine (Phase 16 Gap 1)
+	if s.removeFromRoomStop != nil {
+		select {
+		case <-s.removeFromRoomStop:
+			// already closed
+		default:
+			close(s.removeFromRoomStop)
+		}
+	}
+
+	// Stop the auto-revoke processor goroutine (Phase 17b)
+	if s.autoRevokeStop != nil {
+		select {
+		case <-s.autoRevokeStop:
+			// already closed
+		default:
+			close(s.autoRevokeStop)
+		}
+	}
+
+	// Stop the backup scheduler goroutine (Phase 19 Step 5).
+	// In-flight backup is NOT cancelled — backup.Run does not
+	// honor a context for the per-DB Step loop, and aborting
+	// mid-tarball would leave a partial in dest_dir (the temp
+	// file would survive the process exit). Letting the current
+	// tick finish is harmless and correct.
+	if s.backupSchedulerStop != nil {
+		select {
+		case <-s.backupSchedulerStop:
+			// already closed
+		default:
+			close(s.backupSchedulerStop)
+		}
+	}
+
+	// Broadcast shutdown to all connected clients.
+	// Phase 17 Step 3: lock-release pattern.
 	s.mu.RLock()
+	targets := make([]*Client, 0, len(s.clients))
 	for _, client := range s.clients {
-		client.Encoder.Encode(protocol.ServerShutdown{
-			Type:        "server_shutdown",
-			Message:     "Server shutting down",
-			ReconnectIn: 10,
-		})
+		targets = append(targets, client)
 	}
 	s.mu.RUnlock()
+	s.fanOut("server_shutdown", protocol.ServerShutdown{
+		Type:        "server_shutdown",
+		Message:     "Server shutting down",
+		ReconnectIn: 10,
+	}, targets)
 
 	// Wait grace period for in-flight operations
 	gracePeriod := 10 * time.Second
@@ -184,10 +615,22 @@ func (s *Server) Close() error {
 			firstErr = err
 		}
 	}
+
+	// Phase 19 Step 2: remove the lockfile as the last action. A crash
+	// mid-shutdown leaves the file in place; the next startup's
+	// stale-PID check handles it. Only graceful shutdown reaches this
+	// line. Done AFTER store.Close so the store is already flushed
+	// when the lockfile disappears — an observer following the
+	// lockfile state knows the DBs are consistent.
+	if s.dataDir != "" {
+		if err := lockfile.Remove(filepath.Join(s.dataDir, lockfileName)); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	return firstErr
 }
 
-// authenticateKey validates an SSH public key against users.toml.
+// authenticateKey validates an SSH public key against users.db.
 // Only Ed25519 keys are accepted.
 func (s *Server) authenticateKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 	// Failed auth rate limiting per IP
@@ -211,18 +654,17 @@ func (s *Server) authenticateKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh
 		return nil, fmt.Errorf("only Ed25519 keys are supported, got %s", key.Type())
 	}
 
-	s.cfg.RLock()
-	defer s.cfg.RUnlock()
+	// Look up user by SSH public key in users.db
+	pubKeyStr := string(ssh.MarshalAuthorizedKey(key))
+	pubKeyStr = strings.TrimSpace(pubKeyStr) // strip trailing newline
 
-	for username, user := range s.cfg.Users {
-		parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(user.Key))
-		if err != nil {
-			continue
-		}
-		if bytes.Equal(key.Marshal(), parsed.Marshal()) {
-			if user.Retired {
+	if s.store != nil {
+		userID := s.store.GetUserByKey(pubKeyStr)
+		if userID != "" {
+			if s.store.IsUserRetired(userID) {
+				user := s.store.GetUserByID(userID)
 				s.logger.Info("rejected retired account login",
-					"user", username,
+					"user", userID,
 					"fingerprint", ssh.FingerprintSHA256(key),
 					"remote", conn.RemoteAddr().String(),
 					"retired_at", user.RetiredAt,
@@ -231,20 +673,34 @@ func (s *Server) authenticateKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh
 				return nil, fmt.Errorf("account retired")
 			}
 			s.logger.Info("key authenticated",
-				"user", username,
+				"user", userID,
 				"fingerprint", ssh.FingerprintSHA256(key),
 				"remote", conn.RemoteAddr().String(),
 			)
 			return &ssh.Permissions{
 				Extensions: map[string]string{
-					"username": username,
+					"username": userID,
 				},
 			}, nil
 		}
 	}
 
-	// Unknown key -- log to pending
+	// Phase 16: check the fingerprint block list before writing to
+	// pending_keys. Blocked fingerprints are silently rejected with
+	// the same generic error ("key not authorized") as unknown keys,
+	// so a probing client cannot distinguish "blocked" from "not
+	// approved yet." This prevents the pending queue from
+	// accumulating spam from repeatedly-connecting attackers.
 	fingerprint := ssh.FingerprintSHA256(key)
+	if s.store != nil && s.store.IsFingerprintBlocked(fingerprint) {
+		s.logger.Info("blocked fingerprint rejected",
+			"fingerprint", fingerprint,
+			"remote", conn.RemoteAddr().String(),
+		)
+		return nil, fmt.Errorf("key not authorized")
+	}
+
+	// Unknown key -- log to pending
 	s.logger.Info("unknown key rejected",
 		"fingerprint", fingerprint,
 		"remote", conn.RemoteAddr().String(),
@@ -262,7 +718,7 @@ func (s *Server) logPendingKey(fingerprint, remote string) {
 	if s.store != nil {
 		// Check if this key has been seen before
 		var existing int
-		s.store.UsersDB().QueryRow(
+		s.store.DataDB().QueryRow(
 			`SELECT attempts FROM pending_keys WHERE fingerprint = ?`,
 			fingerprint).Scan(&existing)
 		if existing > 0 {
@@ -270,7 +726,7 @@ func (s *Server) logPendingKey(fingerprint, remote string) {
 		}
 
 		// Upsert — increment attempt counter
-		s.store.UsersDB().Exec(`
+		s.store.DataDB().Exec(`
 			INSERT INTO pending_keys (fingerprint, remote_addr)
 			VALUES (?, ?)
 			ON CONFLICT (fingerprint) DO UPDATE SET
@@ -282,7 +738,7 @@ func (s *Server) logPendingKey(fingerprint, remote string) {
 		// Only notify admin on first attempt
 		if isFirstAttempt {
 			var firstSeen string
-			s.store.UsersDB().QueryRow(
+			s.store.DataDB().QueryRow(
 				`SELECT first_seen FROM pending_keys WHERE fingerprint = ?`,
 				fingerprint).Scan(&firstSeen)
 
@@ -294,9 +750,16 @@ func (s *Server) logPendingKey(fingerprint, remote string) {
 				FirstSeen:   firstSeen,
 			})
 
-			// Append to flat log file only on first attempt
-			dataDir := filepath.Join(filepath.Dir(s.cfg.Dir), "data")
-			logPath := filepath.Join(dataDir, "pending-keys.log")
+			// Append to flat log file only on first attempt.
+			// Keep this path aligned with sshkey-ctl pending:
+			// <dataDir>/data/pending-keys.log.
+			baseDir := s.dataDir
+			if baseDir == "" {
+				// Defensive fallback for tests that construct Server
+				// without a dataDir.
+				baseDir = filepath.Dir(s.cfg.Dir)
+			}
+			logPath := filepath.Join(baseDir, "data", "pending-keys.log")
 			f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
 			if err != nil {
 				s.logger.Error("failed to open pending-keys.log", "error", err)
@@ -310,21 +773,16 @@ func (s *Server) logPendingKey(fingerprint, remote string) {
 
 // notifyAdmins sends a message to all connected admin clients.
 func (s *Server) notifyAdmins(msg any) {
-	s.cfg.RLock()
-	adminSet := make(map[string]bool, len(s.cfg.Server.Server.Admins))
-	for _, a := range s.cfg.Server.Server.Admins {
-		adminSet[a] = true
-	}
-	s.cfg.RUnlock()
-
+	// Phase 17 Step 3: lock-release pattern.
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	var targets []*Client
 	for _, client := range s.clients {
-		if adminSet[client.Username] {
-			client.Encoder.Encode(msg)
+		if s.store != nil && s.store.IsAdmin(client.UserID) {
+			targets = append(targets, client)
 		}
 	}
+	s.mu.RUnlock()
+	s.fanOut("admin_notify", msg, targets)
 }
 
 // handleConnection processes a new SSH connection through the full lifecycle.
@@ -339,9 +797,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 		return
 	}
 
-	username := sshConn.Permissions.Extensions["username"]
+	userID := sshConn.Permissions.Extensions["username"]
 	s.logger.Info("connect",
-		"user", username,
+		"user", userID,
 		"remote", sshConn.RemoteAddr().String(),
 	)
 
@@ -384,7 +842,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 		ch, chReqs, err := newCh.Accept()
 		if err != nil {
-			s.logger.Error("channel accept failed", "user", username, "error", err)
+			s.logger.Error("channel accept failed", "user", userID, "error", err)
 			continue
 		}
 		go ssh.DiscardRequests(chReqs)
@@ -393,20 +851,20 @@ func (s *Server) handleConnection(conn net.Conn) {
 		switch channelNum {
 		case 1:
 			// Channel 1: NDJSON protocol
-			go s.handleSession(username, sshConn, ch, dlChanCh)
+			go s.handleSession(userID, sshConn, ch, dlChanCh)
 		case 2:
 			// Channel 2: downloads — server writes here; no reader needed
 			dlChanCh <- ch
 		case 3:
 			// Channel 3: uploads — server reads upload frames here
-			go s.handleBinaryChannel(username, ch)
+			go s.handleBinaryChannel(userID, ch)
 		default:
 			ch.Close()
 		}
 	}
 
 	s.logger.Info("disconnect",
-		"user", username,
+		"user", userID,
 		"remote", sshConn.RemoteAddr().String(),
 	)
 }

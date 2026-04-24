@@ -1,39 +1,337 @@
+# sshkey-chat server configuration — reference file.
+#
+# Every knob documented below carries its default value and a comment
+# explaining the trade-off when tuning. Commented-out entries show the
+# default; uncomment to override.
+
+# ----------------------------------------------------------------------
+# [server] — SSH listener + server policy
+# ----------------------------------------------------------------------
+
 [server]
 port = 2222
 bind = "0.0.0.0"
-admins = ["admin"]
+
+# Room /leave policy. Default false: rooms are admin-managed and users
+# cannot self-leave (membership changes go through sshkey-ctl). Set true
+# to let users run /leave in rooms; the server then broadcasts a
+# room_event leave to remaining members and marks the room for epoch
+# rotation. Hot-reloadable.
+allow_self_leave_rooms = false
+
+# Whether users can clean up retired rooms from their sidebar via /delete.
+# Default true because retired rooms are read-only — there's no membership
+# decision to preserve, and users should be able to remove dead rooms from
+# their view without admin intervention.
+allow_self_leave_retired_rooms = true
+
+# ----------------------------------------------------------------------
+# [server.auto_revoke] — auto-revoke on sustained misbehavior
+# ----------------------------------------------------------------------
+#
+# The auto-revoke breaker watches per-device counters for misbehavior
+# signals (malformed frames, invalid identifiers, oversized envelopes,
+# etc.) and revokes a device that crosses the configured threshold
+# within the configured window.
+#
+# Every auto-revoke signal has a zero legitimate baseline — a
+# well-behaved client produces ZERO of them during normal operation.
+# Tight thresholds (2-5 events in 60s) are the right default because
+# any volume above that is conclusive evidence of a broken or hostile
+# client. See docs/ops/auto_revoke.md for the full operator guide
+# including monitoring, disable procedure, and device restoration.
+#
+# Revoked devices are restored via `sshkey-ctl restore-device --user
+# USER --device DEV`. The SSH key itself is unaffected — only the
+# specific device_id is blocked. Admins retain structural access via
+# OS-level SSH to the server host, so a misconfigured breaker never
+# traps an admin out of the system.
+
+[server.auto_revoke]
+# Enable the breaker. Default true — ships secure.
+# Set false to run in observer mode: the goroutine continues evaluating
+# thresholds and logs "auto_revoke_would_fire" (Info level) showing what
+# WOULD fire, but does not enqueue revocations. Use during initial
+# observation or while diagnosing a suspected false-positive storm.
+enabled = true
+
+# TTL for stale counter entries. When a device hasn't generated any
+# counter event for this many hours, its entry becomes eligible for
+# opportunistic pruning (evicted on the next new-entry Inc in the
+# counters package). Must strictly exceed the largest configured
+# threshold window (converted to hours, rounded up). 0 disables
+# TTL-based pruning entirely — entries persist until server restart.
+prune_after_hours = 168  # 7 days
+
+# Per-signal thresholds. Format: "count:window_seconds". Omit a key to
+# disable checking for that signal.
+#
+# Signal keys must match counters.Signal* constant string values
+# (snake_case). Adding a new signal in the counters package auto-accepts
+# it here — no config-loader code change needed. Unknown keys, load
+# signals (rate_limited), and observational signals (broadcast_dropped)
+# are rejected at startup with category-tagged errors.
+[server.auto_revoke.thresholds]
+# Protocol-layer misbehavior — tight thresholds for zero-baseline
+# signals. Raise only if client bug storms force operator intervention.
+malformed_frame        = "3:60"   # malformed JSON / decode failures
+oversized_body         = "2:60"   # payload exceeds max_body_size
+unknown_verb           = "5:60"   # unknown protocol verb
+invalid_nanoid         = "5:60"   # malformed room/group/dm ID shape
+invalid_content_hash   = "3:60"   # upload_start content_hash malformed
+oversized_upload_frame = "2:60"   # Channel 3 frame exceeds limits
+
+# Envelope caps — oversized wrapped_keys / file_ids arrays.
+wrapped_keys_over_cap  = "2:60"
+file_ids_over_cap      = "2:60"
+
+# Access violations — requests to contexts the client is not a
+# member of, or attacking the download path.
+non_member_context     = "5:60"
+download_not_found     = "5:60"   # covers ACL-deny + cascade race + I/O error
+download_no_channel    = "3:60"   # client sent download before opening Ch2
+
+# Connection hardening.
+reconnect_flood        = "10:60"  # device thrashing session setup
+
+# ----------------------------------------------------------------------
+# [server.quotas.user] — per-user daily upload quotas
+# ----------------------------------------------------------------------
+#
+# Out-of-phase 2026-04-19, originally Phase 25. Layered on top of the
+# Phase 17 Step 5 [rate_limits] uploads_per_minute bucket — that one
+# bounds bytes/minute; this one bounds bytes/day. Complementary, not
+# redundant.
+#
+# When a user's running daily byte total (UTC calendar day, reset at
+# UTC midnight) crosses daily_upload_bytes_warn the server fires
+# admin_notify event = "quota_warn" exactly once per (user, date). If
+# the user also crossed warn on the prior flag_consecutive_days days
+# (strict contiguous), the event upgrades to "quota_sustained" with
+# bytes_yesterday + consecutive_days fields. When an upload would push
+# the total past daily_upload_bytes_block the server rejects with
+# upload-error code "daily_quota_exceeded" AND fires admin_notify
+# event = "quota_block". The check fires at TWO points: upload_start
+# (early reject before any Channel 3 bytes stream) and upload_complete
+# (TOCTOU defense for concurrent uploads from the same user that
+# individually pass the start check but collectively cross the block —
+# the partial file is unlinked on rejection). See PROTOCOL.md
+# "Per-user upload quota events" for the wire-format payload samples.
+#
+# Default-on for the same asymmetry-of-harm reason as [server.auto_revoke]
+# and [backup]: a chat server with no upload cap can have a single
+# misbehaving (or compromised) device rapidly fill the disk; the
+# default cap rejects that scenario with a clear error. Operators
+# running file-share-style deployments that legitimately need higher
+# caps tune the values up or set enabled = false.
+#
+# Operators investigate quota events via:
+#   sshkey-ctl quota-report [--days N] [--top M]   # top users by recent volume
+#   sshkey-ctl user quota-exempt <user_id> --on    # bypass for service accounts
+
+[server.quotas.user]
+# Enable the feature. Default true. Set false to disable all quota
+# enforcement: no DB reads on the upload path, no admin_notify, no
+# checks, no startup retention prune.
+enabled = true
+
+# Gate the per-user `quota_exempt` escape hatch. Default false —
+# admin-managed-by-default (mirrors the [server] allow_self_leave_rooms
+# = false pattern). When false:
+#   - `sshkey-ctl user quota-exempt <user> --on` is rejected at the CLI
+#     with a pointer to this knob.
+#   - The server runtime ignores `users.quota_exempt = 1` and enforces
+#     the quota on every user, regardless of any stale exempt flag left
+#     in the DB from a prior config.
+# `--off` from the CLI is always allowed so operators can clean up
+# existing exempt flags after flipping this gate to false. Set true
+# only when you have a deliberate use case for quota-exempt service
+# accounts / power users — exempting a user bypasses the daily upload
+# cap entirely.
+allow_exempt_users = false
+
+# Soft warn threshold — first time today's running total crosses this,
+# admin_notify fires once per (user, date). Idempotent via the
+# warn_notified column on the daily_upload_quotas row.
+daily_upload_bytes_warn = "1GB"
+
+# Hard cap — uploads that would push today's total past this are
+# rejected with daily_quota_exceeded. Must be strictly greater than
+# daily_upload_bytes_warn (validation rejects reversed thresholds at
+# startup with a category-tagged error).
+daily_upload_bytes_block = "5GB"
+
+# Consecutive days at-or-above warn that fire admin_notify
+# "quota_sustained" instead of plain "quota_warn". Strict contiguous —
+# a single day under warn breaks the streak. Default 2 catches the
+# "user is steadily over warn day after day" pattern operators want
+# to know about.
+flag_consecutive_days = 2
+
+# Retention for daily_upload_quotas rows. Pruned at server startup
+# alongside the orphan-file cleanup. Must be >= flag_consecutive_days
+# so the consecutive-days check has enough history. 30 days is plenty
+# for the operator-investigation use case; raise only if you want
+# longer-term per-user volume reports.
+retention_days = 30
+
+# ----------------------------------------------------------------------
+# [messages]
+# ----------------------------------------------------------------------
 
 [messages]
 max_body_size = "16KB"
 
+# ----------------------------------------------------------------------
+# [retention]
+# ----------------------------------------------------------------------
+
 [retention]
-purge_days = 0
+purge_days = 0      # 0 = keep forever
+
+# ----------------------------------------------------------------------
+# [sync]
+# ----------------------------------------------------------------------
 
 [sync]
 window_messages = 200
 window_days = 7
 history_page_size = 100
 
+# ----------------------------------------------------------------------
+# [files] — attachment limits
+# ----------------------------------------------------------------------
+
 [files]
-max_file_size = "50MB"                  # increase with care — see grace_period below
+max_file_size = "50MB"                           # increase with care — see grace_period below
 max_avatar_size = "256KB"
 allowed_avatar_types = ["image/png", "image/jpeg"]
+
+# Phase 17 Step 4c: envelope-level file_ids[] cap at message-send time.
+# Defends against crafted messages that reference an unbounded number
+# of attachment IDs. Default 20 matches the WhatsApp batch-send ceiling
+# and sits comfortably above typical chat use. Raise only for
+# deployments that grow a legitimate multi-attach UX requiring more
+# than 20 files per message.
+max_file_ids_per_message = 20
+
+# ----------------------------------------------------------------------
+# [devices]
+# ----------------------------------------------------------------------
 
 [devices]
 max_per_user = 10
 
+# ----------------------------------------------------------------------
+# [groups] — group DM policy
+# ----------------------------------------------------------------------
+
+[groups]
+# Phase 17 Step 4d: hard cap on group-DM membership. Enforced at
+# create_group and add_to_group; also the upper bound on the
+# wrapped_keys envelope size the server will accept. Default 150
+# matches the pre-Phase-17 hardcoded value and PROTOCOL.md
+# documentation. At 150 members, each send carries ~12KB of per-message
+# wrapped-key material and ~15ms of per-member crypto. Smaller
+# deployments can tune down; larger deployments with hardware to match
+# can tune up.
+max_members = 150
+
+# ----------------------------------------------------------------------
+# [rate_limits] — per-user traffic shaping + connection hardening
+# ----------------------------------------------------------------------
+
 [rate_limits]
+# Message-send bucket (per second).
 messages_per_second = 5
+
+# Uploads: one token bucket per user, per-minute refill.
 uploads_per_minute = 60
+
+# Connection-open rate, per remote IP. Defense against connect floods
+# at the TCP/SSH layer before auth runs.
 connections_per_minute = 10
+
+# Failed-auth rate, per remote IP. Stops brute-force SSH key probing.
 failed_auth_per_minute = 5
+
+# Typing notifications — these fire continuously when users type, so
+# per-second granularity suppresses spam while allowing natural typing.
 typing_per_second = 1
+
+# History scroll-back pagination.
 history_per_minute = 50
+
+# Delete verbs (own messages + admin delete).
+deletes_per_minute = 10
+admin_deletes_per_minute = 50
+
+# Reactions: higher ceiling because reaction storms (🎉 on announcement
+# messages) are legitimate.
+reactions_per_minute = 30
+
+# DM creation — new 1:1 DM conversations + group DM creation.
+dm_creates_per_minute = 5
+
+# Profile updates (display name, avatar).
+profiles_per_minute = 5
+
+# Pin/unpin verbs.
+pins_per_minute = 10
+
+# Phase 14: admin verb rate limit. Applies to add_to_group,
+# remove_from_group, promote_group_admin, demote_group_admin,
+# rename_group — per user per group. Server-initiated paths
+# (retirement cascade, last-member cleanup) are exempt.
+admin_actions_per_minute = 20
+
+# Phase 15: message editing verb rate limit. Shared bucket per user
+# across edit / edit_group / edit_dm so a user can't bypass the limit
+# by interleaving across contexts.
+edits_per_minute = 10
+
+# Phase 17 Step 5: refresh-verb coverage.
+room_members_per_minute = 6   # info-panel refresh cadence (one every 10s)
+device_list_per_minute = 6    # settings-panel device refresh cadence
+download_requests_per_minute = 60  # attachment-heavy chat view tolerance
+
+# ----- Phase 17b connection hardening -----
+
+# Phase 17b Step 5a: NDJSON idle-timeout watchdog. If a connection
+# sends no complete protocol frame for this many seconds, the server
+# closes its SSH channel. 0 disables (default) — operators tune post-
+# launch once legitimate quiet-user idle patterns are observed.
+# Slow-loris defense; SSH-layer keepalive (30s) already kills dead
+# TCP connections independently.
+idle_timeout_seconds = 0
+
+# Phase 17b Step 5b: per-client outbound message queue size. Broadcasts
+# (fanOut) enqueue non-blocking into each recipient's queue; a slow
+# reader whose queue fills incurs drops rather than blocking the
+# broadcast for other recipients. Default 256 absorbs ~50 seconds of a
+# chatty room's traffic. Memory budget: size × active connections.
+per_client_write_buffer_size = 256
+
+# Phase 17b Step 5b: consecutive-drop disconnect threshold. After this
+# many consecutive full-queue drops to the same client, the server
+# closes their SSH channel. Disconnect (not auto-revoke) is the remedy
+# — the client reconnects with a clean slate and sync-catchup. 0
+# disables disconnect-on-drops (drops still counted via
+# SignalBroadcastDropped, but channel stays open — not recommended).
+consecutive_drop_disconnect_threshold = 10
+
+# ----------------------------------------------------------------------
+# [shutdown]
+# ----------------------------------------------------------------------
 
 [shutdown]
 grace_period = "10s"                    # time to finish in-flight transfers on shutdown
                                         # if you increase max_file_size, increase this too
                                         # rule of thumb: max_file_size / 10 MB/s = minimum grace
+
+# ----------------------------------------------------------------------
+# [logging]
+# ----------------------------------------------------------------------
 
 [logging]
 level = "info"
@@ -41,6 +339,89 @@ file = "/var/sshkey-chat/server.log"
 max_size_mb = 100
 max_files = 5
 format = "json"
+
+# ----------------------------------------------------------------------
+# [backup] — scheduled snapshot backups + retention
+# ----------------------------------------------------------------------
+#
+# Scheduled backups produce a single .tar.gz per tick containing every
+# SQLite DB (via Online Backup API — runs concurrently with the live
+# server, no downtime), all attachment blobs, the audit + pending-keys
+# logs, the SSH host key, and server.toml. See docs/ops/backup_restore.md
+# for the full operator guide.
+#
+# Default-enabled because data loss on a chat server is catastrophic
+# and skip_if_idle prevents noise on unused deployments (fresh-install
+# test servers produce at most one ~30KB schema-only tarball and then
+# skip subsequent ticks until there's real activity). Set
+# enabled = false for throwaway dev/test instances where you're
+# certain no backups are needed.
+#
+# The CLI complements the scheduler:
+#   sshkey-ctl backup [--out PATH] [--label TAG]   # one-shot snapshot
+#   sshkey-ctl restore <tarball> [--no-pre-backup] # restore (server stopped)
+#   sshkey-ctl list-backups                        # list newest-first
+# Restore refuses to run while the server is alive (lockfile check)
+# and creates a pre-restore backup of current state by default so the
+# operator has a portable rollback point.
+
+[backup]
+# Enable the scheduler. Default true. Manual `sshkey-ctl backup`
+# works regardless of this flag — only the periodic goroutine is
+# gated.
+enabled = true
+
+# Cadence between scheduled backups. Go duration string. Changes
+# require a server restart (the ticker is created at startup and
+# does not observe SIGHUP config reloads).
+interval = "24h"
+
+# Where the scheduler writes tarballs. Relative paths resolve
+# against the data dir (so "backups" → /var/sshkey-chat/backups).
+# Absolute paths used as-is — point this at an NFS mount or a
+# separate volume if you want backups off the primary disk.
+dest_dir = "backups"
+
+# Hard cap on the number of tarballs kept. After each successful
+# backup, older tarballs beyond this count are deleted. 0 disables
+# count-based retention (keep unlimited).
+retention_count = 10
+
+# Delete tarballs older than this duration. Empty disables
+# age-based retention. 720h = 30 days.
+#
+# Retention semantics: OR — a tarball is deleted if it exceeds
+# EITHER cap. Each cap is a hard upper bound. Set retention_age = ""
+# for count-only retention; set retention_count = 0 for age-only.
+retention_age = "720h"
+
+# Gzip-compress the tarball. Default true — DBs and plaintext logs
+# compress well; attachments are usually pre-compressed/encrypted
+# so compression there is near-no-op. CPU cost is negligible at
+# typical chat-server data sizes.
+compress = true
+
+# Skip the scheduled tick if no write activity has occurred since
+# the last successful backup. Detection: PRAGMA data_version on
+# data.db + max mtime of <dataDir>/data/files/. Skip fires only if
+# BOTH show no change. After a server restart, the first tick
+# always runs (a restart often coincides with deployment changes
+# worth snapshotting). Default true neutralizes the default-on
+# scheduler's cost on truly-idle deployments.
+skip_if_idle = true
+
+# Bundle host_key (always — required for restore-to-new-machine
+# without breaking SSH client pinning) and server.toml into the
+# tarball under config/. Set false if you manage server.toml via
+# external config management (Ansible, Terraform) and don't want
+# duplicate sources of truth — but understand restore-to-fresh-host
+# without host_key produces a new host key that triggers SSH
+# warnings on every existing client.
+include_config_files = true
+
+# ----------------------------------------------------------------------
+# [push]
+# ----------------------------------------------------------------------
 
 [push.apns]
 enabled = false

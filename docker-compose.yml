@@ -1,13 +1,33 @@
 services:
-  sshkey-server:
+  sshkey-chat:
     build: .
-    container_name: sshkey-server
+    container_name: sshkey-chat
     ports:
       - "2222:2222"
     volumes:
       - ./docker/config:/etc/sshkey-chat
       - sshkey-data:/var/sshkey-chat
+      - ./docker/keys:/keys
     restart: unless-stopped
+    # Shallow TCP-port healthcheck. `nc -z` is zero-I/O (just TCP
+    # SYN+ACK+RST), and Alpine's busybox provides nc without an
+    # additional package install. Port-listening does NOT prove the
+    # full SSH handshake / chat protocol works — a deep check would
+    # need an SSH client binary in the image, which is overkill for
+    # a single-server product. The shallow check is strictly better
+    # than no signal for `docker ps` / `docker compose up --wait` /
+    # orchestrator `depends_on: condition: service_healthy` wiring.
+    #
+    # start_period grace: covers server boot + SQLite schema
+    # migrations + lockfile write; healthcheck failures during this
+    # window do not count against retries. 15s is generous on modern
+    # hardware but accommodates slower CI runners.
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2222"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
 volumes:
   sshkey-data:

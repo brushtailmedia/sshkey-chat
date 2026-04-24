@@ -3,178 +3,271 @@ package server
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"time"
 
-	"github.com/brushtailmedia/sshkey-chat/internal/config"
+	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 )
 
 // handleRetirement processes the downstream effects of a user being retired.
-// The caller must have already set user.Retired = true in s.cfg.Users — this
+// The caller must have already marked the user as retired in users.db — this
 // function does not touch the retired flag itself.
 //
-// It fires room_event leaves for every room the user was in, removes them
-// from all DM conversations (broadcasting conversation_event leaves with
-// reason:"retirement" to remaining members), marks affected rooms for epoch
-// rotation, terminates any active sessions, and audits the event.
+// It fires room_event leaves for every room the user was in, iterates the
+// user's group DMs performing last-admin succession + per-group leave via
+// performGroupLeave, sets per-user DM cutoffs, clears the retiring user's
+// deleted_groups records, broadcasts user_retired to all connected clients,
+// terminates any active sessions for the retiring user, and audits the
+// event.
+//
+// Note: 1:1 DMs are NOT handled by performGroupLeave — they have their own
+// per-user history cutoff model with separate SetDMLeftAt logic below.
 //
 // Called from:
-//   - reloadUsers when users.toml shows a user transitioning to retired
-//   - handleRetireMe (the retire_me protocol handler, Phase 3)
-//   - sshkey-ctl retire-user (via an RPC, Phase 5)
+//   - retireUser (server-side retirement via protocol or CLI)
+//   - handleRetireMe (the retire_me protocol handler)
 //
 // oldRooms is the list of rooms the user was in immediately before retirement,
-// captured by the caller (before the user's Rooms list was cleared). reason is
+// captured by the caller (before room memberships were cleared). reason is
 // recorded in the audit log; it should be one of: self_compromise | admin |
 // key_lost.
-func (s *Server) handleRetirement(username string, oldRooms []string, reason string) {
-	// 1. Clear rooms list in memory so future lookups reflect retirement
-	s.cfg.Lock()
-	if u, ok := s.cfg.Users[username]; ok {
-		u.Rooms = nil
-		s.cfg.Users[username] = u
-	}
-	s.cfg.Unlock()
-
-	// 2. Broadcast room_event leaves for every room the user was in
-	for _, room := range oldRooms {
-		s.broadcastToRoom(room, protocol.RoomEvent{
-			Type:  "room_event",
-			Room:  room,
-			Event: "leave",
-			User:  username,
-		})
-	}
-
-	// 3. Mark rooms for epoch rotation (next sender triggers the new key)
-	for _, room := range oldRooms {
-		s.epochs.getOrCreate(room, s.epochs.currentEpochNum(room))
-		s.logger.Info("epoch rotation pending (member retired)",
-			"room", room,
-			"user", username,
-		)
+func (s *Server) handleRetirement(userID string, oldRooms []string, reason string) {
+	// 1+2+3. Per-room: remove from members, broadcast room_event{leave,
+	// reason: "user_retired"} to remaining members, echo room_left to
+	// the retiring user's still-connected sessions, mark for epoch
+	// rotation. Delegated to performRoomLeave so the retirement path
+	// stays in sync with the self-leave path — same broadcast shape,
+	// same epoch rotation, same Reason field plumbing. The reason
+	// "user_retired" lets client UIs render a different system message
+	// for remaining members ("alice's account was retired" instead of
+	// "alice left").
+	//
+	// The retiring user's sessions get terminated a few steps below
+	// (step 9), so any room_left echoes from performRoomLeave will be
+	// briefly delivered before the connection closes. Harmless.
+	for _, roomID := range oldRooms {
+		s.performRoomLeave(roomID, userID, "user_retired", "system")
 	}
 
-	// 4. Remove user from all DM conversations, broadcast leave events
-	convCount := 0
+	// 4. Phase 14: per-group iteration via performGroupLeave with
+	// last-admin succession. Replaces the pre-Phase-14 bulk
+	// RetireUserFromGroups path which had three issues: (a) it was a
+	// separate code path from self-leave and admin-kick, missing the
+	// new RecordGroupEvent audit + unified GroupLeft echo shape;
+	// (b) when the retiring user was solo in a group, the bulk DELETE
+	// never triggered DeleteGroupConversation, leaving the group row
+	// and group-{id}.db file orbiting forever (orphan-on-solo bug);
+	// (c) it couldn't perform last-admin succession because the
+	// broadcast loop ran AFTER the membership mutation.
+	//
+	// New flow per group: check if retiring user is the sole admin; if
+	// so, auto-promote the oldest remaining member before they leave;
+	// then route through performGroupLeave(reason="retirement", by="").
+	// performGroupLeave handles RemoveGroupMember, RecordGroupEvent,
+	// last-member cleanup, and broadcasting to remaining members. For
+	// solo-member groups it naturally triggers the cleanup cascade —
+	// orphan bug fixed as a side effect.
+	//
+	// Reason stays "retirement" (not "user_retired") for groups — the
+	// value is load-bearing across 9+ sites and the Conventions section
+	// in groups_admin.md is authoritative. The By field is empty
+	// because retirement is unilateral, not kicking-admin-initiated.
+	//
+	// While the loop runs, the retiring user's sessions are still open
+	// (termination is step 9 below), so each performGroupLeave call
+	// delivers a GroupLeft echo to those sessions before close. This
+	// is harmless and matches how performRoomLeave already behaves on
+	// the rooms side for the same reason.
+	groupCount := 0
 	if s.store != nil {
-		convIDs, err := s.store.RetireUserFromConversations(username)
+		groups, err := s.store.GetUserGroups(userID)
 		if err != nil {
-			s.logger.Error("failed to retire user from conversations",
-				"user", username,
-				"error", err,
-			)
+			s.logger.Error("failed to list groups for retirement",
+				"user", userID, "error", err)
 		} else {
-			convCount = len(convIDs)
-			for _, convID := range convIDs {
-				s.broadcastToConversation(convID, protocol.ConversationEvent{
-					Type:         "conversation_event",
-					Conversation: convID,
-					Event:        "leave",
-					User:         username,
-					Reason:       "retirement",
-				})
+			groupCount = len(groups)
+			for _, g := range groups {
+				// Last-admin succession: if retiring user is the sole
+				// admin, auto-promote the oldest remaining member before
+				// leaving. If no other members exist, skip the promote
+				// entirely — the performGroupLeave call below will run
+				// the last-member cleanup cascade.
+				if isAdmin, _ := s.store.IsGroupAdmin(g.ID, userID); isAdmin {
+					if count, _ := s.store.CountGroupAdmins(g.ID); count == 1 {
+						successor, _ := s.store.GetOldestGroupMember(g.ID, userID)
+						if successor != "" {
+							if err := s.store.SetGroupMemberAdmin(g.ID, successor, true); err == nil {
+								s.broadcastToGroup(g.ID, protocol.GroupEvent{
+									Type:   "group_event",
+									Group:  g.ID,
+									Event:  "promote",
+									User:   successor,
+									Reason: "retirement_succession",
+								})
+								// Audit the succession promote. The
+								// subsequent performGroupLeave call
+								// records its own "leave" event — two
+								// distinct event types, two recording
+								// sites, no duplication.
+								if err := s.store.RecordGroupEvent(
+									g.ID, "promote", successor, "", "retirement_succession", "", false, time.Now().Unix(),
+								); err != nil {
+									s.logger.Error("failed to record retirement-succession promote event",
+										"group", g.ID, "successor", successor, "error", err)
+								}
+								s.logger.Info("retirement-succession promote",
+									"group", g.ID, "successor", successor, "retiring_user", userID)
+							} else {
+								s.logger.Error("failed to auto-promote successor",
+									"group", g.ID, "successor", successor, "error", err)
+							}
+						}
+					}
+				}
+				s.performGroupLeave(g.ID, userID, "retirement", "", "system")
 			}
 		}
 	}
 
-	// 5. Broadcast user_retired to all connected clients so their UIs update.
+	// 5. Set per-user cutoff on all 1:1 DMs (silent leave — no broadcast).
+	// The cutoff means the retired user (who can no longer connect) won't
+	// see any messages sent after this timestamp. The other party's row is
+	// unchanged — they still see the DM in their sidebar, can read history,
+	// but sends are blocked by the retired-recipient check in handleSendDM.
+	//
+	// After setting the cutoff, run cleanupDormantDM for each DM: if the
+	// OTHER party had already /leave'd before this retirement, both
+	// user_*_left_at columns are now non-zero and the DM row + per-DM DB
+	// file can be cleaned up. Without this call the row would persist
+	// forever (pre-Phase-17 bug caught during the Step 4.f audit).
+	// cleanupDormantDM is idempotent and no-ops unless both parties have
+	// left, so it's safe to call unconditionally. When it DOES fire
+	// DeleteDirectMessage, the Step 4.f file_contexts cascade (site #3)
+	// picks up any bound attachments for the dormant DM.
+	dmCount := 0
+	if s.store != nil {
+		now := time.Now().Unix()
+		dms, err := s.store.GetDirectMessagesForUser(userID)
+		if err != nil {
+			s.logger.Error("failed to get DMs for retirement",
+				"user", userID,
+				"error", err,
+			)
+		} else {
+			dmCount = len(dms)
+			for _, dm := range dms {
+				if err := s.store.SetDMLeftAt(dm.ID, userID, now); err != nil {
+					s.logger.Error("failed to set DM cutoff on retirement",
+						"user", userID,
+						"dm", dm.ID,
+						"error", err,
+					)
+					continue // skip cleanup if SetDMLeftAt failed
+				}
+				s.cleanupDormantDM(dm.ID)
+			}
+		}
+	}
+
+	// 6. Clear this user's deleted_groups records — they're dead weight
+	// once the account is retired (the user can never reconnect to
+	// consume them via sync). Also opportunistically prune any other
+	// users' rows that are older than the retention threshold; this is
+	// the second amortization point for the deleted_groups GC, alongside
+	// DeleteGroupConversation.
+	if s.store != nil {
+		if err := s.store.ClearGroupDeletionsForUser(userID); err != nil {
+			s.logger.Error("failed to clear deleted_groups on retirement",
+				"user", userID, "error", err)
+		}
+		if pruned, err := s.store.PruneOldGroupDeletions(365 * 24 * 60 * 60); err == nil && pruned > 0 {
+			s.logger.Info("opportunistic deleted_groups prune at retirement",
+				"user", userID, "pruned", pruned)
+		}
+	}
+
+	// 7. Broadcast user_retired to all connected clients so their UIs update.
 	// We broadcast widely rather than computing a per-client visibility set —
 	// retirement is rare and clients must gracefully ignore users they don't
 	// know about (forward-compat rule).
 	retiredEvent := protocol.UserRetired{
 		Type: "user_retired",
-		User: username,
+		User: userID,
 		Ts:   time.Now().Unix(),
 	}
+	// Phase 17 Step 3: lock-release pattern.
 	s.mu.RLock()
+	var targets []*Client
 	for _, client := range s.clients {
-		if client.Username == username {
+		if client.UserID == userID {
 			continue // don't send to the retiring user's own sessions
 		}
-		client.Encoder.Encode(retiredEvent)
+		targets = append(targets, client)
 	}
 	s.mu.RUnlock()
+	s.fanOut("retired", retiredEvent, targets)
 
-	// 6. Update stored profile display_name to the suffixed version
+	// 8. Update stored profile display_name to the suffixed version
 	if s.store != nil {
-		s.cfg.RLock()
-		newDisplayName := s.cfg.Users[username].DisplayName
-		s.cfg.RUnlock()
-		s.store.UsersDB().Exec(
+		newDisplayName := s.store.GetUserDisplayName(userID)
+		s.store.DataDB().Exec(
 			`INSERT INTO profiles (user, display_name) VALUES (?, ?)
 			 ON CONFLICT (user) DO UPDATE SET display_name = excluded.display_name`,
-			username, newDisplayName)
+			userID, newDisplayName)
 	}
 
-	// 7. Terminate active sessions for the retired user
+	// 9. Terminate active sessions for the retired user.
+	// Phase 17 Step 3: lock-release pattern. Encode via fanOut outside the
+	// lock, then iterate targets to call Channel.Close(). Close is a side
+	// effect the helper does not handle; keeping it in this function.
 	s.mu.RLock()
+	var retiredTargets []*Client
 	for _, client := range s.clients {
-		if client.Username == username {
-			client.Encoder.Encode(protocol.Error{
-				Type:    "error",
-				Code:    protocol.ErrUserRetired,
-				Message: "Your account has been retired",
-			})
-			client.Channel.Close()
+		if client.UserID == userID {
+			retiredTargets = append(retiredTargets, client)
 		}
 	}
 	s.mu.RUnlock()
 
-	// 8. Audit log
+	retiredErr := protocol.Error{
+		Type:    "error",
+		Code:    protocol.ErrUserRetired,
+		Message: "Your account has been retired",
+	}
+	s.fanOut("retired", retiredErr, retiredTargets)
+	for _, client := range retiredTargets {
+		client.Channel.Close()
+	}
+
+	// 10. Audit log
 	if s.audit != nil {
 		s.audit.Log("server", "retire",
-			fmt.Sprintf("user=%s reason=%s rooms=%d convs=%d",
-				username, reason, len(oldRooms), convCount,
+			fmt.Sprintf("user=%s reason=%s rooms=%d groups=%d dms=%d",
+				userID, reason, len(oldRooms), groupCount, dmCount,
 			),
 		)
 	}
 
 	s.logger.Info("user retired",
-		"user", username,
+		"user", userID,
 		"reason", reason,
 		"rooms", len(oldRooms),
-		"conversations", convCount,
+		"groups", groupCount,
+		"dms", dmCount,
 	)
 }
 
-// persistRetirement writes users.toml back to disk after a retirement has been
-// set in memory. The fsnotify watcher on the config directory will detect this
-// write and trigger a reload, but the reload is a no-op: the in-memory state
-// already matches what we just wrote, so the diff is empty.
+// findRetiredMember returns the first retired userID in members, or empty
+// string if none are retired. Used by handleCreateGroup to reject group DM
+// creation that would include a retired user.
 //
-// Callers should have already set the retired fields on s.cfg.Users[user]
-// before calling this.
-func (s *Server) persistRetirement(username string) error {
-	s.cfg.RLock()
-	snapshot := make(map[string]config.User, len(s.cfg.Users))
-	for k, v := range s.cfg.Users {
-		snapshot[k] = v
-	}
-	dir := s.cfg.Dir
-	s.cfg.RUnlock()
-
-	path := filepath.Join(dir, "users.toml")
-	if err := config.WriteUsers(path, snapshot); err != nil {
-		return fmt.Errorf("persist retirement for %s: %w", username, err)
-	}
-	return nil
-}
-
-// findRetiredMember returns the first retired username in members, or empty
-// string if none are retired. Used by DM message handlers to reject sends
-// that would route to a retired recipient (the retired user's key can't
-// unwrap, so the message would be undeliverable).
-//
-// Used only for 1:1 DMs — group DMs have retired users removed from
-// conversation_members on retirement, so their member lists only contain
-// active users.
+// Group DMs have retired members removed from group_members at retirement
+// time, so live group send paths don't need this check — only the create
+// path does. Once 1:1 DMs land in chunk C of Phase 11 they will reuse this
+// helper for the equivalent create_dm guard.
 func (s *Server) findRetiredMember(members []string) string {
-	s.cfg.RLock()
-	defer s.cfg.RUnlock()
 	for _, m := range members {
-		if u, ok := s.cfg.Users[m]; ok && u.Retired {
+		if s.store.IsUserRetired(m) {
 			return m
 		}
 	}
@@ -188,11 +281,12 @@ func (s *Server) findRetiredMember(members []string) string {
 func (s *Server) handleRetireMe(c *Client, raw json.RawMessage) {
 	var msg protocol.RetireMe
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    "invalid_message",
-			Message: "malformed retire_me",
-		})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "retire_me", "malformed retire_me frame",
+			&protocol.Error{
+				Type:    "error",
+				Code:    "invalid_message",
+				Message: "malformed retire_me",
+			})
 		return
 	}
 
@@ -206,21 +300,17 @@ func (s *Server) handleRetireMe(c *Client, raw json.RawMessage) {
 	}
 
 	s.logger.Info("retire_me received",
-		"user", c.Username,
+		"user", c.UserID,
 		"device", c.DeviceID,
 		"reason", reason,
 	)
 
-	if err := s.retireUser(c.Username, reason); err != nil {
+	if err := s.retireUser(c.UserID, reason); err != nil {
 		s.logger.Error("retire_me failed",
-			"user", c.Username,
+			"user", c.UserID,
 			"error", err,
 		)
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    "internal",
-			Message: "retirement failed — contact an admin",
-		})
+		s.respondError(c, "", protocol.CodeInternal, "retirement failed — contact an admin", 0)
 		return
 	}
 
@@ -231,51 +321,26 @@ func (s *Server) handleRetireMe(c *Client, raw json.RawMessage) {
 // sendRetiredUsers sends the list of retired users visible to this client
 // on connect. This lets fresh clients learn about retirements that happened
 // while they were offline, so they can render [retired] markers correctly
-// on historical messages.
+// on historical messages and show [retired] sidebar markers.
 //
-// Visibility matches sendProfiles: users who share a room or a DM conversation
-// with the connecting client.
+// Visibility is computed from 1:1 DMs: retirement preserves the DM row
+// (with the retired user's cutoff set), so the connecting client still
+// has the retired user as a DM partner. Group memberships and room
+// memberships are cleared on retirement, so they contribute no visibility
+// for retired users.
 func (s *Server) sendRetiredUsers(c *Client) {
-	// Compute visible users (similar to sendProfiles)
+	// Compute visible retired users from 1:1 DM partners
 	visible := make(map[string]bool)
 
-	s.cfg.RLock()
-	clientRooms := make(map[string]bool)
-	// Connecting client may have retired users sharing a former room — we
-	// need to check against the retired user's PRE-retirement rooms. But
-	// since we clear rooms on retirement, that information is lost here.
-	// We'll rely on DM memberships (which preserve 1:1s) for visibility.
-	for _, r := range s.cfg.Users[c.Username].Rooms {
-		clientRooms[r] = true
-	}
-	for username, user := range s.cfg.Users {
-		if !user.Retired {
-			continue
-		}
-		// Retired user shares a room? (unlikely since rooms are cleared, but
-		// admins could manually leave rooms populated on retired entries)
-		for _, r := range user.Rooms {
-			if clientRooms[r] {
-				visible[username] = true
-				break
-			}
-		}
-	}
-	s.cfg.RUnlock()
-
-	// Retired users remaining in 1:1 conversation_members with the client
 	if s.store != nil {
-		convs, err := s.store.GetUserConversations(c.Username)
+		dms, err := s.store.GetDirectMessagesForUser(c.UserID)
 		if err == nil {
-			s.cfg.RLock()
-			for _, conv := range convs {
-				for _, m := range conv.Members {
-					if u, ok := s.cfg.Users[m]; ok && u.Retired {
-						visible[m] = true
-					}
+			for _, dm := range dms {
+				other := dm.OtherUser(c.UserID)
+				if other != "" && s.store.IsUserRetired(other) {
+					visible[other] = true
 				}
 			}
-			s.cfg.RUnlock()
 		}
 	}
 
@@ -283,17 +348,14 @@ func (s *Server) sendRetiredUsers(c *Client) {
 		return
 	}
 
-	s.cfg.RLock()
-	defer s.cfg.RUnlock()
-
 	var list []protocol.RetiredUser
-	for username := range visible {
-		user, ok := s.cfg.Users[username]
-		if !ok || !user.Retired {
+	for userID := range visible {
+		user := s.store.GetUserByID(userID)
+		if user == nil || !user.Retired {
 			continue
 		}
 		list = append(list, protocol.RetiredUser{
-			User:      username,
+			User:      userID,
 			RetiredAt: user.RetiredAt,
 		})
 	}
@@ -309,58 +371,31 @@ func (s *Server) sendRetiredUsers(c *Client) {
 }
 
 // retireUser performs a self-retirement or admin-initiated retirement of a
-// user. It atomically flips the retired flag in memory, persists users.toml,
-// and runs handleRetirement to fire all downstream events.
+// user. It marks the user as retired in users.db and runs handleRetirement
+// to fire all downstream events.
 //
 // Returns an error if the user doesn't exist, is already retired, or if the
-// users.toml write fails. Callers should check the returned error; if it's
+// database write fails. Callers should check the returned error; if it's
 // non-nil the retirement did NOT happen and no events were fired.
 //
 // Valid reasons: "self_compromise", "switching_key", "admin", "key_lost".
-func (s *Server) retireUser(username, reason string) error {
-	s.cfg.Lock()
-	user, ok := s.cfg.Users[username]
-	if !ok {
-		s.cfg.Unlock()
-		return fmt.Errorf("user %q does not exist", username)
+func (s *Server) retireUser(userID, reason string) error {
+	user := s.store.GetUserByID(userID)
+	if user == nil {
+		return fmt.Errorf("user %q does not exist", userID)
 	}
 	if user.Retired {
-		s.cfg.Unlock()
-		return fmt.Errorf("user %q is already retired", username)
-	}
-	oldRooms := append([]string(nil), user.Rooms...)
-	user.Retired = true
-	user.RetiredAt = time.Now().UTC().Format(time.RFC3339)
-	user.RetiredReason = reason
-	// Free the display name for reuse by suffixing it with part of the
-	// nanoid username. Historical messages remain attributable ("Alice_V1St")
-	// and the TUI appends [retired] for full clarity.
-	if len(username) > 8 {
-		user.DisplayName = user.DisplayName + "_" + username[4:8]
-	}
-	s.cfg.Users[username] = user
-	s.cfg.Unlock()
-
-	// Persist BEFORE firing events so a crash between them leaves a
-	// consistent on-disk state (user is retired, events will re-fire on
-	// next startup via the already-retired state — wait actually no, events
-	// only fire on transitions. Hmm. Better: events are idempotent enough
-	// that a brief window of "retired-in-memory-but-events-not-fired" is
-	// acceptable. Persist first, then fire events.)
-	if err := s.persistRetirement(username); err != nil {
-		// Roll back the in-memory change so next retry can succeed
-		s.cfg.Lock()
-		if u, ok := s.cfg.Users[username]; ok {
-			u.Retired = false
-			u.RetiredAt = ""
-			u.RetiredReason = ""
-			u.Rooms = oldRooms
-			s.cfg.Users[username] = u
-		}
-		s.cfg.Unlock()
-		return err
+		return fmt.Errorf("user %q is already retired", userID)
 	}
 
-	s.handleRetirement(username, oldRooms, reason)
+	// Capture rooms before retirement (needed for leave events)
+	oldRooms := s.store.GetUserRoomIDs(userID)
+
+	// Mark retired in users.db (handles display-name suffix and timestamp)
+	if err := s.store.SetUserRetired(userID, reason); err != nil {
+		return fmt.Errorf("retire user %q: %w", userID, err)
+	}
+
+	s.handleRetirement(userID, oldRooms, reason)
 	return nil
 }

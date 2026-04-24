@@ -10,48 +10,43 @@ import (
 )
 
 // broadcastPresence sends presence updates when a user connects or disconnects.
-func (s *Server) broadcastPresence(username, status string) {
-	s.cfg.RLock()
-	user := s.cfg.Users[username]
-	s.cfg.RUnlock()
+func (s *Server) broadcastPresence(userID, status string) {
+	if s.store == nil {
+		return
+	}
 
 	presence := protocol.Presence{
 		Type:        "presence",
-		User:        username,
+		User:        userID,
 		Status:      status,
-		DisplayName: user.DisplayName,
+		DisplayName: s.store.GetUserDisplayName(userID),
 	}
 
 	if status == "offline" {
 		presence.LastSeen = time.Now().UTC().Format(time.RFC3339)
 	}
 
-	// Broadcast to all connected clients who can see this user
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	s.cfg.RLock()
-	defer s.cfg.RUnlock()
-
-	// Find rooms the user is in
-	userRooms := make(map[string]bool)
-	for _, r := range user.Rooms {
-		userRooms[r] = true
+	// Build set of users who share a room with this user
+	visibleTo := make(map[string]bool)
+	for _, roomID := range s.store.GetUserRoomIDs(userID) {
+		for _, uid := range s.store.GetRoomMemberIDsByRoomID(roomID) {
+			visibleTo[uid] = true
+		}
 	}
 
+	// Phase 17 Step 3: lock-release pattern.
+	s.mu.RLock()
+	var targets []*Client
 	for _, client := range s.clients {
-		if client.Username == username {
+		if client.UserID == userID {
 			continue
 		}
-		// Check if this client shares a room
-		clientUser := s.cfg.Users[client.Username]
-		for _, r := range clientUser.Rooms {
-			if userRooms[r] {
-				client.Encoder.Encode(presence)
-				break
-			}
+		if visibleTo[client.UserID] {
+			targets = append(targets, client)
 		}
 	}
+	s.mu.RUnlock()
+	s.fanOut("presence", presence, targets)
 }
 
 // sendUnreadCounts sends unread counts for each room and conversation on connect.
@@ -60,37 +55,53 @@ func (s *Server) sendUnreadCounts(c *Client) {
 		return
 	}
 
-	s.cfg.RLock()
-	rooms := s.cfg.Users[c.Username].Rooms
-	s.cfg.RUnlock()
+	rooms := s.store.GetUserRoomIDs(c.UserID)
 
-	for _, room := range rooms {
-		count, lastRead, err := s.store.GetRoomUnreadCount(room, c.Username, c.DeviceID)
+	for _, roomID := range rooms {
+		count, lastRead, err := s.store.GetRoomUnreadCount(roomID, c.UserID, c.DeviceID)
 		if err != nil || count == 0 {
 			continue
 		}
 		c.Encoder.Encode(protocol.Unread{
 			Type:     "unread",
-			Room:     room,
+			Room:     roomID,
 			Count:    count,
 			LastRead: lastRead,
 		})
 	}
 
-	convs, err := s.store.GetUserConversations(c.Username)
+	groups, err := s.store.GetUserGroups(c.UserID)
 	if err != nil {
 		return
 	}
-	for _, conv := range convs {
-		count, lastRead, err := s.store.GetConvUnreadCount(conv.ID, c.Username, c.DeviceID)
+	for _, g := range groups {
+		count, lastRead, err := s.store.GetGroupUnreadCount(g.ID, c.UserID, c.DeviceID)
 		if err != nil || count == 0 {
 			continue
 		}
 		c.Encoder.Encode(protocol.Unread{
-			Type:         "unread",
-			Conversation: conv.ID,
-			Count:        count,
-			LastRead:     lastRead,
+			Type:     "unread",
+			Group:    g.ID,
+			Count:    count,
+			LastRead: lastRead,
+		})
+	}
+
+	// 1:1 DMs
+	dms, dmErr := s.store.GetDirectMessagesForUser(c.UserID)
+	if dmErr != nil {
+		return
+	}
+	for _, dm := range dms {
+		count, lastRead, err := s.store.GetDMUnreadCount(dm.ID, c.UserID, c.DeviceID)
+		if err != nil || count == 0 {
+			continue
+		}
+		c.Encoder.Encode(protocol.Unread{
+			Type:     "unread",
+			DM:       dm.ID,
+			Count:    count,
+			LastRead: lastRead,
 		})
 	}
 }
@@ -101,18 +112,16 @@ func (s *Server) sendPins(c *Client) {
 		return
 	}
 
-	s.cfg.RLock()
-	rooms := s.cfg.Users[c.Username].Rooms
-	s.cfg.RUnlock()
+	rooms := s.store.GetUserRoomIDs(c.UserID)
 
-	for _, room := range rooms {
-		db, err := s.store.RoomDB(room)
+	for _, roomID := range rooms {
+		db, err := s.store.RoomDB(roomID)
 		if err != nil {
 			continue
 		}
 
 		// Get user's first_epoch for this room — filter out pins from before they joined
-		firstSeen, firstEpoch, _ := s.store.GetUserRoom(c.Username, room)
+		firstSeen, firstEpoch, _ := s.store.GetUserRoom(c.UserID, roomID)
 
 		// Join pins with messages to get the epoch and timestamp of each pinned message
 		rows, err := db.Query(`
@@ -162,7 +171,7 @@ func (s *Server) sendPins(c *Client) {
 					Type:      "message",
 					ID:        id,
 					From:      sender,
-					Room:      room,
+					Room:      roomID,
 					TS:        msgTS,
 					Epoch:     msgEpoch,
 					Payload:   payload,
@@ -177,7 +186,7 @@ func (s *Server) sendPins(c *Client) {
 
 			c.Encoder.Encode(protocol.Pins{
 				Type:        "pins",
-				Room:        room,
+				Room:        roomID,
 				Messages:    pinned,
 				MessageData: messageData,
 			})

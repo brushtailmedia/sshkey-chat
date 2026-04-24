@@ -2,7 +2,7 @@ package store
 
 // StoreEpochKey stores a wrapped epoch key for a user in a room.
 func (s *Store) StoreEpochKey(room string, epoch int64, user, wrappedKey string) error {
-	_, err := s.usersDB.Exec(`
+	_, err := s.dataDB.Exec(`
 		INSERT INTO epoch_keys (room, epoch, user, wrapped_key)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT (room, epoch, user) DO UPDATE SET wrapped_key = excluded.wrapped_key`,
@@ -11,10 +11,42 @@ func (s *Store) StoreEpochKey(room string, epoch int64, user, wrappedKey string)
 	return err
 }
 
+// StoreEpochKeysBatch inserts wrapped epoch keys for multiple users in
+// a single transaction. Either all keys land or none — partial commits
+// would leave some members unable to decrypt messages from the new
+// epoch while the rotation completes from the server's perspective.
+//
+// Phase 17c Step 4 bug #3 fix: the pre-17c handleEpochRotate loop
+// called StoreEpochKey once per member outside any transaction; a
+// failure mid-loop silently left partial state while the rotation
+// still completed. This method wraps the whole batch in a single
+// transaction so the caller sees atomic success-or-failure.
+func (s *Store) StoreEpochKeysBatch(room string, epoch int64, keys map[string]string) error {
+	tx, err := s.dataDB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`
+		INSERT INTO epoch_keys (room, epoch, user, wrapped_key)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT (room, epoch, user) DO UPDATE SET wrapped_key = excluded.wrapped_key`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for user, wrappedKey := range keys {
+		if _, err := stmt.Exec(room, epoch, user, wrappedKey); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // GetEpochKey retrieves a wrapped epoch key for a specific user/room/epoch.
 func (s *Store) GetEpochKey(room string, epoch int64, user string) (string, error) {
 	var wrappedKey string
-	err := s.usersDB.QueryRow(`
+	err := s.dataDB.QueryRow(`
 		SELECT wrapped_key FROM epoch_keys WHERE room = ? AND epoch = ? AND user = ?`,
 		room, epoch, user,
 	).Scan(&wrappedKey)
@@ -24,7 +56,7 @@ func (s *Store) GetEpochKey(room string, epoch int64, user string) (string, erro
 // GetCurrentEpoch returns the highest epoch number for a room.
 func (s *Store) GetCurrentEpoch(room string) (int64, error) {
 	var epoch int64
-	err := s.usersDB.QueryRow(`
+	err := s.dataDB.QueryRow(`
 		SELECT COALESCE(MAX(epoch), 0) FROM epoch_keys WHERE room = ?`,
 		room,
 	).Scan(&epoch)
@@ -34,7 +66,7 @@ func (s *Store) GetCurrentEpoch(room string) (int64, error) {
 // GetEpochKeysForUser returns all wrapped epoch keys for a user in a room,
 // filtered by epoch range. Used for sync and history.
 func (s *Store) GetEpochKeysForUser(room, user string, minEpoch, maxEpoch int64) (map[int64]string, error) {
-	rows, err := s.usersDB.Query(`
+	rows, err := s.dataDB.Query(`
 		SELECT epoch, wrapped_key FROM epoch_keys
 		WHERE room = ? AND user = ? AND epoch >= ? AND epoch <= ?
 		ORDER BY epoch`,
@@ -57,32 +89,3 @@ func (s *Store) GetEpochKeysForUser(room, user string, minEpoch, maxEpoch int64)
 	return keys, rows.Err()
 }
 
-// GetAllEpochKeysForUser returns all wrapped epoch keys for a user across all rooms.
-// Used for SSH key rotation.
-func (s *Store) GetAllEpochKeysForUser(user string) ([]EpochKeyRecord, error) {
-	rows, err := s.usersDB.Query(`
-		SELECT room, epoch, wrapped_key FROM epoch_keys WHERE user = ? ORDER BY room, epoch`,
-		user,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var keys []EpochKeyRecord
-	for rows.Next() {
-		var k EpochKeyRecord
-		if err := rows.Scan(&k.Room, &k.Epoch, &k.WrappedKey); err != nil {
-			return nil, err
-		}
-		keys = append(keys, k)
-	}
-	return keys, rows.Err()
-}
-
-// EpochKeyRecord holds a room/epoch/wrapped_key tuple.
-type EpochKeyRecord struct {
-	Room       string
-	Epoch      int64
-	WrappedKey string
-}

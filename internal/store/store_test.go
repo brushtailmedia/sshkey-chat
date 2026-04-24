@@ -13,14 +13,21 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 	defer s.Close()
 
+	// Seed a room and get its nanoid ID
+	s.SeedRooms(map[string]RoomSeed{"general": {Topic: "Chat"}})
+	generalID := s.RoomDisplayNameToID("general")
+	if generalID == "" {
+		t.Fatal("failed to get room ID after seed")
+	}
+
 	// Insert a room message
-	err = s.InsertRoomMessage("general", StoredMessage{
-		ID:      "msg_test001",
-		Sender:  "alice",
-		TS:      1712345678,
-		Epoch:   3,
-		Payload: "base64encrypted...",
-		FileIDs: []string{"file_abc"},
+	err = s.InsertRoomMessage(generalID, StoredMessage{
+		ID:        "msg_test001",
+		Sender:    "alice",
+		TS:        1712345678,
+		Epoch:     3,
+		Payload:   "base64encrypted...",
+		FileIDs:   []string{"file_abc"},
 		Signature: "base64sig...",
 	})
 	if err != nil {
@@ -28,7 +35,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 
 	// Retrieve it
-	msgs, err := s.GetRoomMessages("general", 0, 10)
+	msgs, err := s.GetRoomMessages(generalID, 0, 10)
 	if err != nil {
 		t.Fatalf("get room messages: %v", err)
 	}
@@ -48,8 +55,9 @@ func TestStoreRoundTrip(t *testing.T) {
 		t.Errorf("file_ids = %v, want [file_abc]", msgs[0].FileIDs)
 	}
 
-	// Insert a DM message
-	err = s.InsertConvMessage("conv_test001", StoredMessage{
+	// Insert a group DM message
+	groupID := GenerateID("group_")
+	err = s.InsertGroupMessage(groupID, StoredMessage{
 		ID:          "msg_dm001",
 		Sender:      "alice",
 		TS:          1712345680,
@@ -58,12 +66,12 @@ func TestStoreRoundTrip(t *testing.T) {
 		Signature:   "base64sig_dm...",
 	})
 	if err != nil {
-		t.Fatalf("insert conv message: %v", err)
+		t.Fatalf("insert group message: %v", err)
 	}
 
-	dmMsgs, err := s.GetConvMessages("conv_test001", 0, 10)
+	dmMsgs, err := s.GetGroupMessages(groupID, 0, 10)
 	if err != nil {
-		t.Fatalf("get conv messages: %v", err)
+		t.Fatalf("get group messages: %v", err)
 	}
 	if len(dmMsgs) != 1 {
 		t.Fatalf("expected 1 DM, got %d", len(dmMsgs))
@@ -98,36 +106,40 @@ func TestStoreRoundTrip(t *testing.T) {
 		t.Errorf("device count after dup = %d, want 2", count)
 	}
 
-	// Test conversation creation
-	err = s.CreateConversation("conv_test001", []string{"alice", "bob"})
+	// Test group creation
+	err = s.CreateGroup(groupID, "alice", []string{"alice", "bob", "carol"})
 	if err != nil {
-		t.Fatalf("create conversation: %v", err)
+		t.Fatalf("create group: %v", err)
 	}
 
-	members, err := s.GetConversationMembers("conv_test001")
+	members, err := s.GetGroupMembers(groupID)
 	if err != nil {
-		t.Fatalf("get conversation members: %v", err)
+		t.Fatalf("get group members: %v", err)
 	}
-	if len(members) != 2 {
-		t.Fatalf("expected 2 members, got %d", len(members))
+	if len(members) != 3 {
+		t.Fatalf("expected 3 members, got %d", len(members))
 	}
 
-	// Test 1:1 dedup
-	existing, err := s.FindOneOnOneConversation("alice", "bob")
+	// Test 1:1 DM dedup
+	dm1, err := s.CreateOrGetDirectMessage(GenerateID("dm_"), "alice", "bob")
 	if err != nil {
-		t.Fatalf("find 1:1: %v", err)
+		t.Fatalf("create DM: %v", err)
 	}
-	if existing != "conv_test001" {
-		t.Errorf("1:1 conversation = %q, want conv_test001", existing)
+	dm2, err := s.CreateOrGetDirectMessage(GenerateID("dm_"), "bob", "alice")
+	if err != nil {
+		t.Fatalf("create DM 2: %v", err)
+	}
+	if dm1.ID != dm2.ID {
+		t.Errorf("1:1 DM dedup failed: %s != %s", dm1.ID, dm2.ID)
 	}
 
 	// Test epoch key storage
-	err = s.StoreEpochKey("general", 3, "alice", "wrapped_epoch_key_alice")
+	err = s.StoreEpochKey(generalID, 3, "alice", "wrapped_epoch_key_alice")
 	if err != nil {
 		t.Fatalf("store epoch key: %v", err)
 	}
 
-	key, err := s.GetEpochKey("general", 3, "alice")
+	key, err := s.GetEpochKey(generalID, 3, "alice")
 	if err != nil {
 		t.Fatalf("get epoch key: %v", err)
 	}
@@ -135,7 +147,7 @@ func TestStoreRoundTrip(t *testing.T) {
 		t.Errorf("epoch key = %q, want wrapped_epoch_key_alice", key)
 	}
 
-	epoch, err := s.GetCurrentEpoch("general")
+	epoch, err := s.GetCurrentEpoch(generalID)
 	if err != nil {
 		t.Fatalf("get current epoch: %v", err)
 	}
@@ -144,12 +156,12 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 
 	// Test message deletion
-	_, err = s.DeleteRoomMessage("general", "msg_test001", "alice")
+	_, err = s.DeleteRoomMessage(generalID, "msg_test001", "alice")
 	if err != nil {
 		t.Fatalf("delete message: %v", err)
 	}
 
-	msgs, err = s.GetRoomMessages("general", 0, 10)
+	msgs, err = s.GetRoomMessages(generalID, 0, 10)
 	if err != nil {
 		t.Fatalf("get after delete: %v", err)
 	}
@@ -160,17 +172,23 @@ func TestStoreRoundTrip(t *testing.T) {
 		t.Error("expected message to be marked deleted")
 	}
 
-	// Test leave conversation
-	err = s.RemoveConversationMember("conv_test001", "bob")
+	// Test leave group
+	err = s.RemoveGroupMember(groupID, "bob")
 	if err != nil {
 		t.Fatalf("remove member: %v", err)
 	}
-	members, err = s.GetConversationMembers("conv_test001")
+	members, err = s.GetGroupMembers(groupID)
 	if err != nil {
 		t.Fatalf("get members after leave: %v", err)
 	}
-	if len(members) != 1 || members[0] != "alice" {
-		t.Errorf("members after leave = %v, want [alice]", members)
+	if len(members) != 2 {
+		t.Fatalf("expected 2 members after leave, got %d", len(members))
+	}
+	// Verify bob is no longer a member
+	for _, m := range members {
+		if m == "bob" {
+			t.Errorf("bob should have been removed from group, got %v", members)
+		}
 	}
 
 	t.Log("all store operations passed")

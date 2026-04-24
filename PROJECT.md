@@ -1,8 +1,10 @@
 # sshkey-chat
 
+> Server architecture, design philosophy, and operational reference. For the wire protocol see [PROTOCOL.md](PROTOCOL.md). For client-specific implementation details see each client's own docs (e.g., sshkey-term's [DESIGN.md](https://github.com/brushtailmedia/sshkey-term/blob/main/DESIGN.md)).
+
 **[sshkey.chat](https://sshkey.chat)**
 
-A private messaging platform that uses SSH for transport, encryption, and authentication. End-to-end encrypted -- the server never sees message content. No accounts, no passwords, no OAuth. Identity is your SSH key.
+A private messaging platform that uses SSH for transport, encryption, and authentication. End-to-end encrypted -- the server never sees message content. No accounts, no passwords, no OAuth. Your identity is your SSH key.
 
 Inspired by [shazow/ssh-chat](https://github.com/shazow/ssh-chat). Credit is in README.
 
@@ -24,17 +26,18 @@ Server machine
 ├── sshkey-server (:2222)  -- chat app, own SSH listener, own key store
 ├── sshkey-ctl            -- local admin tool, reads/writes config + pending log
 ├── /etc/sshkey-chat/
-│   ├── server.toml         -- server config (port, retention settings)
-│   ├── users.toml          -- user definitions (key, name, rooms, admin flag)
-│   └── rooms.toml          -- room definitions (name, topic)
+│   └── server.toml         -- server config (port, retention settings)
 └── /var/sshkey-chat/
     ├── pending-keys.log    -- unrecognised keys that tried to connect
-    └── data/               -- SQLite DBs (encrypted blobs -- rooms, DMs, users.db)
+    ├── audit.log           -- append-only log of admin actions
+    ├── host_key            -- server SSH host key (generated on first run if missing)
+    ├── sshkey-server.pid   -- lockfile (PID + start time; cleaned on graceful shutdown)
+    └── data/               -- SQLite DBs (users.db, rooms.db, room-*.db, group-*.db, dm-*.db, data.db)
 ```
 
 **Port separation:**
 - `:22` -- system sshd, untouched. Admin SSHs in for server management, config editing, running sshkey-ctl
-- `:2222` -- chat app. Own SSH listener, own key store (from `users.toml`), completely independent of system SSH
+- `:2222` -- chat app. Own SSH listener, own key store (from `users.db`), completely independent of system SSH
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -71,7 +74,7 @@ No raw SSH fallback. Server requires a protocol-speaking client.
 ```
 SSH connect (:2222)
     │
-    ├── Key recognised (in users.toml)
+    ├── Key recognised (in users.db)
     │   ├── Server sends: {"protocol":"sshkey-chat","version":1}
     │   ├── Client responds with valid handshake
     │   │   └── proceed with protocol
@@ -151,7 +154,9 @@ The server operator can see who talks to whom and when, but cannot read what the
 
 ### What the server sees (metadata only)
 
-The server handles routing and storage. It sees the envelope, not the content:
+The server handles routing and storage. It sees the envelope, not the content. Four categories of server-visible data, with the content plane kept opaque:
+
+**1. Routing metadata** (envelope for every message):
 - Who sends messages to which room/conversation and when (from, room/conversation, timestamp)
 - Message sizes and frequency (traffic analysis)
 - File IDs and file sizes (not filenames, not mime types, not content)
@@ -159,9 +164,24 @@ The server handles routing and storage. It sees the envelope, not the content:
 - Which devices each user has (device registry)
 - Typing indicators and read receipt positions (metadata)
 
-The server does **not** see: message text, attachment filenames/types, mentions, reply references, link previews, reaction emoji. All of these are inside the encrypted payload.
+**2. Server-authored state and audit** (plaintext by design — server IS the author):
+- `group_events` — per-room and per-group audit trail (join/leave/promote/demote/rename/topic/retire events with `user`, `by`, `reason`, `name`, `ts`). Phase 14 populates for groups; Phase 20 populates for rooms.
+- `user_left_rooms` / `user_left_groups` — Phase 20 leave-history tables used for multi-device catchup on reconnect (replaces the previous client-side inference from `room_list` / `group_list` diffs).
+- `room_members` / `group_members` — membership state, `joined_at`, room `first_epoch`, group `is_admin`.
+- `pins` — `(message_id, pinned_by, ts)`. The server knows *that* a message is pinned but cannot see *what it says* — the message itself stays in the encrypted `messages.payload`.
+- `deleted_rooms` / `deleted_groups` / `retired_rooms` / `retired_users` — lifecycle sidecars.
 
-The server **does** see profile data: display names, avatar images, status text. These are public metadata, not E2E encrypted.
+**3. Public profile data** (server-authoritative by design):
+- Display names, admin status, avatar images, status text. Not E2E encrypted because they're identity metadata used for rendering across clients.
+
+**4. E2E encrypted content** (server does NOT see):
+- Message text, attachment filenames and MIME types, mentions, reply references, link previews, reaction emoji. All inside the encrypted `payload` field.
+
+**Why audit events are plaintext** (even for rooms, where the server holds the epoch keys): the server AUTHORS them from admin actions it processes. Encrypting against a key the server just used to write the plaintext would be ceremony, not security. Groups/DMs can't encrypt events even in principle (server has no per-message keys); rooms don't for consistency with groups and alignment with industry practice (Signal / Matrix / WhatsApp keep membership events server-visible).
+
+**Common misreadings to avoid:**
+- Pins are metadata, not content. The pin references an encrypted message; the message itself stays E2E encrypted. A server that leaks its DB exposes *which* messages are pinned, not *what they say*.
+- Reactions are encrypted uniformly across rooms / groups / DMs. Server sees routing envelope (who reacted to what message when), not the emoji.
 
 This is inherent in any client-server architecture without onion routing. Same metadata exposure as Signal.
 
@@ -189,7 +209,7 @@ No single layer is perfect. Together they provide meaningful E2E security withou
 
 ### Identity model
 
-**Your Ed25519 SSH key IS your account.** There is no separate account identifier, no password, no recovery mechanism on the server. The server authenticates by matching the raw key bytes against `users.toml` entries — if the key matches, you are that user; if not, the connection is rejected.
+**Your Ed25519 SSH key IS your account.** There is no separate account identifier, no password, no recovery mechanism on the server. The server authenticates by matching the raw key bytes against `users.db` entries — if the key matches, you are that user; if not, the connection is rejected.
 
 **Keys are permanent.** There is no in-band key rotation protocol. A key's relationship to a username is lifelong. When that relationship needs to end, the account is **retired** — monotonic, irreversible — and a new account is created (potentially under the same username) via admin action.
 
@@ -213,9 +233,9 @@ The cost of not supporting rotation is that legitimate key changes (hardware upg
 
 ### Retirement flow
 
-On retirement (triggered by `retire_me` from the client, admin-editing `users.toml`, or `sshkey-ctl retire-user`):
+On retirement (triggered by `retire_me` from the client, or `sshkey-ctl retire-user`):
 
-1. `users.toml` entry is updated to `retired = true, retired_at = <ISO8601>, retired_reason = <...>` and the user's room list is cleared.
+1. `users.db` record is updated: `retired = 1, retired_at = <ISO8601>, retired_reason = <...>`, display name suffixed, and room memberships cleared in `rooms.db`.
 2. The server's config watcher detects the change (fsnotify) and fires the retirement transition handler.
 3. SSH authentication henceforth rejects the key with "account retired".
 4. All active sessions for that user are terminated with `user_retired` error code.
@@ -234,11 +254,11 @@ If both the legitimate user and an attacker with the stolen key attempt `retire_
 
 ### Username reuse
 
-Retired user entries remain in `users.toml` (with `retired = true`) for historical message attribution. To reuse the name for a new account, the admin moves the retired entry (e.g., renames it to `[alice.2026-04]`) and adds a fresh `[alice]` with the new key. The legitimate user's client sees the new fingerprint via key-pinning and gets the standard "key has changed — verify" warning, which is the correct behavior (they should verify the new account's safety number out-of-band).
+Retired user entries remain in `users.db` (with `retired = 1`) for historical message attribution. The display name is suffixed (e.g., "Alice" → "Alice_V1St") to free the name for reuse. To create a new account, the admin runs `sshkey-ctl approve` with the new key. The legitimate user's client sees the new fingerprint via key-pinning and gets the standard "key has changed — verify" warning, which is the correct behavior (they should verify the new account's safety number out-of-band).
 
 ### Key loss
 
-If the user loses their key entirely (no backup, no other device with the key), they cannot self-retire. They contact the admin out-of-band, who sets `retired = true, retired_reason = "key_lost"` directly in `users.toml` or runs `sshkey-ctl retire-user`. The admin then adds a fresh account entry with the new key.
+If the user loses their key entirely (no backup, no other device with the key), they cannot self-retire. They contact the admin out-of-band, who runs `sshkey-ctl retire-user --reason key_lost`. The admin then runs `sshkey-ctl approve` to create a fresh account with the new key.
 
 **The TUI enforces key backup** at account creation (wizard backup step with explicit "I understand there is no recovery" acknowledgement) to make this failure mode as rare as possible.
 
@@ -339,7 +359,7 @@ Libraries: jaevor/go-nanoid (Go), nanoid crate (Rust)
 **Server tracks per device:**
 
 ```
-Server: users.db
+Server: data.db
 ┌──────────────────────────────────────────────────┐
 │ user    │ device_id          │ last_synced_at     │
 ├─────────┼───────────────────┼───────────────────┤
@@ -521,10 +541,12 @@ DM conversations have a Nano ID (`conv_` prefix). A 1:1 DM is just a group DM wi
 **Conversation rules:**
 - Server deduplicates 1:1 conversations -- creating a DM with just `["bob"]` when a 1:1 already exists returns the existing conversation
 - Group DMs are distinct -- creating a new group with the same members creates a new conversation (like Slack/Signal)
-- Members are set at creation. To add someone, create a new conversation. Old conversation stays as-is (no retroactive access to history)
-- **Max group DM size: 50 members.** Beyond this, use a room -- epoch-based key rotation amortises the per-member wrapping cost. A 50-member group DM means 50 key wraps per message and per reaction, which is fine (microseconds each, ~5KB of wrapped keys). At 100+ members the overhead becomes noticeable and rooms are the better model.
+- **Phase 14: group DMs are self-governed by in-group admins.** The creator becomes the first admin; admins can add, remove, promote, demote, and rename. All admins are peers (flat model — no protected tier). The "at least one admin" invariant is enforced at every mutation path. New members cannot decrypt pre-join history (per-message wrapped keys; no backfill). See `groups_admin.md` for the full design. Pre-Phase-14 groups were immutable peer DMs with no membership changes post-creation; that decision was reversed in Phase 14.
+- **Max group DM size: 150 members.** Hard cap enforced by the server (`too_many_members` error). Per-message wrapped keys scale linearly: 150 members means ~12KB of key material per message and ~15ms of crypto per send. **Recommendation for client implementers:** for groups with 50+ members, surface a warning suggesting a room instead — rooms use a shared epoch key and amortise the per-member wrapping cost. The `sshkey-term` terminal client implements this as a status-bar hint on group creation. The server does not enforce the 50-member soft threshold; it is a UX guideline only.
 - Conversation list sent on connect alongside room list
-- **Group naming:** `create_dm` accepts an optional `name` field. Any member can rename via `rename_conversation`. Groups without a name display as the member list (e.g., "Bob, Carol"). 1:1 DMs typically don't use names — the client displays the other person's display_name.
+- **Group naming:** `create_dm` accepts an optional `name` field. **Phase 14: rename is now admin-only** (pre-Phase-14 any member could rename). Groups without a name display as the member list (e.g., "Bob, Carol"). 1:1 DMs typically don't use names — the client displays the other person's display_name.
+
+**Moderation (Phase 14).** Group DMs are entirely self-governed. The CLI escape hatch (`sshkey-ctl remove-from-group`, the `pending_admin_kicks` queue, the `runAdminKickProcessor` polling goroutine) has been **deleted**. Server operators stay out of group membership — the server admin manages rooms and nothing else. For ToS violations that require operator intervention, the correct recourse is `sshkey-ctl retire-user` on the offending account, which triggers the retirement cascade including per-group leave + last-admin succession. The philosophical line is clean: **rooms are admin-managed, groups and DMs are self-governed by their participants.**
 
 #### Rename Conversation
 
@@ -559,14 +581,14 @@ On leave:
 
 #### Message Deletion
 
-No message editing -- delete and resend. This is a permanent design decision, not a deferred feature.
+Message editing is a planned feature — see the **Message Editing** section below for the full design, and `message_editing.md` for the implementation plan.
 
 ```json
 // Client -> Server
 {"type":"delete","id":"msg_abc123"}
 
 // Server -> Client (pushed to all in room/conversation -- includes routing)
-{"type":"deleted","id":"msg_abc123","deleted_by":"alice","ts":1712345679,"room":"general"}
+{"type":"deleted","id":"msg_abc123","deleted_by":"alice","ts":1712345679,"room":"room_V1StGXR8_Z5jdHi6B"}
 ```
 
 **Deletion permissions:**
@@ -860,7 +882,7 @@ The sender generates a fresh AES-256 key per message, encrypts the payload, wrap
 ```
 
 **Leave notifications:** all leave events (rooms, DMs, group DMs) produce a visible system message in the conversation: "carol has left the conversation." Clients render these inline in the message stream, not as silent metadata. This applies to:
-- Room leaves (user removed from `users.toml` or reassigned)
+- Room leaves (user removed via `sshkey-ctl remove-from-room`, self-leave via `/leave` when `allow_self_leave_rooms = true`, or retirement cascade)
 - DM / group DM leaves (explicit `leave_conversation` or client-side delete)
 
 #### Conversations (DMs)
@@ -1090,7 +1112,7 @@ All admin tasks are done via regular SSH (port 22) on the server. No admin comma
 [server]
 port = 2222
 bind = "0.0.0.0"
-admins = ["alice", "bob"]
+# Admin status is managed via users.db (sshkey-ctl promote/demote)
 
 [messages]
 max_body_size = "16KB"
@@ -1124,32 +1146,27 @@ grace_period = "10s"             # time to finish in-flight transfers on shutdow
                                  # rule of thumb: max_file_size / 10 MB/s = minimum grace
 ```
 
-```toml
-# /etc/sshkey-chat/users.toml
-[alice]
-key = "ssh-ed25519 AAAA...abc"       # one key per user, always
-display_name = "Alice Chen"
-rooms = ["general", "engineering", "admin"]
+> **Full reference:** `docker/config/server.toml` documents every knob (including `[server.auto_revoke]`, `[server.quotas.user]`, `[backup]`, the expanded `[rate_limits]` surface added by Phases 17 / 17b / 17c, and the `[files].max_file_ids_per_message` cap) with inline trade-off comments. The example above is the minimal learn-by-shape subset.
 
-[bob]
-key = "ssh-ed25519 AAAA...def"
-display_name = "Bob"
-rooms = ["general"]
+**Users are not configured via a seed file.** On a fresh deployment, create the first admin with:
+
+```bash
+sshkey-ctl bootstrap-admin admin-name
 ```
 
-```toml
-# /etc/sshkey-chat/rooms.toml
-[general]
-topic = "General chat"
+This generates an Ed25519 keypair (interactive passphrase prompt, zxcvbn score ≥ 3 required), inserts the user row into `users.db` with `is_admin = true`, and writes the encrypted private key to the current directory (or `--out DIR`). Subsequent users join via the normal pending-keys + `sshkey-ctl approve` flow.
 
-[engineering]
-topic = "Core platform work"
+**Docker onboarding flow:**
+- one-time host preflight for key export mount:
+  `mkdir -p ./docker/keys && sudo chown 2222:2222 ./docker/keys && sudo chmod 700 ./docker/keys`
+- runtime sequence:
+  `docker compose run --rm --entrypoint sshkey-ctl sshkey-chat init --docker`
+  `docker compose up -d`
+  `docker compose exec -it sshkey-chat sshkey-ctl bootstrap-admin <name> --out /keys`
+- ownership note: generated private key may be `2222:2222` with mode `0600`; Linux operators can hand off with:
+  `sudo install -m 600 ./docker/keys/<name>_ed25519 ~/.ssh/<name>_ed25519 && sudo chown $(id -u):$(id -g) ~/.ssh/<name>_ed25519`
 
-[admin]
-topic = "Admin discussion"
-```
-
-Server watches config files for changes (fsnotify) or reloads on SIGHUP.
+Server watches `server.toml` for changes (fsnotify) or reloads it on SIGHUP.
 
 ### sshkey-ctl
 
@@ -1171,8 +1188,8 @@ sshkey-ctl purge --older-than 5y
 # List users
 sshkey-ctl list-users
 
-# Remove a user
-sshkey-ctl remove-user carol
+# Retire a user (permanent, preserves audit trail and historical message attribution)
+sshkey-ctl retire-user carol --reason admin_mistake
 
 # Revoke a specific device (stolen laptop, etc.)
 sshkey-ctl revoke-device --user alice --device dev_macbook_abc
@@ -1224,30 +1241,37 @@ Clients receiving `server_shutdown` should:
 
 ### Config File Hot Reload
 
-Server watches config files via fsnotify and reloads on SIGHUP.
+User and room data lives in SQLite databases (`users.db`, `rooms.db`). Changes via `sshkey-ctl` CLI take effect immediately — the server reads from DB on demand, no reload needed. Server watches `server.toml` via fsnotify for hot-reload of runtime settings.
 
-**Hot-reloadable (no restart):**
-- `users.toml` -- add/remove users, change room assignments, update display names
-- `rooms.toml` -- add/remove rooms, change topics
-- `server.toml`: `admins`, `[retention]`, `[files]`, `[rate_limits]`, `[messages]`, `[sync]`
+**Immediate (via `sshkey-ctl`, no restart):**
+- User management — `approve`, `bootstrap-admin`, `retire-user`, `unretire-user`, `promote`, `demote`, `rename-user`
+- Room management — `add-room`, `add-to-room`, `remove-from-room`, `retire-room`, `update-topic`, `rename-room`, `set-default-room`, `unset-default-room`
+- Device management — `revoke-device`, `restore-device`, `prune-devices`
+- Security — `block-fingerprint`, `unblock-fingerprint`
+- Inspection — `show-user`, `show-room`, `list-admins`, `search-users`, `audit-log`, `audit-user`
+- Diagnostics — `check-integrity`, `room-stats`
+
+All state-changing commands (retire-user, promote, demote, rename-user, update-topic, rename-room, revoke-device, remove-from-room) propagate live to connected clients via the Phase 16 `pending_*` queue + polling processor pattern. The CLI writes to the DB and enqueues a broadcast row; the running server's processor drains the queue and fires the appropriate protocol event within ~5 seconds.
+
+**Hot-reloadable (server.toml, no restart):**
+- `[retention]`, `[files]`, `[rate_limits]`, `[messages]`, `[sync]`, `[devices]`, `[logging]`
 
 **Requires restart:**
 - `server.toml`: `port`, `bind` (can't rebind a listening socket)
 - SSH host key changes
-
-On reload, server logs what changed and notifies affected connected clients (e.g., new room access → send updated `room_list`; removed from room → send `room_event` leave).
 
 ### Admin Audit Log
 
 Append-only log of all administrative actions. Stored at `/var/sshkey-chat/audit.log`.
 
 ```
-2026-04-03T14:22:00Z  sshkey-ctl  approve    user=carol fingerprint=xx:yy:zz rooms=general,engineering
-2026-04-03T14:25:00Z  sshkey-ctl  reject     fingerprint=aa:bb:cc
-2026-04-03T15:00:00Z  server      reload     trigger=fsnotify file=users.toml changes="+carol"
-2026-04-03T15:10:00Z  sshkey-ctl  remove     user=dave
-2026-04-03T16:00:00Z  sshkey-ctl  revoke-device  user=alice device=dev_macbook_abc
-2026-04-03T18:00:00Z  server      shutdown   signal=SIGTERM grace=10s clients=12
+2026-04-03T14:22:00Z  sshkey-ctl  bootstrap-admin  user=usr_admin fingerprint=xx:yy:zz
+2026-04-03T14:22:00Z  sshkey-ctl  approve          user=usr_carol fingerprint=yy:zz:aa rooms=general,engineering
+2026-04-03T14:25:00Z  sshkey-ctl  reject           fingerprint=aa:bb:cc
+2026-04-03T15:00:00Z  server      reload           trigger=fsnotify file=server.toml
+2026-04-03T15:10:00Z  sshkey-ctl  retire-user      user=usr_dave reason="offboarded"
+2026-04-03T16:00:00Z  sshkey-ctl  revoke-device    user=usr_alice device=dev_macbook_abc
+2026-04-03T18:00:00Z  server      shutdown         signal=SIGTERM grace=10s clients=12
 ```
 
 Every `sshkey-ctl` command and every server-initiated action (config reload, shutdown) gets a timestamped entry. Not tamper-proof against root, but creates accountability and makes forensics possible after an incident.
@@ -1315,10 +1339,19 @@ format = "json"                   # structured JSON, one object per line
 
 ## Rooms / Channels
 
-- **Persistent rooms** -- survive server restarts (defined in `rooms.toml`)
-- **Room-specific permissions** -- per-user room access defined in `users.toml`
-- **Topic / description** -- settable per room in `rooms.toml`
+- **Persistent rooms** -- stored in `rooms.db`, survive server restarts. Room identity is nanoid-based (`room_` prefix), display names are mutable.
+- **Room-specific permissions** -- per-user room access managed via `rooms.db` (`room_members` table), controlled by `sshkey-ctl add-to-room/remove-from-room`
+- **Topic / description** -- stored per room in `rooms.db`
 - **Room list on connect** -- client receives list of rooms the user has access to
+- **Self-leave policy** -- off by default. `[server] allow_self_leave_rooms = false` (the default) keeps membership admin-managed. Set to `true` to let users `/leave` rooms on their own. Hot-reloadable — the server reads the flag under the cfg RLock on every `leave_room` / `delete_room`, so a config reload takes effect without client action.
+- **Room retirement** -- admins can permanently archive a room via `sshkey-ctl retire-room`. Retirement is *monotonic*: once set, `retired_at` is never cleared. Retired rooms:
+  - Get a 4-character base62 suffix appended to their display name (e.g. `general` → `general_A3fQ`) so admins can create a new room with the original name without collision
+  - Reject all writes (`send`, `react`, `pin`, `unpin`) with `room_retired` error code
+  - Freeze epoch rotation — no new keys are generated, but existing history remains decryptable with the epoch keys clients already hold
+  - Are broadcast to connected members via `room_retired`; offline devices get the list via `retired_rooms` during the handshake catchup
+  - Can be removed from a user's view via `/delete` (governed by `allow_self_leave_retired_rooms`, default `true`)
+- **`/delete` for rooms** -- sends `delete_room`, which records a `deleted_rooms` sidecar row, runs the leave logic, and echoes `room_deleted` to the deleter's sessions. The sidecar drives offline-device catchup via `deleted_rooms` in the handshake, so a user who `/delete`'d a room from their laptop also sees it removed when their phone reconnects. The sidecar row survives any last-member cleanup cascade because `DeleteRoomRecord` deliberately does not touch `deleted_rooms`.
+- **CLI is local-only** -- `sshkey-ctl retire-room` writes directly to the server DB and enqueues a `pending_room_retirements` row. A background goroutine (5s poll) drains the queue and broadcasts to connected members. This mirrors the Phase 11 `pending_admin_kicks` pattern and keeps remote admin verbs out of the chat protocol.
 
 ---
 
@@ -1370,11 +1403,10 @@ Handled entirely client-side. Fall back to text placeholder + download for unsup
   - DMs don't need `first_epoch` -- members are set at conversation creation and per-message keys are only wrapped for current members. Old DM messages from before a member existed in the conversation were never wrapped for them.
 - For rooms, both filters apply. A message must pass both to be delivered.
 - If a user is removed and re-added, they get a new `first_seen` and (for rooms) a new `first_epoch` -- previous history window is closed. Clean break.
-- Admin override possible via `users.toml`: `history_from = "2026-01-01"` to grant access to older room history. This relaxes `first_seen` only -- the user still needs epoch keys for those older messages, which would need to be provided separately.
 
 ### Message Deletion
 
-Same model as Signal/WhatsApp -- best-effort, no false promises. No message editing -- delete and resend.
+Same model as Signal/WhatsApp -- best-effort, no false promises. Message editing is a planned feature (see **Message Editing** below and `message_editing.md`), tracked alongside delete rather than instead of it.
 
 - User sends a delete request for a message ID via the protocol (own messages only, admins can delete any)
 - Server removes message from DB (or marks as tombstone)
@@ -1382,8 +1414,8 @@ Same model as Signal/WhatsApp -- best-effort, no false promises. No message edit
 - Connected clients remove from display immediately
 - Offline clients receive the tombstone on next sync and remove from local DB. Tombstones are interleaved with regular messages in `sync_batch` and `history_result`:
   ```json
-  {"type":"deleted","id":"msg_abc123","deleted_by":"alice","ts":1712345679,"room":"general"}
-  {"type":"deleted","id":"msg_def456","deleted_by":"bob","ts":1712345700,"conversation":"conv_xK9mQ2pR"}
+  {"type":"deleted","id":"msg_abc123","deleted_by":"alice","ts":1712345679,"room":"room_V1StGXR8_Z5jdHi6B"}
+  {"type":"deleted","id":"msg_def456","deleted_by":"bob","ts":1712345700,"dm":"dm_xK9mQ2pR"}
   ```
   Client processes tombstones in order: if the original message exists in local DB, remove it; if not (message was before the client's sync window), ignore the tombstone.
 - Accept that a determined user with a modified client or DB backup could retain anything they've already seen -- this is an inherent limitation of client-side storage and not worth adding complexity to fight
@@ -1397,7 +1429,7 @@ Server                              Client (per server)
 │ room-engineering.db │  ── sync -> │ messages.db         │
 │ conv-xK9mQ2pR.db   │             │ (single encrypted   │
 │ conv-yL0nR3qS.db   │             │  DB, all rooms +    │
-│ users.db (metadata, │             │  all DMs, one FTS5  │
+│ data.db (metadata, │             │  all DMs, one FTS5  │
 │  device tracking,   │             │  index)             │
 │  profiles)          │             │                     │
 └─────────────────────┘             └─────────────────────┘
@@ -1406,7 +1438,7 @@ Server                              Client (per server)
 **Server: separated by access boundary. Server stores encrypted blobs only.**
 - One DB per room -- encrypted message blobs, scoped to room permissions
 - One DB per DM conversation (`conv-{id}.db`) -- covers both 1:1 and group DMs. Encrypted blobs. All members read/write the same DB.
-- `users.db` for metadata (sync watermarks per device, first_seen, key-to-user mapping, device registry, profiles/display names/avatar references, wrapped epoch keys for rooms)
+- `data.db` for metadata (sync watermarks per device, first_seen, key-to-user mapping, device registry, profiles/display names/avatar references, wrapped epoch keys for rooms)
 - Server maintains a mapping of `user -> [accessible conversation DBs]`
 - When a user is removed: revoke access to room DBs, trigger epoch rotation for rooms (remaining members get new key). DMs need no action -- per-message keys mean the next message simply won't be wrapped for the removed user.
 
@@ -1547,6 +1579,8 @@ Same rule -- must not use the new epoch key until `epoch_confirmed`. They can co
 DMs use per-message keys, so `create_dm` carries no encryption data. The server responds with `dm_created` containing the conversation ID. The first message to the conversation carries its own per-message key like any other DM message. No key exchange step, no waiting.
 
 **New room members never see grace window messages.** The server tracks each user's `first_epoch` (the epoch they joined at). Carol's first epoch is N+1 (the one she generated). Server only delivers messages from epoch N+1 onward to Carol. Any epoch N messages sent by other members during the brief transition window are not delivered to her -- they're pre-join messages from her perspective. This extends the existing `first_seen` timestamp filtering to the epoch level. No undecryptable messages ever reach a new member's client.
+
+**New group DM members never see pre-join messages or audit events.** The group-DM analogue of `first_seen` on `room_members` is `joined_at` on `group_members` (set to `datetime('now')` on every `AddGroupMember` INSERT). `syncGroup` raises `sinceTS` to `joinedAt` before querying messages and events; `handleHistory`'s group branch post-filters messages by `m.TS < joinedAt`. The wrapped-key crypto model already prevents DECRYPTION of pre-join messages (no wrapped key for the new member), but the server must also not SERVE them — pre-join timestamps, sender IDs, and `group_events` entries (past `/rename`, `/promote`, `/demote`, `/kick` audit rows) are social-graph metadata leaks even without plaintext content. Leaves + re-adds get a fresh `joined_at` so the "invisible window" while away cannot be rewound. See `groups_admin.md` "Pre-join history gate" section for the full write-up.
 
 **Epoch key distribution ordering (rooms only):** the server must distribute epoch keys to all online members **before** relaying any messages encrypted with that epoch. If Alice receives epoch N+1 and immediately sends a message, the server must ensure Bob has received the epoch N+1 key before delivering Alice's message to Bob. SSH channel ordering guarantees this as long as the server writes the key before the message to each connection. The server queues any epoch N+1 messages for a member until their epoch key has been written to their connection. DMs don't have this problem -- every message carries its own keys.
 
@@ -1847,7 +1881,7 @@ Two-layer identity system: **usernames** (immutable internal IDs) and **display 
 
 ### Usernames (internal)
 
-- The `[alice]` section key in `users.toml` is the **immutable username**
+- Nanoid IDs (`usr_` prefix) generated on `sshkey-ctl approve`, stored in `users.db`
 - Stored in every DB table as `sender`, `user`, primary keys
 - Never changes after account creation — no bulk DB updates needed
 - Retired usernames cannot be reused (prevents DM/history conflicts)
@@ -1932,21 +1966,28 @@ type Overlay interface {
 
 ---
 
-## Future: Message Editing
+## Message Editing
 
-**Status:** Feature request — design complete.
+**Status:** Shipped in Phase 15 (2026-04-15). Three verb families (`edit` / `edit_group` / `edit_dm`) with corresponding echoes (`edited` / `group_edited` / `dm_edited`). `edited_at` is a new envelope field on `Message` / `GroupMessage` / `DM`. See `PROTOCOL.md` "Message Editing" section for the full wire format and `message_editing.md` for the design document.
 
 ### Constraints
 
-- **Only the user's most recent message in the current room/conversation** can be edited — not globally, not across contexts. Server validates per-room/per-conversation.
+- **Three context-specific verb families**, mirroring the send/receive split that shipped in Phase 11:
+  - Rooms: `edit` / `edited` (uses `room` + `epoch`, no `wrapped_keys`)
+  - Group DMs: `edit_group` / `group_edited` (uses `group` + `wrapped_keys` over current group members)
+  - 1:1 DMs: `edit_dm` / `dm_edited` (uses `dm` + `wrapped_keys` over exactly 2 entries)
+- **Only the user's most recent message in the current room/conversation** can be edited — not globally, not across contexts. Server validates per-room / per-group / per-dm. "Most recent" includes thread replies — a reply IS the user's most recent message in the parent's context if nothing followed it.
 - **Room messages:** must be in the current or previous epoch (same grace window as sends). Epoch rotation naturally bounds the edit window (~100 messages or 1 hour).
-- **DM messages:** no epoch restriction (per-message keys are independent)
+- **DM / group DM messages:** no epoch restriction (per-message keys are independent), but still gated by the "most recent" rule. Editing an old message first requires scrolling past nothing else from the same user.
+- **Retired rooms reject edits.** Phase 12 added `IsRoomRetired` gates to `handleSend`, `handleReact`, `handlePin`, `handleUnpin`; `handleEdit` joins that set. Retired rooms are read-only, full stop.
+- **Left contexts block the edit shortcut.** A user who has `/leave`d a room or group sees the archived read-only banner. The TUI input block in `app.go` already covers `IsLeft || IsRoomRetired` — edit-mode entry routes through the same gate.
 - **Original content is replaced** — no edit history retained (matches Signal behavior)
-- **`edited_at` is set by the server** (authoritative, in the envelope, not the payload)
-- **Body-only edits.** Attachments are immutable — `file_ids` stay on the message. To change attachments, delete and re-send.
-- **`reply_to` is immutable.** Edits cannot change what a message replies to. Thread structure must be stable.
+- **`edited_at` is set by the server** (authoritative, in the envelope, not the payload). Added as an `omitempty` field to the `Message`, `GroupMessage`, and `DM` protocol types.
+- **Body-only edits.** Attachments are immutable — `file_ids` stay on the message. The `Edit` / `EditGroup` / `EditDM` types do NOT carry `FileIDs` fields, so there's structurally nothing to mutate. Server reads the original row's file_ids on replace and preserves them.
+- **`reply_to` is immutable.** Same structural enforcement — the edit types don't carry `ReplyTo`. Thread structure stays stable.
 - **No notifications on edit.** Mention extraction runs on the edited body for highlight rendering, but no push/notification fires. An edit is a correction, not a new message.
-- **Cannot edit deleted messages.** Server rejects edit/edit_dm if `deleted = 1`. Client does not offer the edit shortcut on deleted messages. Enforced at both layers.
+- **Cannot edit deleted messages.** Server rejects all three edit verbs if `deleted = 1`. Client does not offer the edit shortcut on deleted messages. Enforced at both layers.
+- **Byte-identical privacy** — `handleEdit` / `handleEditGroup` / `handleEditDM` are new membership-gated handlers. Per the Conventions section, each needs a `TestHandleEditX_PrivacyResponsesIdentical` regression test using `bytes.Equal` on wire frames (unknown-context, non-member, and "not the original author" all return the same byte-identical response).
 
 ### Room editing
 
@@ -1954,39 +1995,57 @@ Same epoch key, new ciphertext. Simple — the key everyone already has encrypts
 
 ```json
 // Client -> Server
-{"type":"edit","id":"msg_abc123","room":"general","epoch":3,"payload":"base64...","signature":"base64..."}
+{"type":"edit","id":"msg_abc123","room":"room_V1StGXR8_Z5jdHi6B","epoch":3,"payload":"base64...","signature":"base64..."}
 
 // Server -> Client (broadcast — full envelope, not a diff)
-{"type":"edited","id":"msg_abc123","room":"general","from":"alice","ts":1712345680,"epoch":3,"payload":"base64...","signature":"base64...","edited_at":1712345690}
+{"type":"edited","id":"msg_abc123","room":"room_V1StGXR8_Z5jdHi6B","from":"usr_alice","ts":1712345680,"epoch":3,"payload":"base64...","signature":"base64...","edited_at":1712345690}
 ```
 
-Server validates: sender is original author, message is their most recent in the room, epoch is current or previous, message is not deleted. Replaces stored payload, sets `edited_at`. Broadcasts full envelope with `edited_at`.
+Server validates: sender is original author, message is their most recent in the room, epoch is current or previous, message is not deleted, room is not retired. Replaces stored payload, sets `edited_at`. Broadcasts full envelope with `edited_at`.
 
-### DM editing
+### Group DM editing
 
-Fresh per-message key for the edit. The original K_msg is effectively dead — server no longer stores content encrypted with it. This preserves per-message key isolation (compromising the old key doesn't expose the edited content, and vice versa).
+Fresh per-message key for the edit, wrapped for each current group member. The original K_msg is dead — server no longer stores content encrypted with it.
 
 ```json
 // Client -> Server
-{"type":"edit_dm","id":"msg_def456","conversation":"conv_abc",
- "wrapped_keys":{"alice":"base64...","bob":"base64..."},
+{"type":"edit_group","id":"msg_def456","group":"group_xK9mQ2pR",
+ "wrapped_keys":{"usr_alice":"base64...","usr_bob":"base64...","usr_carol":"base64..."},
  "payload":"base64...","signature":"base64..."}
 
-// Server -> Client (broadcast — full envelope, not a diff)
-{"type":"dm_edited","id":"msg_def456","conversation":"conv_abc","from":"alice","ts":1712345680,
- "wrapped_keys":{"alice":"base64...","bob":"base64..."},
+// Server -> Client (broadcast — full envelope)
+{"type":"group_edited","id":"msg_def456","group":"group_xK9mQ2pR","from":"usr_alice","ts":1712345680,
+ "wrapped_keys":{"usr_alice":"base64...","usr_bob":"base64...","usr_carol":"base64..."},
  "payload":"base64...","signature":"base64...","edited_at":1712345690}
 ```
 
-Server validates: sender is original author, message is their most recent in the conversation, `wrapped_keys` matches current member list, message is not deleted. Replaces stored payload and wrapped_keys, sets `edited_at`. Message ID and original timestamp preserved — replies, reactions, and pins still reference the same ID.
+Server validates: sender is original author, message is their most recent in the group, `wrapped_keys` matches current group member list, message is not deleted. Replaces stored payload and wrapped_keys, sets `edited_at`.
+
+### 1:1 DM editing
+
+Same pattern as groups but `wrapped_keys` has exactly two entries (both parties).
+
+```json
+// Client -> Server
+{"type":"edit_dm","id":"msg_ghi789","dm":"dm_yL0nR3qS",
+ "wrapped_keys":{"usr_alice":"base64...","usr_bob":"base64..."},
+ "payload":"base64...","signature":"base64..."}
+
+// Server -> Client (broadcast — full envelope)
+{"type":"dm_edited","id":"msg_ghi789","dm":"dm_yL0nR3qS","from":"usr_alice","ts":1712345680,
+ "wrapped_keys":{"usr_alice":"base64...","usr_bob":"base64..."},
+ "payload":"base64...","signature":"base64...","edited_at":1712345690}
+```
+
+Server validates: sender is original author, message is their most recent in the DM, `wrapped_keys` has exactly the two DM parties, message is not deleted, neither party has `/leave`d the DM (the Phase 11 one-way ratchet cutoff). Replaces stored payload and wrapped_keys, sets `edited_at`. Message ID and original timestamp preserved — replies, reactions, and pins still reference the same ID.
 
 ### Rate limiting
 
-Edits have their own rate limit bucket: `edits_per_minute`, default 10/min. Separate from sends — an edit is a correction, not a conversation action, and shouldn't compete with the send rate.
+Edits have their own rate limit bucket: `edits_per_minute`, default 10/min. Separate from sends — an edit is a correction, not a conversation action, and shouldn't compete with the send rate. Added as a new `EditsPerMinute` field on `config.RateLimits` with a `server.toml` documentation entry. One shared bucket across all three edit verbs (rooms, groups, DMs) — a user editing furiously in one context shouldn't get a free pass elsewhere.
 
 ### Sync and history
 
-Server stores `edited_at` on the message row. When serializing for `sync_batch` or `history_result`, include `edited_at` in the envelope when non-zero. Clients that reconnect after an edit see the edited body with the "(edited)" marker. Old clients ignore the unknown field (forward compatibility rule).
+Server stores `edited_at` on the message row. When serializing for `sync_batch` or `history_result`, include `edited_at` in the envelope when non-zero. The `Message`, `GroupMessage`, and `DM` protocol types gain an `EditedAt int64 \`json:"edited_at,omitempty"\`` field. Clients that reconnect after an edit see the edited body with the "(edited)" marker. Old clients ignore the unknown field (forward compatibility rule).
 
 ### Client DB
 
@@ -1996,7 +2055,7 @@ Same migration pattern as `deleted`/`deleted_by`:
 ALTER TABLE messages ADD COLUMN edited_at INTEGER NOT NULL DEFAULT 0;
 ```
 
-On receiving `edited`/`dm_edited`, update body and set `edited_at` in local DB and in-memory DisplayMessage. `LoadFromDB` maps it. `View()` renders "(edited)" in timestamp style when non-zero.
+On receiving `edited` / `group_edited` / `dm_edited`, update body and set `edited_at` in local DB and in-memory `DisplayMessage`. `LoadFromDB` maps it. `View()` renders "(edited)" in timestamp style when non-zero.
 
 ### TUI rendering
 
@@ -2004,13 +2063,14 @@ On receiving `edited`/`dm_edited`, update body and set `edited_at` in local DB a
 
 ### TUI interaction
 
-- **Up arrow** when input is empty: populates input with last message body, enters edit mode. Sends as `edit`/`edit_dm` on Enter. `Esc` cancels and returns to normal compose mode.
+- **Up arrow on empty input, when input is focused:** populates input with the user's last editable message body in the current context, enters edit mode. Fires only when `focus == FocusInput`. Up-arrow in messages/sidebar focus keeps its existing navigation meaning. Does not fire when the context is archived (left or retired room) or when the last message is deleted.
+- **Dispatch:** Enter in edit mode sends `edit` / `edit_group` / `edit_dm` depending on whether `messages.room` / `messages.group` / `messages.dm` is set. `Esc` cancels and returns to normal compose mode.
 - **Visual feedback:** Input bar shows "Editing message" indicator (same style as "replying to" indicator).
-- **Stale epoch:** If the epoch rotated between pressing Up and pressing Enter, server rejects. Client shows "Edit window expired" — user can delete the message instead.
+- **Stale epoch:** If the epoch rotated between pressing Up and pressing Enter, server rejects with `edit_window_expired`. Client shows "Edit window expired" and returns to compose mode — user can delete the message instead.
 
 ### Signatures
 
-Same canonical serialization as normal sends. The edit signature covers the new payload bytes + room/epoch (rooms) or conversation/wrapped_keys (DMs). Recipients verify against the sender's key. Invalid signature = same "failed verification" warning as for normal messages.
+Same canonical serialization as normal sends. The edit signature covers the new payload bytes + room/epoch (rooms) or group/wrapped_keys (groups) or dm/wrapped_keys (1:1 DMs). Recipients verify against the sender's key. Invalid signature = same "failed verification" warning as for normal messages.
 
 ### Multi-device
 
@@ -2018,7 +2078,7 @@ Last-write-wins. Two devices editing the same message concurrently — second ed
 
 ### Reactions on edit
 
-Server clears reactions on the edited message (reactions were for the original content). Broadcasts `reaction_removed` for each cleared reaction so clients stay in sync.
+Server clears reactions on the edited message (reactions were for the original content) by reusing the existing `store.DeleteReactionsForMessage` helper from `handleDelete`. Broadcasts `reaction_removed` for each cleared reaction so clients stay in sync.
 
 ### Why not reuse the original DM key?
 
@@ -2031,6 +2091,13 @@ Changing the message ID breaks `reply_to`, reaction, and pin references. Other c
 ### Why full envelope broadcast, not a diff?
 
 A diff is fragile — if the client's local copy diverged (missed a sync, different decryption state), the patch produces garbage. A full envelope is self-contained and idempotent. A client that missed the original message can display the edited version standalone.
+
+### New error codes
+
+- `edit_not_authorized` — sender is not the original author (returned byte-identical to unknown/non-member per privacy convention)
+- `edit_not_most_recent` — target message is no longer the user's most recent in the context
+- `edit_window_expired` — room epoch rotated since send, edit window closed
+- `edit_deleted_message` — target message has `deleted = 1` (returned byte-identical to not-author per privacy convention)
 
 ---
 
@@ -2052,7 +2119,7 @@ A shared `protocol_test.json` file containing sample messages for every protocol
 sshkey-ctl import --file users.csv --rooms general
 ```
 
-CSV format: `key,display_name,rooms` (one user per line). Runs the same validation as single approve (duplicate key, duplicate name, Ed25519, name length) per row. Atomic: all-or-nothing write to users.toml.
+CSV format: `key,display_name,rooms` (one user per line). Runs the same validation as single approve (duplicate key, duplicate name, Ed25519, name length) per row. Atomic: wraps the batch in a single `users.db` transaction so partial failures roll back cleanly.
 
 ### Batch room management
 
@@ -2090,8 +2157,8 @@ Admin-only CLI command: `sshkey-ctl delete-room --name general [--purge]`
 
 ### Flow
 
-1. Remove room from `rooms.toml` (atomic write)
-2. Server detects via file watcher:
+1. Queue room deletion via `sshkey-ctl delete-room` (DB-backed mutation)
+2. Server detects the queued operation via its pending-table polling bridge:
    - Removes all users from the room in memory
    - Broadcasts `room_event` leave for every member
    - Broadcasts `room_deleted` event (new message type): `{"type":"room_deleted","room":"general"}`
@@ -2104,7 +2171,7 @@ Admin-only CLI command: `sshkey-ctl delete-room --name general [--purge]`
 - No bulk message deletion through the protocol — bulk operations are admin CLI only
 - If you want to keep the room but clear history, use `sshkey-ctl purge --room general --older-than 0d`
 - Room deletion is visible and auditable — cannot silently wipe a room's messages without deleting the room itself
-- Archived DBs can be restored by renaming back and re-adding the room to rooms.toml
+- Archived DBs can be restored by renaming back and recreating the room via `sshkey-ctl add-room`
 
 ---
 
@@ -2193,13 +2260,12 @@ This is the only path to bulk message deletion. It is permanent, tied to an irre
 
 ---
 
-## Future: Display Room Topics in TUI
+## Display Room Topics in TUI
 
-**Status:** Feature request.
+**Status:** Shipped (Phase 18, 2026-04-15). The server has always sent room topics in `room_list` via `RoomInfo.Topic`, and the terminal client has persisted them to the local `rooms` table since Phase 7b — but nothing ever read them. Phase 18 wired the display-only path through to the TUI:
 
-Room topics are sent by the server in `room_list` but the terminal client never displays them. They should show in:
+- **Messages pane two-line header** — room name (bold) on line 1, topic (dim italic) on line 2. Rooms only; groups and 1:1 DMs show line 1 only. Topic line omitted when empty. Pinned permanently at the top of the messages pane on every `View()` call.
+- **Info panel (`Ctrl+I`)** — `Topic:` line between the `/leave` hint and the mute toggle. The render code has had `if i.topic != ""` since v0.1.0 but was never fed data until Phase 18 populated the field via `Client.DisplayRoomTopic`.
+- **`/topic` slash command** — read-only. Status bar shows "#general — topic text" or "#general has no topic set" in a room context; rejects with "/topic is only available in rooms" in group or 1:1 DM contexts.
 
-- **Info panel (`Ctrl+I`)** — under the room name, above the member list
-- **Message panel header** — subtle line under `#general` showing the topic
-
-Topic changes (if supported later) would update via `room_list` refresh.
+Topic changes picked up on reconnect when the server re-sends `room_list`. Changing a topic post-creation via a CLI verb (`sshkey-ctl update-topic`) and broadcasting live updates via a new `room_updated` protocol event are scheduled for the Admin CLI audit phase, where they naturally belong alongside the broader CLI broadcast mechanism decision. See `refactor_plan.md` Phase 16 for the committed write-path scope.

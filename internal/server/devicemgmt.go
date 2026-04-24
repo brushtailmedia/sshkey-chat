@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 
+	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 )
 
@@ -10,29 +11,38 @@ import (
 // authenticated user. Revocation status is included so the UI can render
 // previously-revoked devices separately.
 func (s *Server) handleListDevices(c *Client, raw json.RawMessage) {
-	if s.store == nil {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    "internal",
-			Message: "storage not available",
-		})
+	// Phase 17c Step 5 residual: unmarshal to capture corr_id so the
+	// success response echoes it for the client's send-queue Ack.
+	// Pre-17c the handler ignored `raw` entirely; parse failures are
+	// silent-safe because the only client-carried field we rely on
+	// here is the optional corr_id.
+	var req protocol.ListDevices
+	_ = json.Unmarshal(raw, &req)
+
+	// Phase 17 Step 5: rate-limit refresh cadence. Default 6/min
+	// (one per 10s) — settings-panel open is the legitimate use,
+	// mashing refresh is rate-limited.
+	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("list_devices:"+c.UserID, s.cfg.Server.RateLimits.DeviceListPerMinute); !allowed {
+		s.rejectAndLog(c, counters.SignalRateLimited, "list_devices", "list_devices rate limit exceeded",
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many device list requests — wait a moment", RetryAfterMs: retryMs, CorrID: req.CorrID})
 		return
 	}
 
-	devices, err := s.store.GetDevices(c.Username)
+	if s.store == nil {
+		s.respondError(c, req.CorrID, protocol.CodeInternal, "storage not available", 0)
+		return
+	}
+
+	devices, err := s.store.GetDevices(c.UserID)
 	if err != nil {
-		s.logger.Error("list_devices: failed to fetch devices", "user", c.Username, "error", err)
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    "internal",
-			Message: "failed to list devices",
-		})
+		s.logger.Error("list_devices: failed to fetch devices", "user", c.UserID, "error", err)
+		s.respondError(c, req.CorrID, protocol.CodeInternal, "failed to list devices", 0)
 		return
 	}
 
 	var out []protocol.DeviceInfo
 	for _, d := range devices {
-		revoked, _ := s.store.IsDeviceRevoked(c.Username, d.DeviceID)
+		revoked, _ := s.store.IsDeviceRevoked(c.UserID, d.DeviceID)
 		out = append(out, protocol.DeviceInfo{
 			DeviceID:     d.DeviceID,
 			LastSyncedAt: d.LastSynced,
@@ -45,6 +55,7 @@ func (s *Server) handleListDevices(c *Client, raw json.RawMessage) {
 	c.Encoder.Encode(protocol.DeviceList{
 		Type:    "device_list",
 		Devices: out,
+		CorrID:  req.CorrID, // Phase 17c
 	})
 }
 
@@ -61,11 +72,12 @@ func (s *Server) handleListDevices(c *Client, raw json.RawMessage) {
 func (s *Server) handleRevokeDevice(c *Client, raw json.RawMessage) {
 	var msg protocol.RevokeDevice
 	if err := json.Unmarshal(raw, &msg); err != nil {
-		c.Encoder.Encode(protocol.Error{
-			Type:    "error",
-			Code:    "invalid_message",
-			Message: "malformed revoke_device",
-		})
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "revoke_device", "malformed revoke_device frame",
+			&protocol.Error{
+				Type:    "error",
+				Code:    "invalid_message",
+				Message: "malformed revoke_device",
+			})
 		return
 	}
 
@@ -90,9 +102,9 @@ func (s *Server) handleRevokeDevice(c *Client, raw json.RawMessage) {
 	}
 
 	// Verify the device belongs to this user
-	devices, err := s.store.GetDevices(c.Username)
+	devices, err := s.store.GetDevices(c.UserID)
 	if err != nil {
-		s.logger.Error("revoke_device: fetch devices", "user", c.Username, "error", err)
+		s.logger.Error("revoke_device: fetch devices", "user", c.UserID, "error", err)
 		c.Encoder.Encode(protocol.DeviceRevokeResult{
 			Type:     "device_revoke_result",
 			DeviceID: msg.DeviceID,
@@ -110,7 +122,7 @@ func (s *Server) handleRevokeDevice(c *Client, raw json.RawMessage) {
 	}
 	if !owned {
 		s.logger.Warn("revoke_device: device not owned by user",
-			"user", c.Username,
+			"user", c.UserID,
 			"target_device", msg.DeviceID,
 			"requesting_device", c.DeviceID,
 		)
@@ -124,8 +136,8 @@ func (s *Server) handleRevokeDevice(c *Client, raw json.RawMessage) {
 	}
 
 	// Mark revoked
-	if err := s.store.RevokeDevice(c.Username, msg.DeviceID, "self_revoke"); err != nil {
-		s.logger.Error("revoke_device: store", "user", c.Username, "target", msg.DeviceID, "error", err)
+	if err := s.store.RevokeDevice(c.UserID, msg.DeviceID, "self_revoke"); err != nil {
+		s.logger.Error("revoke_device: store", "user", c.UserID, "target", msg.DeviceID, "error", err)
 		c.Encoder.Encode(protocol.DeviceRevokeResult{
 			Type:     "device_revoke_result",
 			DeviceID: msg.DeviceID,
@@ -138,11 +150,11 @@ func (s *Server) handleRevokeDevice(c *Client, raw json.RawMessage) {
 	// Audit log
 	if s.audit != nil {
 		s.audit.Log("user", "self_revoke_device",
-			"user="+c.Username+" target_device="+msg.DeviceID+" requesting_device="+c.DeviceID)
+			"user="+c.UserID+" target_device="+msg.DeviceID+" requesting_device="+c.DeviceID)
 	}
 
 	s.logger.Info("device revoked (user-initiated)",
-		"user", c.Username,
+		"user", c.UserID,
 		"target_device", msg.DeviceID,
 		"requesting_device", c.DeviceID,
 	)
@@ -154,17 +166,59 @@ func (s *Server) handleRevokeDevice(c *Client, raw json.RawMessage) {
 		Success:  true,
 	})
 
-	// If the revoked device is connected, notify + disconnect it
+	// If the revoked device is connected, notify + disconnect it.
+	s.kickRevokedDeviceSession(c.UserID, msg.DeviceID, "self_revoke")
+}
+
+// kickRevokedDeviceSession finds any connected client whose UserID +
+// DeviceID match the revoked device, sends them a device_revoked
+// event so the TUI can show a notice before disconnect, and tears
+// down the entire SSH connection for that session.
+//
+// Why close the SSH conn (not just the NDJSON channel): a client
+// session holds up to three SSH channels on the same conn — NDJSON
+// protocol (ch1), downloads (ch2), uploads (ch3). Closing only ch1
+// leaves a revoked device able to continue streaming bytes through
+// ch2/ch3 until its own client happens to notice ch1 closed and
+// voluntarily hang up. That's a weak eviction for a verb whose
+// explicit intent is "this device is no longer trusted." Closing
+// the SSH conn forces all three channels down in one step and makes
+// the eviction observable to an admin test via conn.Wait().
+//
+// Idempotent: if no matching client is connected, this is a no-op.
+//
+// Phase 16 Gap 1 extracted this loop from handleRevokeDevice so the
+// CLI-side processor (processPendingDeviceRevocations) could reuse
+// it. Both the protocol-path handler (user-initiated self-revoke)
+// and the queue-path processor (admin-initiated revoke via
+// sshkey-ctl) should produce identical session-termination effects;
+// sharing the helper enforces that by construction.
+func (s *Server) kickRevokedDeviceSession(userID, deviceID, reason string) {
+	// Phase 17 Step 3: lock-release pattern. Encode via fanOut outside the
+	// lock, then iterate targets to close channel + conn.
 	s.mu.RLock()
+	var targets []*Client
 	for _, client := range s.clients {
-		if client.Username == c.Username && client.DeviceID == msg.DeviceID {
-			client.Encoder.Encode(protocol.DeviceRevoked{
-				Type:     "device_revoked",
-				DeviceID: msg.DeviceID,
-				Reason:   "self_revoke",
-			})
-			client.Channel.Close()
+		if client.UserID == userID && client.DeviceID == deviceID {
+			targets = append(targets, client)
 		}
 	}
 	s.mu.RUnlock()
+
+	revoked := protocol.DeviceRevoked{
+		Type:     "device_revoked",
+		DeviceID: deviceID,
+		Reason:   reason,
+	}
+	s.fanOut("device_revoked", revoked, targets)
+	for _, client := range targets {
+		// Close the NDJSON channel first so any in-flight encode
+		// returns with an error rather than wedging on a closed
+		// conn; then close the underlying SSH conn to tear down all
+		// three channels.
+		client.Channel.Close()
+		if client.Conn != nil {
+			client.Conn.Close()
+		}
+	}
 }

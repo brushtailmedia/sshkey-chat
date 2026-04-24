@@ -102,13 +102,13 @@ func (a *APNsSender) Send(token string) (bool, error) {
 		return true, nil
 	case 410:
 		// Gone — token is no longer valid
-		a.logger.Info("APNs token expired", "token", token[:8]+"...")
+		a.logger.Info("APNs token expired", "token", tokenLogValue(token))
 		return false, nil
 	case 400:
-		a.logger.Warn("APNs bad request", "token", token[:8]+"...", "status", resp.StatusCode)
+		a.logger.Warn("APNs bad request", "token", tokenLogValue(token), "status", resp.StatusCode)
 		return false, nil
 	default:
-		a.logger.Warn("APNs error", "status", resp.StatusCode, "token", token[:8]+"...")
+		a.logger.Warn("APNs error", "status", resp.StatusCode, "token", tokenLogValue(token))
 		return true, fmt.Errorf("APNs status %d", resp.StatusCode)
 	}
 }
