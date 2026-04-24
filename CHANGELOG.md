@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-04-24
+
 ### Security
 - **Phase 22b deferred-items completion slice (2026-04-24).** Closed the remaining deferred launch-gate / auto-revoke / upload-quota / coverage-ratchet backlog. **New server integration suites:** `cmd/sshkey-server/auto_revoke_integration_test.go` (per-signal 2x threshold revoke path, 0.5x negative path, admin-device recovery, representative launch-gate flow counter assertions) and `cmd/sshkey-server/upload_quota_integration_test.go` (block enforcement, TOCTOU cleanup, warn-idempotence, sustained-pattern notifications, enabled-toggle accounting behavior). **Hot-reload correctness fix:** `internal/server/reload.go` now reloads `[server.auto_revoke]` and `[server.quotas.user]`; regression locked by `internal/server/reload_test.go`. **B.15 ratchet applied:** CI thresholds raised to `internal/server` 54.0, `internal/store` 54.0, `internal/protocol` 75.0.
 - **Phase 22b deferred-coverage closure slice (2026-04-24).** Landed the remaining server-side Phase 15 edit integration backlog and updated the phase tracker from deferred to shipped for B.3/B.4/B.7-B.13 items. **New `cmd/sshkey-server` e2e tests:** `TestEdit_RoomEndToEnd`, `TestEdit_GroupEndToEnd`, `TestEdit_DMEndToEnd`, and `TestEdit_RateLimitEnforced` (interleaved room/group/DM edits proving the shared `EditsPerMinute` bucket). **Documentation state update:** `docs/testing/CONVENTIONS.md` deferral registry now drops completed B.3 and B.7-B.13 entries; `refactor_plan.md` gate tracker rows updated to shipped status and phase-close wording de-coupled from the v0.2.0 tag. Validation on Go 1.26.2: `go test -short ./cmd/sshkey-server`, `go test ./internal/server`, `go test ./internal/store` all pass.
