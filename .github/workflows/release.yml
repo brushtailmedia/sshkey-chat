@@ -26,6 +26,14 @@ jobs:
         run: go test -shuffle=on -count=1 -p 1 ./...
       - name: Coverage Guard
         run: bash .github/scripts/check_coverage.sh
+      # staticcheck on the release path: blocks a tag push if any new
+      # SA-class finding lands (SA4006 etc.). Added 2026-04-25 after
+      # the post-v0.2.1 audit — see ci.yml for the rationale. Pinned
+      # to the Phase 21 F5 baseline version.
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@2026.1
+      - name: Staticcheck
+        run: staticcheck ./...
 
   release:
     needs: test

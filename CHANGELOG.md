@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Security
+- **CI: staticcheck gate wired into `ci.yml` + `release.yml` (2026-04-25).** Post-v0.2.1 audit surfaced an SA4006 finding in the sshkey-term repo — a `tea.Cmd` appended to a `cmds` accumulator that the enclosing case discarded with `return a, nil`, so the download goroutine was never scheduled (user-visible symptom: `s` on a non-cached attachment stuck the status bar on `Downloading...` forever). `go vet` didn't catch it. Wiring staticcheck into both workflows — pinned to `honnef.co/go/tools/cmd/staticcheck@2026.1` (v0.7.0, the version Phase 21 F5 rebuilt against Go 1.26.2) — runs the default check set (SA correctness, ST style, S simplification, QF quick-fix) on every PR and every release tag. Currently passes clean on the server repo. Sister entry in sshkey-term's CHANGELOG covers the client side.
+
 ## [v0.2.0] - 2026-04-24
 
 ### Security

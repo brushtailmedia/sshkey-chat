@@ -25,3 +25,12 @@ jobs:
       - name: Coverage Guard
         run: bash .github/scripts/check_coverage.sh
       - run: go vet ./...
+      # staticcheck: catches bug classes go vet misses. Added 2026-04-25
+      # after the post-v0.2.1 audit found SA4006 (this value is never
+      # used) on a tea.Cmd that was appended to a discarded accumulator
+      # — the download goroutine silently never fired. Pinned to 2026.1
+      # (the version Phase 21 F5 rebuilt against Go 1.26.2).
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@2026.1
+      - name: Staticcheck
+        run: staticcheck ./...
