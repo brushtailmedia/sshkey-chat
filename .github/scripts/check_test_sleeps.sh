@@ -13,7 +13,11 @@ hits_file="$(mktemp)"
 allow_file="$(mktemp)"
 trap 'rm -f "$hits_file" "$allow_file"' EXIT
 
-rg -n 'time\.Sleep\(' "$ROOT" --glob '**/*_test.go' -S \
+# grep -rn is portable (ripgrep is not guaranteed on default GitHub runners).
+# -F treats 'time.Sleep(' as a literal string, so we don't have to juggle BRE
+# vs ERE escape rules for the paren. || true keeps pipefail quiet when the
+# tree has zero matches.
+{ grep -rn --include='*_test.go' -F 'time.Sleep(' "$ROOT" || true; } \
   | sed "s#^$ROOT/##" \
   | cut -d: -f1,2 \
   | sort -u > "$hits_file"

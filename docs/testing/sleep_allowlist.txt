@@ -2,14 +2,13 @@
 # Format:
 #   path:line | owner | rationale
 
-cmd/sshkey-server/main_test.go:237 | phase22 | server startup handshake stabilization in integration harness
-cmd/sshkey-server/main_test.go:535 | phase22 | reconnect propagation timing in integration flow
-cmd/sshkey-server/main_test.go:1133 | phase22 | multi-device propagation stabilization in integration flow
-cmd/sshkey-server/main_test.go:1586 | phase22 | retirement write-out ordering window before cutoff assertion
+cmd/sshkey-server/main_test.go:238 | phase22 | server startup handshake stabilization in integration harness
+cmd/sshkey-server/main_test.go:536 | phase22 | reconnect propagation timing in integration flow
+cmd/sshkey-server/main_test.go:1585 | phase22 | retirement write-out ordering window before cutoff assertion
 internal/counters/counters_test.go:210 | phase22 | wall-clock expiry boundary assertion
-internal/server/backup_scheduler_test.go:256 | phase22 | scheduler tick timing verification
-internal/server/backup_scheduler_test.go:260 | phase22 | scheduler tick timing verification
-internal/server/backup_scheduler_test.go:561 | phase22 | wait for async scheduler side-effect
+internal/server/backup_scheduler_test.go:253 | phase22 | scheduler tick timing verification
+internal/server/backup_scheduler_test.go:257 | phase22 | scheduler tick timing verification
+internal/server/backup_scheduler_test.go:558 | phase22 | wait for async scheduler side-effect
 internal/server/idle_watchdog_test.go:98 | phase22 | watchdog goroutine scheduling window
 internal/server/idle_watchdog_test.go:136 | phase22 | watchdog timeout boundary
 internal/server/idle_watchdog_test.go:164 | phase22 | watchdog timeout boundary
