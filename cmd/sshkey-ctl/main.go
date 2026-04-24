@@ -54,12 +54,14 @@ func run() error {
 	cmdArgs := args[1:]
 
 	switch cmd {
+	case "init":
+		return cmdInit(configDir, dataDir, cmdArgs)
 	case "pending":
 		return cmdPending(dataDir)
 	case "approve":
 		return cmdApprove(configDir, dataDir, cmdArgs)
 	case "bootstrap-admin":
-		return cmdBootstrapAdmin(dataDir, cmdArgs)
+		return cmdBootstrapAdmin(configDir, dataDir, cmdArgs)
 	case "reject":
 		return cmdReject(dataDir, cmdArgs)
 	case "list-users":
@@ -157,10 +159,15 @@ func printUsage() error {
 Usage: sshkey-ctl [--config DIR] [--data DIR] <command> [args]
 
 Commands:
+  init [--docker] [--yes] [--bind ADDR] [--port N]
+                                          Guided first-run setup (writes server.toml
+                                          if missing; initializes SQLite store)
   pending                                 View pending key requests
   approve --key "ssh-ed25519 AAAA... name" --rooms ROOMS  Approve (display name from key comment)
   approve --key "ssh-ed25519 AAAA..." --name NAME --rooms ROOMS  Approve (override display name)
-  bootstrap-admin DISPLAY_NAME            Generate admin keypair (server-side keygen, encrypted, prompts for passphrase)
+  bootstrap-admin DISPLAY_NAME [--out DIR]
+                                          Generate admin keypair (server-side keygen,
+                                          encrypted, prompts for passphrase)
   reject --fingerprint FP                 Reject/clear a pending key
   list-users                              List all users
   show-user <id|display_name>             Full user details (key, rooms, devices)

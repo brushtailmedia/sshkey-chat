@@ -13,7 +13,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
 
@@ -88,7 +87,7 @@ func TestRoomStats_HappyPath(t *testing.T) {
 	users := map[string]testUser{
 		"usr_alice": {Key: aliceKey, DisplayName: "Alice", Rooms: []string{"general"}},
 	}
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {Topic: "Chat"},
 	}, users)
 
@@ -234,7 +233,7 @@ func TestCheckIntegrity_FreshDBsPasses(t *testing.T) {
 	users := map[string]testUser{
 		"usr_alice": {Key: aliceKey, DisplayName: "Alice"},
 	}
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {},
 	}, users)
 

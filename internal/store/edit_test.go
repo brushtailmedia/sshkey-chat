@@ -3,8 +3,6 @@ package store
 import (
 	"database/sql"
 	"testing"
-
-	"github.com/brushtailmedia/sshkey-chat/internal/config"
 )
 
 // Phase 15: unit tests for the edit store helpers. Covers UpdateX Edited
@@ -20,7 +18,7 @@ func setupEditTestStore(t *testing.T) (*Store, string) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
-	s.SeedRooms(map[string]config.Room{"general": {Topic: "Chat"}})
+	s.SeedRooms(map[string]RoomSeed{"general": {Topic: "Chat"}})
 	generalID := s.RoomDisplayNameToID("general")
 	if generalID == "" {
 		t.Fatal("seed failed")

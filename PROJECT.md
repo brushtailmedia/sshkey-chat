@@ -26,8 +26,7 @@ Server machine
 ├── sshkey-server (:2222)  -- chat app, own SSH listener, own key store
 ├── sshkey-ctl            -- local admin tool, reads/writes config + pending log
 ├── /etc/sshkey-chat/
-│   ├── server.toml         -- server config (port, retention settings)
-│   └── rooms.toml          -- optional seed file (first-run only; then rooms.db is source of truth)
+│   └── server.toml         -- server config (port, retention settings)
 └── /var/sshkey-chat/
     ├── pending-keys.log    -- unrecognised keys that tried to connect
     ├── audit.log           -- append-only log of admin actions
@@ -1149,19 +1148,6 @@ grace_period = "10s"             # time to finish in-flight transfers on shutdow
 
 > **Full reference:** `docker/config/server.toml` documents every knob (including `[server.auto_revoke]`, `[server.quotas.user]`, `[backup]`, the expanded `[rate_limits]` surface added by Phases 17 / 17b / 17c, and the `[files].max_file_ids_per_message` cap) with inline trade-off comments. The example above is the minimal learn-by-shape subset.
 
-```toml
-# /etc/sshkey-chat/rooms.toml (optional SEED FILE — processed on first server start only if rooms.db does not yet exist)
-# After first start, manage rooms via: sshkey-ctl add-room / add-to-room / remove-from-room / retire-room
-[general]
-topic = "General chat"
-
-[engineering]
-topic = "Core platform work"
-
-[admin]
-topic = "Admin discussion"
-```
-
 **Users are not configured via a seed file.** On a fresh deployment, create the first admin with:
 
 ```bash
@@ -1170,7 +1156,17 @@ sshkey-ctl bootstrap-admin admin-name
 
 This generates an Ed25519 keypair (interactive passphrase prompt, zxcvbn score ≥ 3 required), inserts the user row into `users.db` with `is_admin = true`, and writes the encrypted private key to the current directory. Subsequent users join via the normal pending-keys + `sshkey-ctl approve` flow. `users.toml` seed support was removed in Phase 16 Gap 4 — a stray `users.toml` in the config dir is ignored at startup with a one-time WARN log.
 
-Server watches `server.toml` and `rooms.toml` for changes (fsnotify) or reloads on SIGHUP.
+**Docker onboarding flow:**
+- one-time host preflight for key export mount:
+  `mkdir -p ./docker/keys && sudo chown 2222:2222 ./docker/keys && sudo chmod 700 ./docker/keys`
+- runtime sequence:
+  `docker compose run --rm --entrypoint sshkey-ctl sshkey-chat init --docker`
+  `docker compose up -d`
+  `docker compose exec -it sshkey-chat sshkey-ctl bootstrap-admin <name> --out /keys`
+- ownership note: generated private key may be `2222:2222` with mode `0600`; Linux operators can hand off with:
+  `sudo install -m 600 ./docker/keys/<name>_ed25519 ~/.ssh/<name>_ed25519 && sudo chown $(id -u):$(id -g) ~/.ssh/<name>_ed25519`
+
+Server watches `server.toml` for changes (fsnotify) or reloads it on SIGHUP.
 
 ### sshkey-ctl
 
@@ -2161,8 +2157,8 @@ Admin-only CLI command: `sshkey-ctl delete-room --name general [--purge]`
 
 ### Flow
 
-1. Remove room from `rooms.toml` (atomic write)
-2. Server detects via file watcher:
+1. Queue room deletion via `sshkey-ctl delete-room` (DB-backed mutation)
+2. Server detects the queued operation via its pending-table polling bridge:
    - Removes all users from the room in memory
    - Broadcasts `room_event` leave for every member
    - Broadcasts `room_deleted` event (new message type): `{"type":"room_deleted","room":"general"}`
@@ -2175,7 +2171,7 @@ Admin-only CLI command: `sshkey-ctl delete-room --name general [--purge]`
 - No bulk message deletion through the protocol — bulk operations are admin CLI only
 - If you want to keep the room but clear history, use `sshkey-ctl purge --room general --older-than 0d`
 - Room deletion is visible and auditable — cannot silently wipe a room's messages without deleting the room itself
-- Archived DBs can be restored by renaming back and re-adding the room to rooms.toml
+- Archived DBs can be restored by renaming back and recreating the room via `sshkey-ctl add-room`
 
 ---
 

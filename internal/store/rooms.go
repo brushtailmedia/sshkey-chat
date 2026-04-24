@@ -6,8 +6,6 @@ import (
 	"math/big"
 	"strings"
 	"time"
-
-	"github.com/brushtailmedia/sshkey-chat/internal/config"
 )
 
 // retiredRoomSuffixLen is the number of random base62 characters appended
@@ -73,10 +71,15 @@ func (s *Store) RoomsDBEmpty() bool {
 	return count == 0
 }
 
-// SeedRooms populates rooms.db from a parsed rooms.toml map.
-// Generates a nanoid ID for each room. The TOML section key becomes
-// the display_name. Skips if rooms.db already has data.
-func (s *Store) SeedRooms(rooms map[string]config.Room) (int, error) {
+// RoomSeed describes a room to insert through SeedRooms.
+type RoomSeed struct {
+	Topic string
+}
+
+// SeedRooms populates rooms.db from a room-seed map.
+// Generates a nanoid ID for each room. The map key becomes display_name.
+// Skips if rooms.db already has data.
+func (s *Store) SeedRooms(rooms map[string]RoomSeed) (int, error) {
 	if !s.RoomsDBEmpty() {
 		return 0, nil
 	}
@@ -295,8 +298,6 @@ func (s *Store) RoomDisplayNameToID(name string) string {
 		name).Scan(&id)
 	return id
 }
-
-
 
 // GetAllRooms returns all rooms from rooms.db.
 func (s *Store) GetAllRooms() ([]RoomRecord, error) {
@@ -551,4 +552,3 @@ func generateRetiredSuffix(n int) string {
 	}
 	return sb.String()
 }
-

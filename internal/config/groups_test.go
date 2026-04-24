@@ -39,10 +39,6 @@ bind = "0.0.0.0"
 [groups]
 max_members = 200
 `), 0644)
-	os.WriteFile(filepath.Join(dir, "rooms.toml"), []byte(`
-[general]
-topic = "General"
-`), 0644)
 
 	cfg, err := Load(dir)
 	if err != nil {
@@ -68,10 +64,6 @@ bind = "0.0.0.0"
 
 [groups]
 max_members = 0
-`), 0644)
-	os.WriteFile(filepath.Join(dir, "rooms.toml"), []byte(`
-[general]
-topic = "General"
 `), 0644)
 
 	cfg, err := Load(dir)

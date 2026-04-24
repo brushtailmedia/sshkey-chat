@@ -39,14 +39,14 @@ type testFixtureUser struct {
 
 var (
 	testFixtureOnce  sync.Once
-	testFixtureDir   string            // temp config dir (server.toml + rooms.toml only)
+	testFixtureDir   string            // temp config dir (server.toml only)
 	testFixtureUsers []testFixtureUser // user metadata for store seeding
 	testFixtureErr   error
 )
 
 // setupFixtures creates three Ed25519 test keys (alice/bob/carol) in a
 // per-run temp directory and builds a temp config dir containing
-// rooms.toml + server.toml. The
+// server.toml. The
 // generated user metadata is stashed in testFixtureUsers for later
 // seeding into users.db via store.InsertUser. Called lazily on first
 // test that needs the fixtures.
@@ -99,16 +99,14 @@ func generateTestFixtures() (string, []testFixtureUser, error) {
 		u.PubKey = pubLine[:len(pubLine)-1] + " " + u.DisplayName + "@test"
 	}
 
-	// Copy rooms.toml + server.toml from committed testdata
-	for _, f := range []string{"rooms.toml", "server.toml"} {
-		src := filepath.Join("..", "..", "testdata", "config", f)
-		data, err := os.ReadFile(src)
-		if err != nil {
-			return "", nil, fmt.Errorf("read %s: %w", src, err)
-		}
-		if err := os.WriteFile(filepath.Join(tmpConfigDir, f), data, 0644); err != nil {
-			return "", nil, err
-		}
+	// Copy server.toml from committed testdata.
+	src := filepath.Join("..", "..", "testdata", "config", "server.toml")
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return "", nil, fmt.Errorf("read %s: %w", src, err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpConfigDir, "server.toml"), data, 0644); err != nil {
+		return "", nil, err
 	}
 
 	return tmpConfigDir, users, nil
@@ -198,16 +196,21 @@ func newTestEnvWithConfig(t *testing.T, mutate func(*config.Config)) *testEnv {
 		t.Fatalf("create server: %v", err)
 	}
 
-	// Phase 16 Gap 4: users.toml seeding was removed. Insert the test
-	// fixture users directly into users.db / room_members via the
-	// public store API, after server.New has initialized the store
-	// schema and seeded rooms.db from rooms.toml. Pass testDataDir
+	// Phase 16/23: users.toml and rooms.toml seeding were removed.
+	// Seed rooms + users directly through the store API after
+	// server.New has initialized schemas. Pass testDataDir
 	// (not testDataDir+"/data") because store.Open creates the "data"
 	// subdirectory itself — passing the joined path would create
 	// data/data which the server can't see.
 	st, err := store.Open(testDataDir)
 	if err != nil {
 		t.Fatalf("open store for fixture seeding: %v", err)
+	}
+	if _, err := st.SeedRooms(map[string]store.RoomSeed{
+		"general":     {Topic: "General"},
+		"engineering": {Topic: "Engineering"},
+	}); err != nil {
+		t.Fatalf("seed rooms: %v", err)
 	}
 	for _, u := range fixtureUsers {
 		// Strip the comment from the key for storage parity with

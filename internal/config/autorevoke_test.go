@@ -54,10 +54,6 @@ malformed_frame       = "3:60"
 invalid_nanoid        = "5:60"
 wrapped_keys_over_cap = "2:60"
 `), 0644)
-	os.WriteFile(filepath.Join(dir, "rooms.toml"), []byte(`
-[general]
-topic = "General"
-`), 0644)
 
 	cfg, err := Load(dir)
 	if err != nil {
@@ -342,10 +338,6 @@ enabled = true
 
 [server.auto_revoke.thresholds]
 malfromed_frame = "3:60"
-`), 0644)
-	os.WriteFile(filepath.Join(dir, "rooms.toml"), []byte(`
-[general]
-topic = "General"
 `), 0644)
 
 	_, err := Load(dir)

@@ -38,9 +38,6 @@ enabled = false
 `), 0644); err != nil {
 		t.Fatalf("write server.toml: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(configDir, "rooms.toml"), []byte{}, 0644); err != nil {
-		t.Fatalf("write rooms.toml: %v", err)
-	}
 	cfg, err := config.Load(configDir)
 	if err != nil {
 		t.Fatalf("load config: %v", err)

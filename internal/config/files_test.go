@@ -38,10 +38,6 @@ bind = "0.0.0.0"
 [files]
 max_file_ids_per_message = 50
 `), 0644)
-	os.WriteFile(filepath.Join(dir, "rooms.toml"), []byte(`
-[general]
-topic = "General"
-`), 0644)
 
 	cfg, err := Load(dir)
 	if err != nil {
@@ -63,10 +59,6 @@ port = 2222
 
 [files]
 max_file_ids_per_message = 0
-`), 0644)
-	os.WriteFile(filepath.Join(dir, "rooms.toml"), []byte(`
-[general]
-topic = "General"
 `), 0644)
 
 	cfg, err := Load(dir)
@@ -97,10 +89,6 @@ port = 2222
 max_file_size = "25MB"
 max_avatar_size = "128KB"
 max_file_ids_per_message = 30
-`), 0644)
-	os.WriteFile(filepath.Join(dir, "rooms.toml"), []byte(`
-[general]
-topic = "General"
 `), 0644)
 
 	cfg, err := Load(dir)

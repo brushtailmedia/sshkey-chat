@@ -45,9 +45,6 @@ allow_exempt_users = ` + allowLine + `
 	if err := os.WriteFile(filepath.Join(configDir, "server.toml"), []byte(toml), 0644); err != nil {
 		t.Fatalf("write server.toml: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(configDir, "rooms.toml"), []byte{}, 0644); err != nil {
-		t.Fatalf("write rooms.toml: %v", err)
-	}
 
 	st, err := store.Open(dataDir)
 	if err != nil {

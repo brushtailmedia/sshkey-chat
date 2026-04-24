@@ -64,29 +64,27 @@ Only Ed25519 SSH keys are supported. The server rejects RSA, ECDSA, and other ke
 ### Docker (recommended)
 
 ```bash
-# 1. (Optional) Edit docker/config/rooms.toml to seed initial rooms on first start.
-#    The seed file is processed only on first boot — rooms.db becomes the
-#    source of truth after that.
+# 1. One-time host preflight for key export mount
+mkdir -p ./docker/keys
+sudo chown 2222:2222 ./docker/keys
+sudo chmod 700 ./docker/keys
 
-# 2. Start the server
+# 2. Initialize config + SQLite state (interactive; press Enter to accept defaults)
+docker compose run --rm --entrypoint sshkey-ctl sshkey-chat init --docker
+# Non-interactive (CI / scripted):
+# docker compose run --rm --entrypoint sshkey-ctl sshkey-chat init --docker --yes
+
+# 3. Start the server
 docker compose up -d
 
-# 3. Create the first admin. The -it flags are REQUIRED — bootstrap-admin
-#    prompts interactively for a passphrase (zxcvbn strength check, min
-#    score 3). Inserts the admin row into users.db + writes the encrypted
-#    Ed25519 private key to /var/sshkey-chat/alice_ed25519 inside the
-#    container (which is a persistent volume).
-docker exec -it sshkey-chat sshkey-ctl bootstrap-admin alice
+# 4. Create the first admin and export key material to the mounted host dir
+docker compose exec -it sshkey-chat sshkey-ctl bootstrap-admin alice --out /keys
 
-# 4. Extract the generated private key from the container to your local
-#    SSH directory. The file is encrypted with the passphrase you just
-#    chose, so copying it is safe over untrusted paths.
-docker cp sshkey-chat:/var/sshkey-chat/alice_ed25519 ~/.ssh/
-docker cp sshkey-chat:/var/sshkey-chat/alice_ed25519.pub ~/.ssh/
-chmod 600 ~/.ssh/alice_ed25519
+# 5. (Linux handoff, if needed) copy key to your user-owned ~/.ssh path
+sudo install -m 600 ./docker/keys/alice_ed25519 ~/.ssh/alice_ed25519
+sudo chown "$(id -u):$(id -g)" ~/.ssh/alice_ed25519
 
-# 5. Connect with sshkey-term. It prompts for the passphrase on first
-#    use and remembers the key in the client's encrypted store.
+# 6. Connect with sshkey-term
 sshkey-term --host localhost --key ~/.ssh/alice_ed25519
 ```
 
@@ -128,7 +126,7 @@ docker exec sshkey-chat sshkey-ctl revoke-device --user usr_abc123 --device dev_
 docker logs -f sshkey-chat
 ```
 
-> **Note:** `rooms.toml` is a seed file — it is only processed on first server start to bootstrap initial rooms. After that, `rooms.db` is the source of truth and all management happens through `sshkey-ctl`. Users are bootstrapped via `sshkey-ctl bootstrap-admin <name>` on a fresh deployment (generates an Ed25519 keypair with an interactive passphrase, inserts the user row with admin rights, and writes the encrypted private key to the current working directory). Everyone else joins via the normal `approve` flow. `users.toml` seed support was removed in Phase 16.
+> **Note:** `rooms.toml` is removed. First-run setup is `sshkey-ctl init`; room lifecycle is managed through `sshkey-ctl` commands (`add-room`, `rename-room`, `set-default-room`, etc). First admin bootstrap is `sshkey-ctl bootstrap-admin <name> [--out DIR]`.
 
 ### Install
 
@@ -144,7 +142,7 @@ Or download pre-built binaries from [Releases](https://github.com/brushtailmedia
 
 #### Requirements
 
-- Go 1.25 or later
+- Go 1.26.2 or later
 
 #### Build
 
@@ -156,12 +154,15 @@ go build -o sshkey-ctl ./cmd/sshkey-ctl
 ### Configure
 
 ```bash
-mkdir -p /etc/sshkey-chat /var/sshkey-chat
+# Guided first-run setup (interactive; press Enter to accept defaults)
+sshkey-ctl init
+# Non-interactive:
+# sshkey-ctl init --yes
 ```
 
-Create the config files:
-
-> **Note:** `rooms.toml` is a **seed file only** — processed on first server start to bootstrap initial rooms. After that, use `sshkey-ctl` for all room management. `server.toml` remains the runtime config file for server settings. Users are bootstrapped via `sshkey-ctl bootstrap-admin` (not a seed file) — see the setup flow below.
+`sshkey-ctl init` creates config/data directories, writes `server.toml`
+when missing, initializes SQLite DBs, and creates starter rooms
+(`general`, `support`) by default.
 
 **`/etc/sshkey-chat/server.toml`**
 
@@ -196,19 +197,10 @@ See `docker/config/server.toml` for the complete reference with every option doc
 
 ```bash
 sshkey-ctl bootstrap-admin admin
+# Docker: sshkey-ctl bootstrap-admin admin --out /keys
 ```
 
 This generates an Ed25519 keypair (interactive passphrase prompt), inserts the admin row into `users.db`, writes the encrypted private key to the current directory, and records an audit entry. Subsequent users join via the normal pending-keys + `approve` flow.
-
-**`/etc/sshkey-chat/rooms.toml`** -- Seed file, processed on first server start only. After that, use `sshkey-ctl` to manage rooms.
-
-```toml
-[general]
-topic = "General chat"
-
-[support]
-topic = "Requests, questions, and admin help"
-```
 
 ### Run
 
@@ -234,11 +226,10 @@ sudo mkdir -p /etc/sshkey-chat /var/sshkey-chat
 sudo chown sshkey:sshkey /var/sshkey-chat
 sudo chmod 750 /var/sshkey-chat
 
-# Copy config files
-sudo cp docker/config/server.toml /etc/sshkey-chat/
-sudo cp docker/config/rooms.toml /etc/sshkey-chat/   # optional — seed default rooms
-# Edit server.toml to taste; rooms.toml is optional (server creates empty rooms.db if absent)
-# Bootstrap the first admin (see "Configure" above for sshkey-ctl bootstrap-admin)
+# Initialize config + SQLite state (idempotent)
+sudo sshkey-ctl --config /etc/sshkey-chat --data /var/sshkey-chat init --yes
+# Optional: edit /etc/sshkey-chat/server.toml to tune runtime settings.
+# Bootstrap the first admin (see "Configure" above).
 
 # Install and enable the service
 sudo cp init/sshkey-server.service /etc/systemd/system/
@@ -273,6 +264,7 @@ sshkey-ctl reject --fingerprint FP                             # reject a pendin
 sshkey-ctl list-users                                          # list all users
 sshkey-ctl show-user alice                                     # full user details (key, rooms, devices)
 sshkey-ctl bootstrap-admin alice                               # generate admin keypair (server-side, encrypted)
+sshkey-ctl bootstrap-admin alice --out /keys                   # Docker/mounted-dir key export
 sshkey-ctl retire-user usr_abc123 --reason key_lost            # permanently retire an account
 sshkey-ctl unretire-user usr_abc123                            # reverse a mistaken retirement
 sshkey-ctl list-retired                                        # list retired accounts
@@ -664,7 +656,7 @@ sshkey-chat/
 │   ├── push/              # APNs + FCM push notification senders
 │   ├── server/            # SSH server, session handling, all protocol logic
 │   └── store/             # SQLite storage (users, rooms, messages, devices, epochs, groups, DMs)
-├── testdata/config/       # test-fixture configs (rooms.toml + server.toml; no users.toml since Phase 16)
+├── testdata/config/       # test-fixture configs (server.toml)
 ├── go.mod
 └── go.sum
 ```

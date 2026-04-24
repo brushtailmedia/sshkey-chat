@@ -3,8 +3,6 @@ package store
 import (
 	"strings"
 	"testing"
-
-	"github.com/brushtailmedia/sshkey-chat/internal/config"
 )
 
 func TestRoomsDB_SchemaCreated(t *testing.T) {
@@ -64,7 +62,7 @@ func TestSeedRooms_PopulatesDB(t *testing.T) {
 	}
 	defer st.Close()
 
-	rooms := map[string]config.Room{
+	rooms := map[string]RoomSeed{
 		"general": {Topic: "General chat"},
 		"support": {Topic: "Help and requests"},
 	}
@@ -110,7 +108,7 @@ func TestSeedRooms_SkipsIfNotEmpty(t *testing.T) {
 	}
 	defer st.Close()
 
-	rooms := map[string]config.Room{
+	rooms := map[string]RoomSeed{
 		"general": {Topic: "General chat"},
 	}
 
@@ -121,7 +119,7 @@ func TestSeedRooms_SkipsIfNotEmpty(t *testing.T) {
 	}
 
 	// Second seed — should skip
-	count, err = st.SeedRooms(map[string]config.Room{
+	count, err = st.SeedRooms(map[string]RoomSeed{
 		"engineering": {Topic: "Eng"},
 		"design":      {Topic: "Design"},
 	})
@@ -147,7 +145,7 @@ func TestSeedRooms_EmptyMap(t *testing.T) {
 	}
 	defer st.Close()
 
-	count, err := st.SeedRooms(map[string]config.Room{})
+	count, err := st.SeedRooms(map[string]RoomSeed{})
 	if err != nil {
 		t.Fatalf("seed empty: %v", err)
 	}
@@ -182,7 +180,7 @@ func TestGetRoomByID(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.SeedRooms(map[string]config.Room{"general": {Topic: "Chat"}})
+	st.SeedRooms(map[string]RoomSeed{"general": {Topic: "Chat"}})
 
 	all, _ := st.GetAllRooms()
 	id := all[0].ID
@@ -213,7 +211,7 @@ func TestGetRoomByDisplayName(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.SeedRooms(map[string]config.Room{"general": {Topic: "Chat"}})
+	st.SeedRooms(map[string]RoomSeed{"general": {Topic: "Chat"}})
 
 	// Exact match
 	room, _ := st.GetRoomByDisplayName("general")
@@ -245,7 +243,7 @@ func TestRoomDisplayNameToID(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.SeedRooms(map[string]config.Room{"general": {Topic: "Chat"}})
+	st.SeedRooms(map[string]RoomSeed{"general": {Topic: "Chat"}})
 
 	id := st.RoomDisplayNameToID("general")
 	if !strings.HasPrefix(id, "room_") {
@@ -265,8 +263,6 @@ func TestRoomDisplayNameToID(t *testing.T) {
 	}
 }
 
-
-
 // Phase 16 Gap 4: TestSeedRoomMembers_* and the SeedRoomMembers
 // helper they exercised were removed when users.toml support was
 // deleted. Room memberships for new users are now established via
@@ -285,7 +281,7 @@ func TestRoomMembersEmpty(t *testing.T) {
 		t.Error("fresh DB should have empty room_members")
 	}
 
-	st.SeedRooms(map[string]config.Room{"general": {Topic: "Chat"}})
+	st.SeedRooms(map[string]RoomSeed{"general": {Topic: "Chat"}})
 	generalID := st.RoomDisplayNameToID("general")
 	if err := st.AddRoomMember(generalID, "usr_alice", 0); err != nil {
 		t.Fatalf("add member: %v", err)
@@ -304,7 +300,7 @@ func TestAddRoomMember(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.SeedRooms(map[string]config.Room{"general": {Topic: "Chat"}})
+	st.SeedRooms(map[string]RoomSeed{"general": {Topic: "Chat"}})
 	roomID := st.RoomDisplayNameToID("general")
 
 	err = st.AddRoomMember(roomID, "usr_alice", 0)
@@ -331,7 +327,7 @@ func TestRemoveRoomMember(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.SeedRooms(map[string]config.Room{"general": {Topic: "Chat"}})
+	st.SeedRooms(map[string]RoomSeed{"general": {Topic: "Chat"}})
 	roomID := st.RoomDisplayNameToID("general")
 
 	st.AddRoomMember(roomID, "usr_alice", 0)
@@ -364,7 +360,7 @@ func TestRemoveAllRoomMembers(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.SeedRooms(map[string]config.Room{
+	st.SeedRooms(map[string]RoomSeed{
 		"general": {Topic: "Chat"},
 		"support": {Topic: "Help"},
 	})
@@ -396,7 +392,7 @@ func TestRoomsDBEmpty_FalseAfterSeed(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.SeedRooms(map[string]config.Room{"general": {Topic: "Chat"}})
+	st.SeedRooms(map[string]RoomSeed{"general": {Topic: "Chat"}})
 
 	if st.RoomsDBEmpty() {
 		t.Error("should not be empty after seed")

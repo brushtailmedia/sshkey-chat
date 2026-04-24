@@ -1,9 +1,0 @@
-# Seed file — processed on FIRST SERVER START ONLY.
-# After that, rooms.db is the source of truth and this file is ignored.
-# Use sshkey-ctl to manage rooms after the initial seed.
-#
-# To add a room after first start:
-#   docker exec sshkey-chat sshkey-ctl add-room --name engineering --topic "Engineering chat"
-
-[general]
-topic = "General chat"

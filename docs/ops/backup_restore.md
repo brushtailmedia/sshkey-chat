@@ -22,9 +22,6 @@ backup-<YYYYMMDD-HHMMSS>[-<label>].tar.gz
     server.toml                          (server config; opt out via include_config_files)
 ```
 
-**`rooms.toml` is NOT included** — it's a seed file that's ignored
-once `rooms.db` exists, so bundling it would be misleading on restore.
-
 **SQLite DBs use the Online Backup API** so backups run safely while
 the server keeps serving clients. No downtime, no client disconnects.
 

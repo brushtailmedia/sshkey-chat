@@ -15,7 +15,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
 
@@ -92,7 +91,7 @@ func TestShowUser_IncludesRooms(t *testing.T) {
 	users := map[string]testUser{
 		"usr_alice": {Key: aliceKey, DisplayName: "Alice", Rooms: []string{"general"}},
 	}
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {Topic: "Chat"},
 	}, users)
 
@@ -144,7 +143,7 @@ func TestShowRoom_FoundByDisplayName(t *testing.T) {
 	users := map[string]testUser{
 		"usr_alice": {Key: aliceKey, DisplayName: "Alice", Rooms: []string{"general"}},
 	}
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {Topic: "General chat"},
 	}, users)
 
@@ -167,7 +166,7 @@ func TestShowRoom_FoundByDisplayName(t *testing.T) {
 }
 
 func TestShowRoom_FoundByID(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {Topic: "Chat"},
 	})
 

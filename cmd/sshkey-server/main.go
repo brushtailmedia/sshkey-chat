@@ -39,7 +39,6 @@ func run() error {
 	}
 
 	logger.Info("config loaded",
-		"rooms", len(cfg.Rooms),
 		"port", cfg.Server.Server.Port,
 	)
 

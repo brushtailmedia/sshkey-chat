@@ -82,8 +82,7 @@ type BackupSection struct {
 	// config via external systems (git, ansible) can opt out to avoid
 	// duplicate sources of truth. host_key is ALWAYS included when
 	// IncludeConfigFiles is true because restore-to-new-machine
-	// without it breaks every client's SSH pinning. rooms.toml is
-	// never included (seed file, ignored when rooms.db exists).
+	// without it breaks every client's SSH pinning.
 	IncludeConfigFiles bool `toml:"include_config_files"`
 }
 
@@ -93,7 +92,7 @@ type BackupSection struct {
 type ParsedBackupConfig struct {
 	Enabled            bool
 	Interval           time.Duration
-	DestDir            string        // cleaned; still relative if operator specified relative (caller resolves against dataDir)
+	DestDir            string // cleaned; still relative if operator specified relative (caller resolves against dataDir)
 	RetentionCount     int
 	RetentionAge       time.Duration // 0 = no age cutoff
 	Compress           bool

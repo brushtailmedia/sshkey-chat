@@ -1,14 +1,7 @@
 package config
 
-// Phase 16 Gap 4: most of this file's previous tests exercised the
-// users.toml load path and the cross-validation between users.toml and
-// rooms.toml. That whole subsystem was removed when users.toml support
-// was deleted — operators now create the first admin via
-// `sshkey-ctl bootstrap-admin` and seed rooms via `sshkey-ctl add-room`
-// (or via the rooms.toml seed which is still supported).
-//
-// The remaining tests cover what still exists: rooms.toml loading and
-// the absence of the deleted Users field on Config.
+// Phase 16 + Phase 23 removed users.toml and rooms.toml support.
+// Load now parses server.toml only.
 
 import (
 	"os"
@@ -17,7 +10,7 @@ import (
 )
 
 // writeMinimalConfig sets up a minimal valid config directory with
-// just server.toml and rooms.toml. Returns the directory path.
+// server.toml only. Returns the directory path.
 func writeMinimalConfig(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -26,11 +19,6 @@ func writeMinimalConfig(t *testing.T) string {
 [server]
 port = 2222
 bind = "0.0.0.0"
-`), 0644)
-
-	os.WriteFile(filepath.Join(dir, "rooms.toml"), []byte(`
-[general]
-topic = "General"
 `), 0644)
 
 	return dir
@@ -47,12 +35,6 @@ func TestLoadMinimal(t *testing.T) {
 	if cfg.Server.Server.Port != 2222 {
 		t.Errorf("port = %d, want 2222", cfg.Server.Server.Port)
 	}
-	if len(cfg.Rooms) != 1 {
-		t.Errorf("expected 1 room, got %d", len(cfg.Rooms))
-	}
-	if _, ok := cfg.Rooms["general"]; !ok {
-		t.Error("expected 'general' room to be loaded")
-	}
 }
 
 // TestLoadIgnoresUsersTomlIfPresent verifies that a stray users.toml
@@ -68,8 +50,8 @@ func TestLoadMinimal(t *testing.T) {
 // guard: future changes to the config schema that drop or rename a
 // documented key will fail this test before reaching CI.
 func TestDockerReferenceServerToml_LoadsCleanly(t *testing.T) {
-	// Copy the reference server.toml + a minimal rooms.toml into a
-	// temp dir and Load. Reference is at ../../docker/config/server.toml
+	// Copy the reference server.toml into a temp dir and Load.
+	// Reference is at ../../docker/config/server.toml
 	// relative to internal/config/.
 	refPath := filepath.Join("..", "..", "docker", "config", "server.toml")
 	data, err := os.ReadFile(refPath)
@@ -80,12 +62,6 @@ func TestDockerReferenceServerToml_LoadsCleanly(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "server.toml"), data, 0644); err != nil {
 		t.Fatalf("write temp server.toml: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "rooms.toml"), []byte(`
-[general]
-topic = "General"
-`), 0644); err != nil {
-		t.Fatalf("write rooms.toml: %v", err)
 	}
 
 	cfg, err := Load(dir)

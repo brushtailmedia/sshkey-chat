@@ -58,15 +58,40 @@ import (
 // recovery without becoming a brute-force surface.
 const passphraseRetries = 3
 
-func cmdBootstrapAdmin(dataDir string, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: bootstrap-admin DISPLAY_NAME\n\n" +
+func cmdBootstrapAdmin(configDir, dataDir string, args []string) error {
+	var outDir string
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--out":
+			if i+1 >= len(args) {
+				return fmt.Errorf("usage: bootstrap-admin DISPLAY_NAME [--out DIR]")
+			}
+			outDir = args[i+1]
+			i++
+		case "--help", "-h":
+			return fmt.Errorf("usage: bootstrap-admin DISPLAY_NAME [--out DIR]")
+		default:
+			if strings.HasPrefix(args[i], "--") {
+				return fmt.Errorf("usage: bootstrap-admin DISPLAY_NAME [--out DIR]")
+			}
+			positional = append(positional, args[i])
+		}
+	}
+	if len(positional) == 0 {
+		return fmt.Errorf("usage: bootstrap-admin DISPLAY_NAME [--out DIR]\n\n" +
 			"Generates a new admin keypair, writes the encrypted private\n" +
-			"key to ./<name>_ed25519 in the current directory, and inserts\n" +
+			"key to ./<name>_ed25519 (or --out DIR), and inserts\n" +
 			"a user row with admin=true into users.db")
 	}
+	if len(positional) > 1 {
+		return fmt.Errorf("usage: bootstrap-admin DISPLAY_NAME [--out DIR]")
+	}
+	if err := checkBootstrapPreconditions(configDir, dataDir); err != nil {
+		return err
+	}
 
-	rawDisplayName := args[0]
+	rawDisplayName := positional[0]
 	displayName, err := config.ValidateDisplayName(rawDisplayName)
 	if err != nil {
 		return fmt.Errorf("display name %q invalid: %w", rawDisplayName, err)
@@ -88,22 +113,17 @@ func cmdBootstrapAdmin(dataDir string, args []string) error {
 		return err
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("cannot determine current directory: %w", err)
+	if outDir == "" {
+		outDir, err = os.Getwd()
+		if err != nil {
+			return fmt.Errorf("cannot determine current directory: %w", err)
+		}
 	}
-	if err := checkOutputFilesAvailable(cwd, displayName); err != nil {
+	if err := checkOutputDirWritable(outDir); err != nil {
 		return err
 	}
-
-	// Verify CWD is writable before we ask for a passphrase. Catches
-	// the "operator ran from / by mistake" failure mode early.
-	probe := filepath.Join(cwd, ".bootstrap-admin-write-probe")
-	if f, err := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY, 0600); err != nil {
-		return fmt.Errorf("cannot write to current directory %s: %w (run bootstrap-admin from a writable directory)", cwd, err)
-	} else {
-		f.Close()
-		os.Remove(probe)
+	if err := checkOutputFilesAvailable(outDir, displayName); err != nil {
+		return err
 	}
 
 	// Prompt for passphrase + confirmation. Loop on validation failure
@@ -116,7 +136,7 @@ func cmdBootstrapAdmin(dataDir string, args []string) error {
 	// Hand off to the testable core. It does the same checks again
 	// (race-safe) and performs the actual keygen + DB writes + audit
 	// + file writes.
-	result, err := bootstrapAdminCore(st, dataDir, displayName, passphrase, cwd)
+	result, err := bootstrapAdminCore(st, dataDir, displayName, passphrase, outDir)
 	if err != nil {
 		return err
 	}
@@ -162,6 +182,9 @@ func bootstrapAdminCore(st *store.Store, dataDir, displayName, passphrase, outDi
 	// caller checked them up-front but we want race safety for any
 	// other process that might have created a colliding row or file
 	// between the prompt and now.
+	if err := checkOutputDirWritable(outDir); err != nil {
+		return nil, err
+	}
 	if err := checkDisplayNameAvailable(st, displayName); err != nil {
 		return nil, err
 	}
@@ -274,6 +297,49 @@ func checkOutputFilesAvailable(outDir, displayName string) error {
 	}
 	if _, err := os.Stat(pub); err == nil {
 		return fmt.Errorf("file %s already exists — remove it or run from a different directory", pub)
+	}
+	return nil
+}
+
+func checkOutputDirWritable(outDir string) error {
+	info, err := os.Stat(outDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("output directory %s does not exist (for Docker mounts: run `mkdir -p ./docker/keys && sudo chown 2222:2222 ./docker/keys && sudo chmod 700 ./docker/keys`)", outDir)
+		}
+		return fmt.Errorf("stat output directory %s: %w", outDir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("output path %s is not a directory", outDir)
+	}
+
+	probe := filepath.Join(outDir, ".bootstrap-admin-write-probe")
+	f, err := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("cannot write to output directory %s: %w (for Docker mounts: run `mkdir -p ./docker/keys && sudo chown 2222:2222 ./docker/keys && sudo chmod 700 ./docker/keys`)", outDir, err)
+	}
+	_ = f.Close()
+	_ = os.Remove(probe)
+	return nil
+}
+
+func checkBootstrapPreconditions(configDir, dataDir string) error {
+	serverPath := filepath.Join(configDir, "server.toml")
+	if st, err := os.Stat(serverPath); err != nil || st.IsDir() {
+		return fmt.Errorf("bootstrap-admin prerequisites missing: %s not found. Run `sshkey-ctl init --config %s --data %s` first", serverPath, configDir, dataDir)
+	}
+
+	dataSubdir := filepath.Join(dataDir, "data")
+	info, err := os.Stat(dataSubdir)
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("bootstrap-admin prerequisites missing: %s not initialized. Run `sshkey-ctl init --config %s --data %s` first", dataSubdir, configDir, dataDir)
+	}
+
+	for _, name := range []string{"data.db", "users.db", "rooms.db"} {
+		p := filepath.Join(dataSubdir, name)
+		if st, err := os.Stat(p); err != nil || st.IsDir() {
+			return fmt.Errorf("bootstrap-admin prerequisites missing: %s not initialized. Run `sshkey-ctl init --config %s --data %s` first", p, configDir, dataDir)
+		}
 	}
 	return nil
 }

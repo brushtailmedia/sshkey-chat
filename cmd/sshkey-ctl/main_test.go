@@ -14,7 +14,6 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
 
@@ -62,7 +61,7 @@ type testUser struct {
 // directly via the store API. Phase 16 Gap 4 removed the SeedUsers /
 // SeedRoomMembers helpers, so this helper now uses InsertUser +
 // SetUserRetired + AddRoomMember instead.
-func setupDataDir(t *testing.T, rooms map[string]config.Room, users ...map[string]testUser) string {
+func setupDataDir(t *testing.T, rooms map[string]store.RoomSeed, users ...map[string]testUser) string {
 	t.Helper()
 	dir := t.TempDir()
 	st, err := store.Open(dir)
@@ -70,7 +69,9 @@ func setupDataDir(t *testing.T, rooms map[string]config.Room, users ...map[strin
 		t.Fatalf("open store: %v", err)
 	}
 	if rooms != nil {
-		st.SeedRooms(rooms)
+		if _, err := st.SeedRooms(rooms); err != nil {
+			t.Fatalf("seed rooms: %v", err)
+		}
 	}
 	if len(users) > 0 && users[0] != nil {
 		for userID, u := range users[0] {
@@ -108,28 +109,20 @@ func setupDataDir(t *testing.T, rooms map[string]config.Room, users ...map[strin
 	return dir
 }
 
-// setupConfig creates a temp config dir with rooms.toml only.
-// Phase 16 Gap 4: users.toml was removed, so the users argument is
-// kept for backwards source compatibility with the test bodies but
-// is no longer written anywhere — users go into the data dir via
-// setupDataDir instead.
-func setupConfig(t *testing.T, _ map[string]testUser, rooms map[string]config.Room) string {
+// setupConfig creates a temp config dir with a minimal server.toml.
+// The rooms/users arguments are retained for source compatibility with
+// existing call sites; room/user data is seeded into SQLite via
+// setupDataDir.
+func setupConfig(t *testing.T, _ map[string]testUser, _ map[string]store.RoomSeed) string {
 	t.Helper()
 	dir := t.TempDir()
 
-	if rooms != nil {
-		f, err := os.Create(filepath.Join(dir, "rooms.toml"))
-		if err != nil {
-			t.Fatalf("create rooms: %v", err)
-		}
-		for name, room := range rooms {
-			f.WriteString("[" + name + "]\n")
-			if room.Topic != "" {
-				f.WriteString("topic = \"" + room.Topic + "\"\n")
-			}
-			f.WriteString("\n")
-		}
-		f.Close()
+	if err := os.WriteFile(filepath.Join(dir, "server.toml"), []byte(`
+[server]
+port = 2222
+bind = "127.0.0.1"
+`), 0644); err != nil {
+		t.Fatalf("write server.toml: %v", err)
 	}
 
 	return dir
@@ -230,7 +223,7 @@ func TestApprove_ExtractsNameFromComment(t *testing.T) {
 func TestApprove_NameFlagOverridesComment(t *testing.T) {
 	key, _ := genTestKey(t, "CommentName")
 	configDir := setupConfig(t, nil, nil)
-	dataDir := setupDataDir(t, map[string]config.Room{"general": {Topic: "Chat"}})
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{"general": {Topic: "Chat"}})
 
 	err := cmdApprove(configDir, dataDir, []string{"--key", key, "--name", "OverrideName", "--rooms", "general"})
 	if err != nil {
@@ -331,7 +324,7 @@ func TestAddToRoom_Success(t *testing.T) {
 
 	users := map[string]testUser{"usr_alice": {Key: keyLine, DisplayName: "Alice"}}
 	configDir := setupConfig(t, users, nil)
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general":     {Topic: "General"},
 		"engineering": {Topic: "Engineering"},
 	}, users)
@@ -360,7 +353,7 @@ func TestAddToRoom_AlreadyMember(t *testing.T) {
 
 	users := map[string]testUser{"usr_alice": {Key: keyLine, DisplayName: "Alice", Rooms: []string{"general"}}}
 	configDir := setupConfig(t, users, nil)
-	dataDir := setupDataDir(t, map[string]config.Room{"general": {}}, users)
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{"general": {}}, users)
 
 	err := cmdAddToRoom(configDir, dataDir, []string{"--user", "usr_alice", "--room", "general"})
 	if err == nil {
@@ -378,7 +371,7 @@ func TestAddToRoom_NonexistentRoom(t *testing.T) {
 
 	users := map[string]testUser{"usr_alice": {Key: keyLine, DisplayName: "Alice"}}
 	configDir := setupConfig(t, users, nil)
-	dataDir := setupDataDir(t, map[string]config.Room{"general": {}}, users)
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{"general": {}}, users)
 
 	err := cmdAddToRoom(configDir, dataDir, []string{"--user", "usr_alice", "--room", "fakechannel"})
 	if err == nil {
@@ -398,7 +391,7 @@ func TestAddToRoom_RetiredUser(t *testing.T) {
 		"usr_alice": {Key: keyLine, DisplayName: "Alice", Retired: true, RetiredAt: "2026-01-01T00:00:00Z"},
 	}
 	configDir := setupConfig(t, users, nil)
-	dataDir := setupDataDir(t, map[string]config.Room{"general": {}}, users)
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{"general": {}}, users)
 
 	err := cmdAddToRoom(configDir, dataDir, []string{"--user", "usr_alice", "--room", "general"})
 	if err == nil {
@@ -422,7 +415,7 @@ func TestRemoveFromRoom_EnqueuesPendingRow(t *testing.T) {
 
 	users := map[string]testUser{"usr_alice": {Key: keyLine, DisplayName: "Alice", Rooms: []string{"general", "engineering"}}}
 	configDir := setupConfig(t, users, nil)
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general":     {Topic: "General"},
 		"engineering": {Topic: "Engineering"},
 	}, users)
@@ -475,7 +468,7 @@ func TestRemoveFromRoom_NotAMember(t *testing.T) {
 
 	users := map[string]testUser{"usr_alice": {Key: keyLine, DisplayName: "Alice"}}
 	configDir := setupConfig(t, users, nil)
-	dataDir := setupDataDir(t, map[string]config.Room{"general": {}, "engineering": {}}, users)
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{"general": {}, "engineering": {}}, users)
 
 	err := cmdRemoveFromRoom(configDir, dataDir, []string{"--user", "usr_alice", "--room", "engineering"})
 	if err == nil {
@@ -514,7 +507,7 @@ func TestAddRoom_Success(t *testing.T) {
 }
 
 func TestAddRoom_DuplicateRejected(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{"general": {}})
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{"general": {}})
 	err := cmdAddRoom(dataDir, []string{"--name", "general"})
 	if err == nil {
 		t.Fatal("should reject duplicate")
@@ -525,7 +518,7 @@ func TestAddRoom_DuplicateRejected(t *testing.T) {
 }
 
 func TestListRooms(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {Topic: "Chat"},
 		"support": {Topic: "Help"},
 	})
@@ -826,7 +819,7 @@ func TestDemote_EnqueuesStateChange(t *testing.T) {
 // --- update-topic / rename-room tests (Phase 16 Gap 1) ---
 
 func TestUpdateTopic_Success(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {Topic: "old topic"},
 	})
 
@@ -863,7 +856,7 @@ func TestUpdateTopic_MissingRoom(t *testing.T) {
 }
 
 func TestUpdateTopic_RetiredRoom(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {Topic: "topic"},
 	})
 
@@ -885,7 +878,7 @@ func TestUpdateTopic_RetiredRoom(t *testing.T) {
 }
 
 func TestUpdateTopic_NoChangeRejected(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {Topic: "same"},
 	})
 
@@ -910,7 +903,7 @@ func TestUpdateTopic_MissingArgs(t *testing.T) {
 }
 
 func TestRenameRoom_Success(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {Topic: "topic"},
 	})
 
@@ -936,7 +929,7 @@ func TestRenameRoom_Success(t *testing.T) {
 }
 
 func TestRenameRoom_DuplicateRejected(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general":     {Topic: ""},
 		"engineering": {Topic: ""},
 	})
@@ -951,7 +944,7 @@ func TestRenameRoom_DuplicateRejected(t *testing.T) {
 }
 
 func TestRenameRoom_DuplicateCaseInsensitive(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general":     {Topic: ""},
 		"engineering": {Topic: ""},
 	})
@@ -963,7 +956,7 @@ func TestRenameRoom_DuplicateCaseInsensitive(t *testing.T) {
 }
 
 func TestRenameRoom_NoChangeRejected(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {},
 	})
 
@@ -1099,7 +1092,7 @@ func TestStatus_ProcessLineRunning(t *testing.T) {
 		"usr_alice": {Key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJPpG4hFrxw7JOAppGdh0JrkNDNGxypfmwJxNFCWXnpG", DisplayName: "Alice"},
 	}
 	configDir := setupConfig(t, users, nil)
-	dataDir := setupDataDir(t, map[string]config.Room{"general": {}}, users)
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{"general": {}}, users)
 
 	// Seed a lockfile at the expected path with our own PID + a
 	// recognisable start timestamp.
@@ -1157,7 +1150,7 @@ func TestStatus_ShowsCounts(t *testing.T) {
 	}
 	configDir := setupConfig(t, users, nil)
 
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general":     {},
 		"engineering": {},
 	}, users)
@@ -1344,7 +1337,7 @@ func TestListGroups_WithGroups(t *testing.T) {
 // marks the room, the display name is suffixed, and a queue row is
 // written to pending_room_retirements.
 func TestRetireRoom_Success(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"engineering": {Topic: "Eng work"},
 	})
 
@@ -1395,7 +1388,7 @@ func TestRetireRoom_Success(t *testing.T) {
 // TestRetireRoom_AcceptsNanoid verifies that --room accepts a nanoid
 // (not just a display name), per Q7.
 func TestRetireRoom_AcceptsNanoid(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {Topic: "Chat"},
 	})
 
@@ -1418,7 +1411,7 @@ func TestRetireRoom_AcceptsNanoid(t *testing.T) {
 // TestRetireRoom_AlreadyRetiredRejected verifies that attempting to
 // retire a room that is already retired returns an error.
 func TestRetireRoom_AlreadyRetiredRejected(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {Topic: "Chat"},
 	})
 
@@ -1468,7 +1461,7 @@ func TestRetireRoom_MissingArgs(t *testing.T) {
 // is provided, the reason defaults to "admin" (matching the
 // cmdRetireUser default).
 func TestRetireRoom_ReasonDefaultsToAdmin(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {Topic: "Chat"},
 	})
 
@@ -1489,7 +1482,7 @@ func TestRetireRoom_ReasonDefaultsToAdmin(t *testing.T) {
 
 // TestListRetiredRooms_Empty verifies the empty case.
 func TestListRetiredRooms_Empty(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {Topic: "Chat"},
 	})
 
@@ -1502,7 +1495,7 @@ func TestListRetiredRooms_Empty(t *testing.T) {
 // TestListRetiredRooms_WithEntries verifies that retired rooms appear
 // in the output after retirement.
 func TestListRetiredRooms_WithEntries(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general":     {Topic: "Chat"},
 		"engineering": {Topic: "Eng work"},
 	})

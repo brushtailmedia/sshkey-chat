@@ -2,8 +2,6 @@ package store
 
 import (
 	"testing"
-
-	"github.com/brushtailmedia/sshkey-chat/internal/config"
 )
 
 func TestStoreRoundTrip(t *testing.T) {
@@ -16,7 +14,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	defer s.Close()
 
 	// Seed a room and get its nanoid ID
-	s.SeedRooms(map[string]config.Room{"general": {Topic: "Chat"}})
+	s.SeedRooms(map[string]RoomSeed{"general": {Topic: "Chat"}})
 	generalID := s.RoomDisplayNameToID("general")
 	if generalID == "" {
 		t.Fatal("failed to get room ID after seed")
@@ -24,12 +22,12 @@ func TestStoreRoundTrip(t *testing.T) {
 
 	// Insert a room message
 	err = s.InsertRoomMessage(generalID, StoredMessage{
-		ID:      "msg_test001",
-		Sender:  "alice",
-		TS:      1712345678,
-		Epoch:   3,
-		Payload: "base64encrypted...",
-		FileIDs: []string{"file_abc"},
+		ID:        "msg_test001",
+		Sender:    "alice",
+		TS:        1712345678,
+		Epoch:     3,
+		Payload:   "base64encrypted...",
+		FileIDs:   []string{"file_abc"},
 		Signature: "base64sig...",
 	})
 	if err != nil {

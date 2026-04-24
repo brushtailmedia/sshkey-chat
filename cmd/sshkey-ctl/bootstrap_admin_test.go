@@ -427,3 +427,59 @@ func TestCheckDisplayNameAvailable_CaseInsensitive(t *testing.T) {
 // real audit.New call is in bootstrap_admin.go, this is a no-op
 // reference.)
 var _ = audit.New
+
+func setupBootstrapPreconditions(t *testing.T) (string, string) {
+	t.Helper()
+	configDir := t.TempDir()
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(configDir, "server.toml"), []byte(`
+[server]
+port = 2222
+bind = "127.0.0.1"
+`), 0644); err != nil {
+		t.Fatalf("write server.toml: %v", err)
+	}
+	st, err := store.Open(dataDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	st.Close()
+	return configDir, dataDir
+}
+
+func TestCmdBootstrapAdmin_BeforeInitFailsWithActionableError(t *testing.T) {
+	configDir := t.TempDir()
+	dataDir := t.TempDir()
+
+	err := cmdBootstrapAdmin(configDir, dataDir, []string{"alice"})
+	if err == nil {
+		t.Fatal("expected bootstrap-admin precondition error")
+	}
+	if !strings.Contains(err.Error(), "Run `sshkey-ctl init") {
+		t.Fatalf("expected actionable init guidance, got: %v", err)
+	}
+}
+
+func TestCmdBootstrapAdmin_OutDirPreflightRunsBeforePassphrasePrompt(t *testing.T) {
+	configDir, dataDir := setupBootstrapPreconditions(t)
+	missingOut := filepath.Join(t.TempDir(), "missing")
+
+	// DISPLAY_NAME first, --out second to lock the documented CLI contract.
+	err := cmdBootstrapAdmin(configDir, dataDir, []string{"alice", "--out", missingOut})
+	if err == nil {
+		t.Fatal("expected --out preflight failure")
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("expected missing out-dir error, got: %v", err)
+	}
+
+	// No user row should be created if preflight fails.
+	st, openErr := store.Open(dataDir)
+	if openErr != nil {
+		t.Fatalf("reopen store: %v", openErr)
+	}
+	defer st.Close()
+	if got := len(st.GetAllUsersIncludingRetired()); got != 0 {
+		t.Fatalf("preflight failure should be fail-closed, got %d users", got)
+	}
+}

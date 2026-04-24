@@ -1,10 +1,14 @@
-// Package config handles parsing of server.toml and rooms.toml.
+// Package config handles parsing of server.toml.
 //
 // Phase 16 Gap 4 removed users.toml support entirely. Users are now
 // created exclusively via `sshkey-ctl approve` (for users who SSH in
 // with their own key) or `sshkey-ctl bootstrap-admin` (for admin
 // keypair generation on the server side). The TOML file no longer
 // exists in any role.
+//
+// Phase 23 removes rooms.toml support entirely. Rooms are created and
+// managed through store-backed CLI commands (init/add-room/etc), not
+// seed files.
 package config
 
 import (
@@ -115,8 +119,8 @@ type SyncSection struct {
 }
 
 type FilesSection struct {
-	MaxFileSize       string   `toml:"max_file_size"`
-	MaxAvatarSize     string   `toml:"max_avatar_size"`
+	MaxFileSize        string   `toml:"max_file_size"`
+	MaxAvatarSize      string   `toml:"max_avatar_size"`
 	AllowedAvatarTypes []string `toml:"allowed_avatar_types"`
 
 	// MaxFileIDsPerMessage bounds the envelope-level file_ids[] array
@@ -151,18 +155,18 @@ type GroupsSection struct {
 }
 
 type RateLimitsSection struct {
-	MessagesPerSecond    int `toml:"messages_per_second"`
-	UploadsPerMinute     int `toml:"uploads_per_minute"`
-	ConnectionsPerMinute int `toml:"connections_per_minute"`
-	FailedAuthPerMinute  int `toml:"failed_auth_per_minute"`
-	TypingPerSecond      int `toml:"typing_per_second"`
-	HistoryPerMinute     int `toml:"history_per_minute"`
+	MessagesPerSecond     int `toml:"messages_per_second"`
+	UploadsPerMinute      int `toml:"uploads_per_minute"`
+	ConnectionsPerMinute  int `toml:"connections_per_minute"`
+	FailedAuthPerMinute   int `toml:"failed_auth_per_minute"`
+	TypingPerSecond       int `toml:"typing_per_second"`
+	HistoryPerMinute      int `toml:"history_per_minute"`
 	DeletesPerMinute      int `toml:"deletes_per_minute"`
 	AdminDeletesPerMinute int `toml:"admin_deletes_per_minute"`
 	ReactionsPerMinute    int `toml:"reactions_per_minute"`
-	DMCreatesPerMinute   int `toml:"dm_creates_per_minute"`
-	ProfilesPerMinute    int `toml:"profiles_per_minute"`
-	PinsPerMinute        int `toml:"pins_per_minute"`
+	DMCreatesPerMinute    int `toml:"dm_creates_per_minute"`
+	ProfilesPerMinute     int `toml:"profiles_per_minute"`
+	PinsPerMinute         int `toml:"pins_per_minute"`
 	// Phase 17 Step 5: rate-limit coverage for 4 previously-unlimited
 	// handlers.
 	// RoomMembersPerMinute bounds info-panel room_members refreshes.
@@ -268,12 +272,6 @@ type FCMConfig struct {
 	ProjectID       string `toml:"project_id"`
 }
 
-// Room represents a single room entry from rooms.toml.
-type Room struct {
-	DisplayName string `toml:"display_name,omitempty"` // human-visible name (populated from TOML section key on seed)
-	Topic       string `toml:"topic"`
-}
-
 // DefaultServerConfig returns a ServerConfig with all defaults applied.
 func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
@@ -334,9 +332,9 @@ func DefaultServerConfig() ServerConfig {
 			HistoryPageSize: 100,
 		},
 		Files: FilesSection{
-			MaxFileSize:        "50MB",
-			MaxAvatarSize:      "256KB",
-			AllowedAvatarTypes: []string{"image/png", "image/jpeg"},
+			MaxFileSize:          "50MB",
+			MaxAvatarSize:        "256KB",
+			AllowedAvatarTypes:   []string{"image/png", "image/jpeg"},
 			MaxFileIDsPerMessage: 20, // Phase 17 Step 4c: chat-app-appropriate ceiling
 		},
 		Devices: DevicesSection{
@@ -346,20 +344,20 @@ func DefaultServerConfig() ServerConfig {
 			MaxMembers: 150, // Phase 17 Step 4d: matches pre-17 hardcoded cap + PROTOCOL.md
 		},
 		RateLimits: RateLimitsSection{
-			MessagesPerSecond:    5,
-			UploadsPerMinute:     60,
-			ConnectionsPerMinute: 20,
-			FailedAuthPerMinute:  5,
-			TypingPerSecond:      1,
-			HistoryPerMinute:     50,
-			DeletesPerMinute:       10,
-			AdminDeletesPerMinute:  50,
-			ReactionsPerMinute:     30,
-			DMCreatesPerMinute:     5,
-			ProfilesPerMinute:      5,
-			PinsPerMinute:          10,
-			AdminActionsPerMinute:  20, // Phase 14: per user per group
-			EditsPerMinute:         10, // Phase 15: shared bucket per user across edit/edit_group/edit_dm
+			MessagesPerSecond:     5,
+			UploadsPerMinute:      60,
+			ConnectionsPerMinute:  20,
+			FailedAuthPerMinute:   5,
+			TypingPerSecond:       1,
+			HistoryPerMinute:      50,
+			DeletesPerMinute:      10,
+			AdminDeletesPerMinute: 50,
+			ReactionsPerMinute:    30,
+			DMCreatesPerMinute:    5,
+			ProfilesPerMinute:     5,
+			PinsPerMinute:         10,
+			AdminActionsPerMinute: 20, // Phase 14: per user per group
+			EditsPerMinute:        10, // Phase 15: shared bucket per user across edit/edit_group/edit_dm
 			// Phase 17 Step 5: new rate-limit coverage
 			RoomMembersPerMinute:      6,  // info-panel refresh cadence
 			DeviceListPerMinute:       6,  // settings-panel refresh cadence
@@ -454,15 +452,6 @@ func (c ServerConfig) Validate() (warnings []string, err error) {
 	return warnings, nil
 }
 
-// LoadRooms reads and parses rooms.toml. Returns a map of room name -> Room.
-func LoadRooms(path string) (map[string]Room, error) {
-	var raw map[string]Room
-	if _, err := toml.DecodeFile(path, &raw); err != nil {
-		return nil, fmt.Errorf("load rooms.toml: %w", err)
-	}
-	return raw, nil
-}
-
 // Config holds all loaded configuration. Safe for concurrent reads via RLock/RUnlock.
 //
 // Phase 16 Gap 4 removed the `Users map[string]User` field — users.toml
@@ -472,33 +461,25 @@ func LoadRooms(path string) (map[string]Room, error) {
 type Config struct {
 	sync.RWMutex
 	Server ServerConfig
-	Rooms  map[string]Room
 	Dir    string // config directory path
 }
 
 // Load reads all config files from the given directory.
 //
-// Phase 16 Gap 4: users.toml support has been removed entirely. Only
-// server.toml and rooms.toml are loaded here. The first admin on a
-// fresh server is created via `sshkey-ctl bootstrap-admin`, NOT by
-// editing a TOML file.
+// Phase 16 Gap 4: users.toml support has been removed entirely.
+// Phase 23: rooms.toml support has been removed entirely.
+// The first admin on a fresh server is created via `sshkey-ctl
+// bootstrap-admin`, NOT by editing a TOML file.
 func Load(dir string) (*Config, error) {
 	serverPath := filepath.Join(dir, "server.toml")
-	roomsPath := filepath.Join(dir, "rooms.toml")
 
 	server, err := LoadServerConfig(serverPath)
 	if err != nil {
 		return nil, err
 	}
 
-	rooms, err := LoadRooms(roomsPath)
-	if err != nil {
-		return nil, err
-	}
-
 	return &Config{
 		Server: server,
-		Rooms:  rooms,
 		Dir:    dir,
 	}, nil
 }

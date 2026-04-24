@@ -241,17 +241,6 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		s.files = newFileManager(dir)
 		s.audit = newAuditLog(dir)
 
-		// Seed rooms.db from rooms.toml on first run
-		if st.RoomsDBEmpty() && cfg.Rooms != nil {
-			count, err := st.SeedRooms(cfg.Rooms)
-			if err != nil {
-				return nil, fmt.Errorf("seed rooms: %w", err)
-			}
-			if count > 0 {
-				logger.Info("seeded rooms.db from rooms.toml", "rooms", count)
-			}
-		}
-
 		// Phase 16 Gap 4: users.toml seeding has been removed entirely.
 		// Operators create the first admin via `sshkey-ctl bootstrap-admin`
 		// on a fresh deployment, then add other users via `sshkey-ctl

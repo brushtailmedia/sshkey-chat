@@ -7,6 +7,7 @@ services:
     volumes:
       - ./docker/config:/etc/sshkey-chat
       - sshkey-data:/var/sshkey-chat
+      - ./docker/keys:/keys
     restart: unless-stopped
     # Shallow TCP-port healthcheck. `nc -z` is zero-I/O (just TCP
     # SYN+ACK+RST), and Alpine's busybox provides nc without an

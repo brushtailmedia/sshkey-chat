@@ -189,7 +189,8 @@ func cmdListAdmins(dataDir string) error {
 
 	if len(admins) == 0 {
 		fmt.Println("No admin users.")
-		fmt.Println("Use `sshkey-ctl promote <user>` or `sshkey-ctl bootstrap-admin <name>` to create one.")
+		fmt.Println("On a fresh deployment run `sshkey-ctl init` first, then `sshkey-ctl bootstrap-admin <name> [--out DIR]`.")
+		fmt.Println("On an existing deployment, use `sshkey-ctl promote <user>` to grant admin.")
 		return nil
 	}
 
@@ -209,11 +210,12 @@ func cmdListAdmins(dataDir string) error {
 // match). Searches across all users including retired.
 //
 // Flags:
-//   --name <query>         case-insensitive substring match against
-//                           display names
-//   --fingerprint <fp>     exact match against SSH key fingerprints
-//                           (accepts both SHA256:... and the bare
-//                           hash)
+//
+//	--name <query>         case-insensitive substring match against
+//	                        display names
+//	--fingerprint <fp>     exact match against SSH key fingerprints
+//	                        (accepts both SHA256:... and the bare
+//	                        hash)
 //
 // Exactly one of --name or --fingerprint is required. Both can be
 // combined in a future extension but the Phase 16 spec doesn't

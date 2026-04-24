@@ -21,7 +21,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
 
@@ -38,7 +37,7 @@ func openTestStore(t *testing.T, dataDir string) *store.Store {
 // --- store helper tests ---
 
 func TestSetRoomIsDefault_HappyPath(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {Topic: "General"},
 	})
 	st := openTestStore(t, dataDir)
@@ -64,7 +63,7 @@ func TestSetRoomIsDefault_HappyPath(t *testing.T) {
 }
 
 func TestSetRoomIsDefault_RetiredRoomRejected(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {},
 	})
 	st := openTestStore(t, dataDir)
@@ -83,7 +82,7 @@ func TestSetRoomIsDefault_RetiredRoomRejected(t *testing.T) {
 }
 
 func TestGetDefaultRooms_FiltersRetired(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general":     {},
 		"engineering": {},
 	})
@@ -123,7 +122,7 @@ func TestSetDefaultRoom_HappyPath_BackfillsExistingUsers(t *testing.T) {
 		"usr_alice": {Key: aliceKey, DisplayName: "Alice"},
 		"usr_bob":   {Key: bobKey, DisplayName: "Bob"},
 	}
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {Topic: "General"},
 	}, users)
 
@@ -155,7 +154,7 @@ func TestSetDefaultRoom_SkipsRetiredUsers(t *testing.T) {
 	users := map[string]testUser{
 		"usr_alice12345": {Key: aliceKey, DisplayName: "Alice", Retired: true, RetiredReason: "test"},
 	}
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {},
 	}, users)
 
@@ -172,7 +171,7 @@ func TestSetDefaultRoom_SkipsRetiredUsers(t *testing.T) {
 }
 
 func TestSetDefaultRoom_AlreadyDefaultRejected(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {},
 	})
 	if err := cmdSetDefaultRoom(dataDir, []string{"general"}); err != nil {
@@ -188,7 +187,7 @@ func TestSetDefaultRoom_AlreadyDefaultRejected(t *testing.T) {
 }
 
 func TestSetDefaultRoom_RetiredRoomRejected(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {},
 	})
 	st0 := openTestStore(t, dataDir)
@@ -228,7 +227,7 @@ func TestUnsetDefaultRoom_LeavesExistingMembers(t *testing.T) {
 	users := map[string]testUser{
 		"usr_alice": {Key: aliceKey, DisplayName: "Alice"},
 	}
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {},
 	}, users)
 
@@ -257,7 +256,7 @@ func TestUnsetDefaultRoom_LeavesExistingMembers(t *testing.T) {
 }
 
 func TestUnsetDefaultRoom_NotDefaultRejected(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {},
 	})
 	err := cmdUnsetDefaultRoom(dataDir, []string{"general"})
@@ -279,7 +278,7 @@ func TestListDefaultRooms_Empty(t *testing.T) {
 }
 
 func TestListDefaultRooms_AfterSet(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general":     {},
 		"engineering": {},
 	})
@@ -298,7 +297,7 @@ func TestRetireRoom_ClearsIsDefault(t *testing.T) {
 		"usr_alice": {Key: aliceKey, DisplayName: "Alice"},
 	}
 	configDir := setupConfig(t, users, nil)
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general": {},
 	}, users)
 
@@ -327,7 +326,7 @@ func TestRetireRoom_ClearsIsDefault(t *testing.T) {
 // --- approve auto-join tests ---
 
 func TestApprove_AutoJoinsDefaultRooms(t *testing.T) {
-	dataDir := setupDataDir(t, map[string]config.Room{
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
 		"general":     {},
 		"engineering": {},
 	})

@@ -44,6 +44,8 @@ firebase-sa.json
 
 # Docker runtime
 docker/config/host_key
+docker/keys/*
+!docker/keys/.gitkeep
 
 # Design docs (internal working files, not checked in)
 refactor_plan.md

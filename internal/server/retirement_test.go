@@ -29,7 +29,6 @@ func newTestServer(t *testing.T) *Server {
 [server]
 port = 2222
 bind = "127.0.0.1"
-admins = ["alice"]
 
 # Phase 17b: explicitly disable auto-revoke for tests that don't
 # exercise it — keeps log output clean (no "enabled=true with zero
@@ -38,21 +37,6 @@ admins = ["alice"]
 # tests override this via s.cfg after construction.
 [server.auto_revoke]
 enabled = false
-`), 0644)
-
-	// Phase 16 Gap 4: users.toml is no longer supported. The test
-	// fixture writes only rooms.toml (which is still seeded into
-	// rooms.db on first boot) and then directly inserts alice / bob /
-	// carol via the store API after server.New runs. Same end state
-	// as before the Gap 4 cleanup, just goes through the public
-	// InsertUser path that operators now use via cmdApprove and
-	// cmdBootstrapAdmin.
-	os.WriteFile(filepath.Join(configDir, "rooms.toml"), []byte(`
-[general]
-topic = "General"
-
-[engineering]
-topic = "Engineering"
 `), 0644)
 
 	cfg, err := config.Load(configDir)
@@ -70,6 +54,15 @@ topic = "Engineering"
 			s.store.Close()
 		}
 	})
+
+	// Phase 23: rooms.toml support is removed. Seed test rooms via
+	// store API before user membership setup.
+	if _, err := s.store.SeedRooms(map[string]store.RoomSeed{
+		"general":     {Topic: "General"},
+		"engineering": {Topic: "Engineering"},
+	}); err != nil {
+		t.Fatalf("seed rooms: %v", err)
+	}
 
 	// Seed alice / bob / carol directly via the store API. Strip the
 	// SSH key comment for parity with cmdApprove's normalization.
@@ -416,4 +409,3 @@ func TestHandleRetirement_EpochRotationMarked(t *testing.T) {
 		t.Error("epoch manager should exist")
 	}
 }
-

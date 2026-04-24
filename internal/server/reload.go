@@ -72,8 +72,6 @@ func (s *Server) reloadConfig(changedFile string) {
 		// log a warning so the operator knows it's no longer doing
 		// anything and can safely delete it.
 		s.logger.Warn("users.toml is no longer supported and is ignored — delete the file. Use `sshkey-ctl bootstrap-admin` to create the first admin on a fresh deployment.")
-	case "rooms.toml":
-		// No-op — rooms.db is the source of truth. rooms.toml is seed-only.
 	case "server.toml":
 		s.reloadServerConfig()
 	default:

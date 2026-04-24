@@ -20,7 +20,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/brushtailmedia/sshkey-chat/internal/config"
+	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
 
 // setupBackupFixture builds a config dir with server.toml + a data dir
@@ -35,7 +35,7 @@ func setupBackupFixture(t *testing.T) (string, string) {
 			Rooms:       []string{"general"},
 		},
 	}
-	configDir := setupConfig(t, users, map[string]config.Room{"general": {}})
+	configDir := setupConfig(t, users, map[string]store.RoomSeed{"general": {}})
 
 	// server.toml — minimal but parseable + auto_revoke disabled to
 	// suppress the "no thresholds" warning.
@@ -56,7 +56,7 @@ enabled = false
 		t.Fatalf("write host_key: %v", err)
 	}
 
-	dataDir := setupDataDir(t, map[string]config.Room{"general": {}}, users)
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{"general": {}}, users)
 	return configDir, dataDir
 }
 
@@ -123,10 +123,10 @@ func TestCmdBackup_HappyPath(t *testing.T) {
 	entries := readBackupTarballEntries(t, tarballPath)
 	// Should at minimum include the three core DBs and host_key.
 	wantSubset := map[string]bool{
-		"data/data.db":     false,
-		"data/rooms.db":    false,
-		"data/users.db":    false,
-		"config/host_key":  false,
+		"data/data.db":       false,
+		"data/rooms.db":      false,
+		"data/users.db":      false,
+		"config/host_key":    false,
 		"config/server.toml": false,
 	}
 	for _, e := range entries {
@@ -253,7 +253,7 @@ func TestCmdBackup_NoServerToml(t *testing.T) {
 	// configured server.toml — should fall back to defaults and
 	// still succeed (recovery scenario).
 	configDir := t.TempDir()
-	dataDir := setupDataDir(t, map[string]config.Room{"general": {}}, nil)
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{"general": {}}, nil)
 
 	// IncludeConfigFiles=true (default) requires host_key + server.toml
 	// to exist. Since we have neither, expect a clean error mentioning
@@ -285,7 +285,7 @@ include_config_files = false
 `), 0644); err != nil {
 		t.Fatalf("write server.toml: %v", err)
 	}
-	dataDir := setupDataDir(t, map[string]config.Room{"general": {}}, nil)
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{"general": {}}, nil)
 
 	if err := cmdBackup(configDir, dataDir, []string{}); err != nil {
 		t.Fatalf("cmdBackup: %v", err)
