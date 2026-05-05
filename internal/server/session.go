@@ -1292,6 +1292,14 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 		ID:          msg.ID,
 		Room:        msg.Room,
 		Group:       msg.Group,
+		// 2026-05-05 fix — DM was previously omitted, which broke
+		// reactions in 1:1 DMs end-to-end: the broadcast arrived at
+		// both members with `dm=""`, so the client's storeReaction
+		// and AddReactionDecrypted couldn't route through the
+		// `r.DM != ""` branch, DecryptDMReaction never ran, and
+		// emoji stayed empty (silently dropped). Room/Group reacts
+		// were unaffected because their identifiers WERE forwarded.
+		DM:          msg.DM,
 		User:        c.UserID,
 		TS:          time.Now().Unix(),
 		Epoch:       msg.Epoch,
