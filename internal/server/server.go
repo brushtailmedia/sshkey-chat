@@ -127,6 +127,13 @@ type Server struct {
 	// refactor_plan.md.
 	removeFromRoomStop chan struct{}
 
+	// addToRoomStop signals the add-to-room processor to stop.
+	// Closed by Close() during shutdown. The processor drains
+	// pending_add_to_room and applies live side effects for the
+	// already-committed membership add: room_event{join} broadcast
+	// and epoch rotation trigger for active rooms.
+	addToRoomStop chan struct{}
+
 	// autoRevokeStop signals the auto-revoke processor to stop.
 	// Closed by Close() during shutdown. The processor evaluates
 	// configured [server.auto_revoke] thresholds against the
@@ -220,6 +227,7 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		roomUpdateStop:       make(chan struct{}),
 		deviceRevocationStop: make(chan struct{}),
 		removeFromRoomStop:   make(chan struct{}),
+		addToRoomStop:        make(chan struct{}),
 		autoRevokeStop:       make(chan struct{}),
 		stateFixLast:         make(map[string]int64),
 		backupSchedulerStop:  make(chan struct{}),
@@ -241,14 +249,18 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		s.files = newFileManager(dir)
 		s.audit = newAuditLog(dir)
 
-		// Empty-users.db warning: fire at startup so a fresh deploy
-		// has a visible signal in the logs pointing at the next step.
-		// Without this, an operator sees "server started" and no error,
-		// but every SSH connection silently lands in pending-keys.log
-		// with no admin to triage it. Non-fatal — the server still
-		// runs; bootstrap-admin can be invoked any time.
+		// Empty-users.db startup notice: fresh deploys land here with
+		// no users yet. The server runs fine — auth is NOT gated on
+		// "an admin exists" — but every SSH connection from an unknown
+		// key will be rejected and its fingerprint queued in
+		// pending_keys for operator triage. This warning gives a
+		// fresh install a visible log signal pointing at the next
+		// step (`sshkey-ctl approve`), so operators don't see "server
+		// started" followed by silence while pending_keys quietly
+		// accumulates. Admin status is a separate concern — needed
+		// only for in-app moderation, applied via `sshkey-ctl promote`.
 		if st.UsersDBEmpty() {
-			logger.Warn("no users in users.db — run `sshkey-ctl bootstrap-admin <name>` against the data directory to create the first admin; the server will accept no logins until an admin exists",
+			logger.Warn("users.db is empty — incoming SSH connections will be rejected and their fingerprints logged to pending_keys; admit users with `sshkey-ctl approve --key \"ssh-ed25519 AAAA... name\"` (and optionally `sshkey-ctl promote <user_id>` to grant in-app admin)",
 				"data_dir", dir,
 			)
 		}
@@ -379,6 +391,12 @@ func (s *Server) ListenAndServe() error {
 	// user_left_rooms history row for Phase 20 catchup as a side effect).
 	s.processPendingRemoveFromRoom()
 	go s.runRemoveFromRoomProcessor()
+
+	// Start the add-to-room processor. Drains pending_add_to_room and
+	// applies live join side effects for CLI room membership adds:
+	// room_event{join} broadcast + epoch rotation trigger.
+	s.processPendingAddToRoom()
+	go s.runAddToRoomProcessor()
 
 	// Start the auto-revoke processor (Phase 17b). Evaluates
 	// configured [server.auto_revoke] thresholds against counter
@@ -557,6 +575,16 @@ func (s *Server) Close() error {
 			// already closed
 		default:
 			close(s.removeFromRoomStop)
+		}
+	}
+
+	// Stop the add-to-room processor goroutine.
+	if s.addToRoomStop != nil {
+		select {
+		case <-s.addToRoomStop:
+			// already closed
+		default:
+			close(s.addToRoomStop)
 		}
 	}
 

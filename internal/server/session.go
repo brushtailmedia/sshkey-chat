@@ -333,18 +333,7 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 	defer s.broadcastPresence(userID, "offline")
 
 	// Trigger initial epoch rotation for fresh rooms (after message loop can handle responses)
-	go func() {
-		var rooms []string
-		if s.store != nil {
-			rooms = s.store.GetUserRoomIDs(userID)
-		}
-
-		for _, roomID := range rooms {
-			if s.epochs.currentEpochNum(roomID) == 0 {
-				s.triggerEpochRotation(client, roomID, "initial")
-			}
-		}
-	}()
+	go s.triggerPostConnectRoomRotations(client)
 
 	// Main message loop
 	s.messageLoop(client)

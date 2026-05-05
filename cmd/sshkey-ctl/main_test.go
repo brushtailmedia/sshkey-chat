@@ -339,6 +339,25 @@ func TestAddToRoom_Success(t *testing.T) {
 	if !st.IsRoomMemberByID(engRoom.ID, "usr_alice") {
 		t.Error("alice should be in engineering")
 	}
+
+	// add-to-room now enqueues live side effects for the running
+	// server: join broadcast + epoch rotation trigger.
+	pending, err := st.ConsumePendingAddToRooms()
+	if err != nil {
+		t.Fatalf("consume pending add-to-room: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending add row, got %d", len(pending))
+	}
+	if pending[0].UserID != "usr_alice" {
+		t.Errorf("pending user = %q, want usr_alice", pending[0].UserID)
+	}
+	if pending[0].RoomID != engRoom.ID {
+		t.Errorf("pending room = %q, want %q", pending[0].RoomID, engRoom.ID)
+	}
+	if !strings.HasPrefix(pending[0].InitiatedBy, "os:") {
+		t.Errorf("pending initiated_by = %q, want os: prefix", pending[0].InitiatedBy)
+	}
 }
 
 func TestAddToRoom_AlreadyMember(t *testing.T) {

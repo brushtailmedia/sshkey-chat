@@ -864,16 +864,14 @@ func cmdAddToRoom(configDir, dataDir string, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: failed to clear prior leave history for %s in %s: %v\n", user, room, err)
 	}
 
-	// Phase 20: record a "join" room_event in the per-room audit trail.
-	// Other members see "alice added bob to the room" inline on their
-	// next sync (CLI adds don't have a live broadcast wire-up yet; that's
-	// a separate future item). Best-effort: audit failure doesn't block
-	// the add.
+	// Enqueue live side effects for the running server: room_event join
+	// broadcast + epoch rotation trigger for active rooms. This closes
+	// the active-room join gap where a newly added member can be missing
+	// the current epoch key and hit invalid_epoch until some future
+	// rotation.
 	initiatedBy := fmt.Sprintf("os:%d", os.Getuid())
-	if err := st.RecordRoomEvent(
-		roomRecord.ID, "join", user, initiatedBy, "", "", false, time.Now().Unix(),
-	); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to record room join event for %s in %s: %v\n", user, room, err)
+	if err := st.RecordPendingAddToRoom(user, roomRecord.ID, initiatedBy); err != nil {
+		return fmt.Errorf("add-to-room: member added in rooms.db but failed to enqueue live join/epoch side effects (restart server or re-run add-to-room after removing user): %w", err)
 	}
 
 	fmt.Printf("Added %s (%s) to room %q.\n", u.DisplayName, user, room)

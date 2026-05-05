@@ -559,6 +559,23 @@ func (s *Store) initDataDB() error {
 			queued_at   INTEGER NOT NULL
 		);
 
+		-- pending_add_to_room is the queue for sshkey-ctl add-to-room
+		-- side effects. The CLI writes room_members directly (so the
+		-- membership change is durable immediately), then enqueues here.
+		-- The running server drains this queue to broadcast room_event
+		-- join and trigger epoch rotation for active rooms so newly
+		-- added members get a wrapped key for the current epoch.
+		--
+		-- Same queue shape as Phase 16 pending_* tables: atomic
+		-- SELECT+DELETE consume and no processed flag.
+		CREATE TABLE IF NOT EXISTS pending_add_to_room (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id       TEXT NOT NULL,
+			room_id       TEXT NOT NULL,
+			initiated_by  TEXT NOT NULL,
+			queued_at     INTEGER NOT NULL
+		);
+
 		-- pending_remove_from_room is the queue for sshkey-ctl
 		-- remove-from-room. Phase 20 (bundled with the leave-catchup
 		-- restructure): when an admin runs the CLI, the CLI inserts

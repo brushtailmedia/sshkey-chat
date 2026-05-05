@@ -2,19 +2,19 @@ package server
 
 // Empty-users.db startup warning.
 //
-// On a fresh deployment, users.db is empty. The server runs fine but
-// nothing will work — every SSH connection is rejected, every rejected
-// key lands in pending-keys.log, and no admin exists to triage any of
-// it. Before this warning existed, operators saw "server started"
-// followed by silence, with no log signal pointing at the missing
-// bootstrap step.
+// On a fresh deployment, users.db is empty. The server runs fine —
+// auth is NOT gated on "an admin exists" — but every SSH connection
+// from an unknown key is rejected and its fingerprint queued in
+// pending_keys. Without a startup signal, operators see "server
+// started" followed by silence while pending_keys quietly accumulates.
 //
 // The Server.New path fires a WARN if UsersDBEmpty() returns true at
-// startup. The warning names the fix: sshkey-ctl bootstrap-admin.
+// startup. The warning names the next step: `sshkey-ctl approve`
+// (and optionally `sshkey-ctl promote` for in-app admin).
 //
 // Tests:
 //   - TestServerNew_EmptyUsersDBEmitsWarning: fresh data dir → warning.
-//   - TestServerNew_NonEmptyUsersDBSuppressesWarning: admin seeded via
+//   - TestServerNew_NonEmptyUsersDBSuppressesWarning: user seeded via
 //     store.InsertUser → no warning.
 
 import (
@@ -44,9 +44,9 @@ func TestServerNew_EmptyUsersDBEmitsWarning(t *testing.T) {
 
 	out := logBuf.String()
 	for _, want := range []string{
-		"no users in users.db",
-		"sshkey-ctl bootstrap-admin",
-		"server will accept no logins",
+		"users.db is empty",
+		"sshkey-ctl approve",
+		"pending_keys",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("warning missing %q in log output:\n%s", want, out)
@@ -95,7 +95,7 @@ func TestServerNew_NonEmptyUsersDBSuppressesWarning(t *testing.T) {
 		}
 	})
 
-	if strings.Contains(secondBuf.String(), "no users in users.db") {
+	if strings.Contains(secondBuf.String(), "users.db is empty") {
 		t.Errorf("warning fired on non-empty users.db (admin seeded between runs):\n%s", secondBuf.String())
 	}
 }

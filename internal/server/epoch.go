@@ -221,6 +221,39 @@ func (s *Server) sendEpochKeys(c *Client) {
 	}
 }
 
+// triggerPostConnectRoomRotations runs after the client message loop
+// has started. It handles two bootstrap cases:
+//   - initial: room has no epoch yet (fresh room)
+//   - missing_member_key: room has a current epoch, but this member
+//     has no wrapped key row for it (e.g. admin added member to an
+//     already-active room)
+func (s *Server) triggerPostConnectRoomRotations(c *Client) {
+	if c == nil || s.store == nil {
+		return
+	}
+
+	rooms := s.store.GetUserRoomIDs(c.UserID)
+	for _, roomID := range rooms {
+		epoch := s.epochs.currentEpochNum(roomID)
+		if epoch == 0 {
+			dbEpoch, err := s.store.GetCurrentEpoch(roomID)
+			if err == nil && dbEpoch > 0 {
+				epoch = dbEpoch
+			}
+		}
+		s.epochs.getOrCreate(roomID, epoch)
+
+		if epoch == 0 {
+			s.triggerEpochRotation(c, roomID, "initial")
+			continue
+		}
+
+		if _, err := s.store.GetEpochKey(roomID, epoch, c.UserID); err != nil {
+			s.triggerEpochRotation(c, roomID, "missing_member_key")
+		}
+	}
+}
+
 // triggerEpochRotation sends an epoch_trigger to a client and handles the response.
 func (s *Server) triggerEpochRotation(c *Client, roomID string, reason string) {
 	newEpoch := s.epochs.startRotation(roomID, func() {
