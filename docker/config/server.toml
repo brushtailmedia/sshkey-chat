@@ -93,6 +93,7 @@ download_no_channel    = "3:60"   # client sent download before opening Ch2
 
 # Connection hardening.
 reconnect_flood        = "10:60"  # device thrashing session setup
+error_flood            = "10:60"  # sustained error-eliciting traffic (Phase 17c Step 1)
 
 # ----------------------------------------------------------------------
 # [server.quotas.user] — per-user daily upload quotas
@@ -250,7 +251,7 @@ uploads_per_minute = 60
 
 # Connection-open rate, per remote IP. Defense against connect floods
 # at the TCP/SSH layer before auth runs.
-connections_per_minute = 10
+connections_per_minute = 20
 
 # Failed-auth rate, per remote IP. Stops brute-force SSH key probing.
 failed_auth_per_minute = 5
@@ -319,6 +320,17 @@ per_client_write_buffer_size = 256
 # disables disconnect-on-drops (drops still counted via
 # SignalBroadcastDropped, but channel stays open — not recommended).
 consecutive_drop_disconnect_threshold = 10
+
+# ----- Phase 17c error-response throttle -----
+
+# Phase 17c Step 1: per-device cap on outbound error response volume.
+# Defends against scenarios where a misbehaving (or malicious) client
+# triggers a large error storm — without this cap, the server burns
+# CPU and bandwidth crafting per-frame error responses. Default 60/min
+# (1/sec) sits well above any legitimate burst pattern. 0 disables.
+# Pairs with [server.auto_revoke.thresholds].error_flood, which
+# auto-revokes a device sending sustained error-eliciting traffic.
+error_responses_per_minute = 60
 
 # ----------------------------------------------------------------------
 # [shutdown]
@@ -425,6 +437,13 @@ include_config_files = true
 
 [push.apns]
 enabled = false
+# key_path  = "/etc/sshkey-chat/apns_key.p8"
+# key_id    = "ABC123XYZ4"
+# team_id   = "DEF456GHI7"
+# bundle_id = "com.example.sshkey"
+# sandbox   = false  # set true to target the APNs sandbox environment
 
 [push.fcm]
 enabled = false
+# credentials_path = "/etc/sshkey-chat/fcm_service_account.json"
+# project_id       = "your-firebase-project-id"
