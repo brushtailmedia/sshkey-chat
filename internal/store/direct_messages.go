@@ -20,6 +20,8 @@ type DirectMessage struct {
 	CreatedAt   int64
 	UserALeftAt int64
 	UserBLeftAt int64
+	UserAHidden int64
+	UserBHidden int64
 }
 
 // CutoffFor returns the left_at timestamp for the given user, or 0 if the
@@ -32,6 +34,17 @@ func (dm *DirectMessage) CutoffFor(userID string) int64 {
 		return dm.UserBLeftAt
 	}
 	return 0
+}
+
+// HiddenFor reports whether this DM should be hidden for userID.
+func (dm *DirectMessage) HiddenFor(userID string) bool {
+	switch userID {
+	case dm.UserA:
+		return dm.UserAHidden != 0
+	case dm.UserB:
+		return dm.UserBHidden != 0
+	}
+	return false
 }
 
 // OtherUser returns the user that is NOT userID, or "" if userID is not on
@@ -74,10 +87,10 @@ func (s *Store) CreateOrGetDirectMessage(id, userA, userB string) (*DirectMessag
 	// inserted, or a pre-existing row for this pair).
 	var dm DirectMessage
 	err = s.dataDB.QueryRow(
-		`SELECT id, user_a, user_b, created_at, user_a_left_at, user_b_left_at
+		`SELECT id, user_a, user_b, created_at, user_a_left_at, user_b_left_at, user_a_hidden, user_b_hidden
 		 FROM direct_messages WHERE user_a = ? AND user_b = ?`,
 		a, b,
-	).Scan(&dm.ID, &dm.UserA, &dm.UserB, &dm.CreatedAt, &dm.UserALeftAt, &dm.UserBLeftAt)
+	).Scan(&dm.ID, &dm.UserA, &dm.UserB, &dm.CreatedAt, &dm.UserALeftAt, &dm.UserBLeftAt, &dm.UserAHidden, &dm.UserBHidden)
 	if err != nil {
 		return nil, fmt.Errorf("get DM: %w", err)
 	}
@@ -88,10 +101,10 @@ func (s *Store) CreateOrGetDirectMessage(id, userA, userB string) (*DirectMessag
 func (s *Store) GetDirectMessage(dmID string) (*DirectMessage, error) {
 	var dm DirectMessage
 	err := s.dataDB.QueryRow(
-		`SELECT id, user_a, user_b, created_at, user_a_left_at, user_b_left_at
+		`SELECT id, user_a, user_b, created_at, user_a_left_at, user_b_left_at, user_a_hidden, user_b_hidden
 		 FROM direct_messages WHERE id = ?`,
 		dmID,
-	).Scan(&dm.ID, &dm.UserA, &dm.UserB, &dm.CreatedAt, &dm.UserALeftAt, &dm.UserBLeftAt)
+	).Scan(&dm.ID, &dm.UserA, &dm.UserB, &dm.CreatedAt, &dm.UserALeftAt, &dm.UserBLeftAt, &dm.UserAHidden, &dm.UserBHidden)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -104,7 +117,7 @@ func (s *Store) GetDirectMessage(dmID string) (*DirectMessage, error) {
 // GetDirectMessagesForUser returns every DM the user is a party to.
 func (s *Store) GetDirectMessagesForUser(userID string) ([]*DirectMessage, error) {
 	rows, err := s.dataDB.Query(
-		`SELECT id, user_a, user_b, created_at, user_a_left_at, user_b_left_at
+		`SELECT id, user_a, user_b, created_at, user_a_left_at, user_b_left_at, user_a_hidden, user_b_hidden
 		 FROM direct_messages WHERE user_a = ? OR user_b = ?
 		 ORDER BY id`,
 		userID, userID,
@@ -117,7 +130,7 @@ func (s *Store) GetDirectMessagesForUser(userID string) ([]*DirectMessage, error
 	var dms []*DirectMessage
 	for rows.Next() {
 		var dm DirectMessage
-		if err := rows.Scan(&dm.ID, &dm.UserA, &dm.UserB, &dm.CreatedAt, &dm.UserALeftAt, &dm.UserBLeftAt); err != nil {
+		if err := rows.Scan(&dm.ID, &dm.UserA, &dm.UserB, &dm.CreatedAt, &dm.UserALeftAt, &dm.UserBLeftAt, &dm.UserAHidden, &dm.UserBHidden); err != nil {
 			return nil, err
 		}
 		dms = append(dms, &dm)
@@ -157,6 +170,78 @@ func (s *Store) SetDMLeftAt(dmID, userID string, leftAt int64) error {
 		leftAt, dmID, leftAt,
 	)
 	return err
+}
+
+// SetDMHidden toggles per-user DM visibility for a caller. This does not
+// touch left_at; history cutoff and visibility are intentionally separate.
+func (s *Store) SetDMHidden(dmID, userID string, hidden bool) error {
+	dm, err := s.GetDirectMessage(dmID)
+	if err != nil {
+		return err
+	}
+	if dm == nil {
+		return fmt.Errorf("DM %q does not exist", dmID)
+	}
+
+	v := 0
+	if hidden {
+		v = 1
+	}
+	switch userID {
+	case dm.UserA:
+		_, err = s.dataDB.Exec(`UPDATE direct_messages SET user_a_hidden = ? WHERE id = ?`, v, dmID)
+	case dm.UserB:
+		_, err = s.dataDB.Exec(`UPDATE direct_messages SET user_b_hidden = ? WHERE id = ?`, v, dmID)
+	default:
+		return fmt.Errorf("user %q is not a party to DM %q", userID, dmID)
+	}
+	return err
+}
+
+// ClearDMHiddenForBoth clears hidden flags for both DM parties.
+func (s *Store) ClearDMHiddenForBoth(dmID string) error {
+	_, err := s.dataDB.Exec(
+		`UPDATE direct_messages SET user_a_hidden = 0, user_b_hidden = 0 WHERE id = ?`,
+		dmID,
+	)
+	return err
+}
+
+// ensureDirectMessageSchema adds columns introduced after initial launch to
+// keep older local/dev DBs usable.
+func (s *Store) ensureDirectMessageSchema() error {
+	if !s.directMessageColumnExists("user_a_hidden") {
+		if _, err := s.dataDB.Exec(`ALTER TABLE direct_messages ADD COLUMN user_a_hidden INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("migrate direct_messages.user_a_hidden: %w", err)
+		}
+	}
+	if !s.directMessageColumnExists("user_b_hidden") {
+		if _, err := s.dataDB.Exec(`ALTER TABLE direct_messages ADD COLUMN user_b_hidden INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("migrate direct_messages.user_b_hidden: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) directMessageColumnExists(name string) bool {
+	rows, err := s.dataDB.Query(`PRAGMA table_info(direct_messages)`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var colName, colType string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &colName, &colType, &notNull, &dflt, &pk); err != nil {
+			return false
+		}
+		if colName == name {
+			return true
+		}
+	}
+	return false
 }
 
 // InsertDMMessage stores a 1:1 DM message.

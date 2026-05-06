@@ -24,10 +24,10 @@ import (
 
 // Store manages all server-side SQLite databases.
 type Store struct {
-	dir      string
-	dataDB   *sql.DB
-	roomsDB  *sql.DB // rooms.db — room identity + membership
-	usersDB  *sql.DB // users.db — user identity + auth
+	dir     string
+	dataDB  *sql.DB
+	roomsDB *sql.DB // rooms.db — room identity + membership
+	usersDB *sql.DB // users.db — user identity + auth
 
 	mu       sync.RWMutex
 	roomDBs  map[string]*sql.DB // room nanoid -> message DB
@@ -665,10 +665,10 @@ func (s *Store) initDataDB() error {
 			ON user_left_groups(user_id, left_at);
 
 		-- 1:1 DMs — fixed two-party conversations with per-user history
-		-- cutoffs. The user pair is canonicalized alphabetically so dedup
-		-- is schema-enforced via UNIQUE(user_a, user_b). The *_left_at
-		-- columns are one-way ratchets: 0 = active, >0 = user has left
-		-- (server filters messages on read, not on write).
+		-- cutoffs and per-user visibility. The user pair is canonicalized
+		-- alphabetically so dedup is schema-enforced via UNIQUE(user_a, user_b).
+		-- *_left_at columns are one-way ratchets used for history cutoff.
+		-- *_hidden columns control sidebar visibility per user.
 		CREATE TABLE IF NOT EXISTS direct_messages (
 			id              TEXT PRIMARY KEY,
 			user_a          TEXT NOT NULL,
@@ -676,6 +676,8 @@ func (s *Store) initDataDB() error {
 			created_at      INTEGER NOT NULL,
 			user_a_left_at  INTEGER NOT NULL DEFAULT 0,
 			user_b_left_at  INTEGER NOT NULL DEFAULT 0,
+			user_a_hidden   INTEGER NOT NULL DEFAULT 0,
+			user_b_hidden   INTEGER NOT NULL DEFAULT 0,
 			UNIQUE(user_a, user_b)
 		);
 
@@ -781,7 +783,13 @@ func (s *Store) initDataDB() error {
 		CREATE INDEX IF NOT EXISTS idx_file_contexts_cleanup
 			ON file_contexts(context_type, context_id);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Defensive additive migration for pre-hidden direct_messages schemas.
+	// Pre-launch policy says no production users yet, but this keeps local
+	// dev/test DBs bootable across branch changes.
+	return s.ensureDirectMessageSchema()
 }
 
 // initMessageDB creates the schema for room/conversation message databases.

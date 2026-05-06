@@ -454,6 +454,7 @@ func (s *Server) sendDMList(c *Client) {
 		infos = append(infos, protocol.DMInfo{
 			ID:              dm.ID,
 			Members:         []string{dm.UserA, dm.UserB},
+			HiddenForCaller: dm.HiddenFor(c.UserID),
 			LeftAtForCaller: dm.CutoffFor(c.UserID),
 		})
 	}
@@ -1276,11 +1277,11 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 	reactionID := generateID("react_")
 
 	reaction := protocol.Reaction{
-		Type:        "reaction",
-		ReactionID:  reactionID,
-		ID:          msg.ID,
-		Room:        msg.Room,
-		Group:       msg.Group,
+		Type:       "reaction",
+		ReactionID: reactionID,
+		ID:         msg.ID,
+		Room:       msg.Room,
+		Group:      msg.Group,
 		// 2026-05-05 fix — DM was previously omitted, which broke
 		// reactions in 1:1 DMs end-to-end: the broadcast arrived at
 		// both members with `dm=""`, so the client's storeReaction
@@ -2893,6 +2894,13 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 		s.respondError(c, "", protocol.CodeInternal, "failed to create DM", 0)
 		return
 	}
+	// Re-contact semantics: make the DM visible for both users again.
+	// left_at remains untouched (history cutoff is independent).
+	if err := s.store.ClearDMHiddenForBoth(dm.ID); err != nil {
+		s.logger.Error("failed to clear DM hidden flags", "dm", dm.ID, "error", err)
+		s.respondError(c, "", protocol.CodeInternal, "failed to create DM", 0)
+		return
+	}
 
 	created := protocol.DMCreated{
 		Type:    "dm_created",
@@ -3078,6 +3086,11 @@ func (s *Server) handleLeaveDM(c *Client, raw json.RawMessage) {
 		// Reaching this branch requires having already passed the membership
 		// gate above, so a more specific error here does not leak existence.
 		s.logger.Error("failed to leave DM", "user", c.UserID, "dm", msg.DM, "error", err)
+		s.respondError(c, "", protocol.ErrUnknownDM, "Failed to leave DM", 0)
+		return
+	}
+	if err := s.store.SetDMHidden(msg.DM, c.UserID, true); err != nil {
+		s.logger.Error("failed to set DM hidden", "user", c.UserID, "dm", msg.DM, "error", err)
 		s.respondError(c, "", protocol.ErrUnknownDM, "Failed to leave DM", 0)
 		return
 	}

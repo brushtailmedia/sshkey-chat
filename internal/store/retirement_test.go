@@ -89,3 +89,44 @@ func TestCreateOrGetDirectMessage_Dedup(t *testing.T) {
 		t.Fatalf("expected canonical order [alice bob], got [%s %s]", dm1.UserA, dm1.UserB)
 	}
 }
+
+func TestSetDMHidden_PerUser(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	dm, err := s.CreateOrGetDirectMessage("dm_ab", "alice", "bob")
+	if err != nil {
+		t.Fatalf("create DM: %v", err)
+	}
+	if dm.HiddenFor("alice") || dm.HiddenFor("bob") {
+		t.Fatal("fresh DM should not be hidden")
+	}
+
+	if err := s.SetDMHidden(dm.ID, "alice", true); err != nil {
+		t.Fatalf("SetDMHidden true: %v", err)
+	}
+	afterHide, err := s.GetDirectMessage(dm.ID)
+	if err != nil {
+		t.Fatalf("GetDirectMessage after hide: %v", err)
+	}
+	if !afterHide.HiddenFor("alice") {
+		t.Fatal("alice should be hidden after SetDMHidden(true)")
+	}
+	if afterHide.HiddenFor("bob") {
+		t.Fatal("bob should remain visible")
+	}
+
+	if err := s.SetDMHidden(dm.ID, "alice", false); err != nil {
+		t.Fatalf("SetDMHidden false: %v", err)
+	}
+	afterShow, err := s.GetDirectMessage(dm.ID)
+	if err != nil {
+		t.Fatalf("GetDirectMessage after clear: %v", err)
+	}
+	if afterShow.HiddenFor("alice") {
+		t.Fatal("alice should be visible after SetDMHidden(false)")
+	}
+}

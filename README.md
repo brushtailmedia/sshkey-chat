@@ -485,8 +485,8 @@ CREATE TABLE group_members (
     FOREIGN KEY (group_id) REFERENCES group_conversations(id)
 );
 
--- 1:1 DMs: exactly two parties, canonical (user_a, user_b) unique pair,
--- per-user one-way ratchet cutoffs (left_at > 0 = user has /delete'd)
+-- 1:1 DMs: exactly two parties, canonical (user_a, user_b) unique pair.
+-- left_at is per-user history cutoff; hidden is per-user visibility.
 CREATE TABLE direct_messages (
     id             TEXT PRIMARY KEY,
     user_a         TEXT NOT NULL,
@@ -494,6 +494,8 @@ CREATE TABLE direct_messages (
     created_at     INTEGER NOT NULL,
     user_a_left_at INTEGER NOT NULL DEFAULT 0,
     user_b_left_at INTEGER NOT NULL DEFAULT 0,
+    user_a_hidden  INTEGER NOT NULL DEFAULT 0,
+    user_b_hidden  INTEGER NOT NULL DEFAULT 0,
     UNIQUE(user_a, user_b)
 );
 

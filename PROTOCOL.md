@@ -94,7 +94,7 @@ After the device check, the server sends (in this exact order):
 3. `room_list` -- rooms the user is currently a member of (nanoid IDs + display names; the `room` field in all subsequent messages carries the nanoid ID, not the display name)
 4. `deleted_groups` -- group DMs the user has `/delete`d on another device; catchup for offline devices. Sent BEFORE `group_list`.
 5. `group_list` -- group DMs the user is currently a member of
-6. `dm_list` -- 1:1 DMs (includes the per-user `left_at_for_caller` cutoff for silent multi-device `/delete` propagation)
+6. `dm_list` -- 1:1 DMs (includes per-user `hidden_for_caller` visibility + `left_at_for_caller` history cutoff for silent multi-device `/delete` propagation)
 7. `profile` -- one message per visible user (includes pubkey, fingerprint, display name, avatar, retired status)
 8. `retired_users` -- list of users whose accounts have been retired and are visible to this client
 9. `epoch_key` -- one message per room, carrying the current epoch key wrapped for this user
@@ -356,15 +356,17 @@ Message body limit: 16KB. `file_epoch` records which epoch key was used to encry
 {"type":"dm_left","dm":"dm_yL0nR3qS"}
 ```
 
-1:1 DM `/leave` is silent by design — the other party never receives a broadcast saying you left. The server sets a per-user `left_at` cutoff on the DM row so your future reads return nothing past the cutoff, but from the other party's perspective you simply go quiet. This preserves the "did they read it?" ambiguity that's central to the DM threat model.
+1:1 DM `/leave` is silent by design — the other party never receives a broadcast saying you left. The server sets caller `hidden = true` (visibility) and advances caller `left_at` (history cutoff) on the DM row, but from the other party's perspective you simply go quiet. This preserves the "did they read it?" ambiguity that's central to the DM threat model.
 
 There is no `delete_dm` protocol verb. The client-side `/delete` flow for 1:1 DMs is:
 1. Client sends `leave_dm` (same as `/leave`)
-2. Server sets the per-user cutoff and echoes `dm_left`
+2. Server sets caller hidden + per-user cutoff and echoes `dm_left`
 3. Client purges all local messages for that DM on receipt of the echo
 4. When BOTH parties have a non-zero `left_at` cutoff, the server runs the full cleanup cascade (drop the DM row, unlink `dm-<id>.db`, free file blobs) inside the second `leave_dm` handler — there is no dedicated delete handler
 
-Multi-device `/delete` sync for 1:1 DMs uses the `left_at_for_caller` field on `dm_list` during the handshake rather than a sidecar table. A device that was offline when the leave happened learns about it from the non-zero cutoff value on the `DMInfo` entry.
+Multi-device `/delete` sync for 1:1 DMs uses `dm_list` fields rather than a sidecar table. A device that was offline when the leave happened learns:
+- visibility state from `hidden_for_caller`
+- history boundary from `left_at_for_caller`
 
 ### Group DMs
 
@@ -873,14 +875,20 @@ Three separate list messages are delivered during the handshake, one per context
   {"id":"group_yL0nR3qS","members":["usr_alice","usr_dave"],"admins":["usr_alice","usr_dave"]}
 ]}
 
-// Server -> Client (1:1 DMs the user is a party to, with per-user cutoff)
+// Server -> Client (1:1 DMs the user is a party to, with per-user
+// visibility + per-user history cutoff)
 {"type":"dm_list","dms":[
   {"id":"dm_abc123","members":["usr_alice","usr_bob"]},
-  {"id":"dm_def456","members":["usr_alice","usr_eve"],"left_at_for_caller":1712345600}
+  {"id":"dm_def456","members":["usr_alice","usr_eve"],"hidden_for_caller":true,"left_at_for_caller":1712345600}
 ]}
 ```
 
-`dm_list` entries may carry `left_at_for_caller > 0` to indicate the caller has previously `/delete`d this DM from another device. Clients should filter those entries out of their active DM list (the non-zero cutoff means the server has already frozen the caller's view past that timestamp).
+`dm_list` entries carry two independent per-user fields:
+
+- `hidden_for_caller`: DM visibility for this caller (`true` = remove from active DM list/sidebar)
+- `left_at_for_caller`: history cutoff timestamp for this caller (`0` = no cutoff)
+
+Clients should filter active DMs using `hidden_for_caller`, not `left_at_for_caller`. The cutoff remains a history boundary and does not by itself imply visibility state.
 
 **Room membership events (Phase 20 vocabulary):**
 

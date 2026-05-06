@@ -722,6 +722,10 @@ type DMList struct {
 type DMInfo struct {
 	ID      string   `json:"id"`
 	Members []string `json:"members"` // always [user_a, user_b]
+	// HiddenForCaller controls visibility of this DM in the recipient's
+	// sidebar/list view. true means "tombstoned from view" for this user.
+	// left_at remains the history cutoff and is independent.
+	HiddenForCaller bool `json:"hidden_for_caller,omitempty"`
 	// LeftAtForCaller is the per-user history cutoff for the recipient of
 	// this dm_list. 0 = the caller is an active party. >0 = the caller has
 	// previously left this DM and the unix timestamp tells the client when.
