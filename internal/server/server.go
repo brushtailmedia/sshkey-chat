@@ -733,14 +733,14 @@ func (s *Server) authenticateKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh
 		"fingerprint", fingerprint,
 		"remote", conn.RemoteAddr().String(),
 	)
-	s.logPendingKey(fingerprint, conn.RemoteAddr().String())
+	s.logPendingKey(fingerprint, conn.RemoteAddr().String(), pubKeyStr)
 
 	return nil, fmt.Errorf("key not authorized")
 }
 
 // logPendingKey stores a pending key in the DB, logs to file, and notifies admins.
 // Only notifies the admin on the first attempt — repeat attempts just update the counter.
-func (s *Server) logPendingKey(fingerprint, remote string) {
+func (s *Server) logPendingKey(fingerprint, remote, pubKey string) {
 	isFirstAttempt := true
 
 	if s.store != nil {
@@ -794,7 +794,7 @@ func (s *Server) logPendingKey(fingerprint, remote string) {
 				return
 			}
 			defer f.Close()
-			fmt.Fprintf(f, "fingerprint=%s remote=%s\n", fingerprint, remote)
+			fmt.Fprintf(f, "fingerprint=%s remote=%s key=%q\n", fingerprint, remote, pubKey)
 		}
 	}
 }

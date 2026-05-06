@@ -251,6 +251,106 @@ func TestApprove_NameFlagOverridesComment(t *testing.T) {
 	}
 }
 
+func TestApprove_ClearsPendingKeyFromDBAndLog(t *testing.T) {
+	key, fp := genTestKey(t, "Alice")
+	_, otherFP := genTestKey(t, "Other")
+	configDir := setupConfig(t, nil, nil)
+	dataDir := setupDataDir(t, nil)
+
+	st, err := store.Open(dataDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if _, err := st.DataDB().Exec(
+		`INSERT INTO pending_keys (fingerprint, remote_addr) VALUES (?, ?), (?, ?)`,
+		fp, "127.0.0.1:2222", otherFP, "127.0.0.1:2223",
+	); err != nil {
+		st.Close()
+		t.Fatalf("seed pending_keys: %v", err)
+	}
+	st.Close()
+
+	logDir := filepath.Join(dataDir, "data")
+	if err := os.MkdirAll(logDir, 0750); err != nil {
+		t.Fatalf("mkdir log dir: %v", err)
+	}
+	logContent := strings.Join([]string{
+		"fingerprint=" + fp + " remote=127.0.0.1:2222",
+		"fingerprint=" + otherFP + " remote=127.0.0.1:2223",
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(logDir, "pending-keys.log"), []byte(logContent), 0640); err != nil {
+		t.Fatalf("write pending log: %v", err)
+	}
+
+	if err := cmdApprove(configDir, dataDir, []string{"--key", key, "--name", "Alice"}); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	st, err = store.Open(dataDir)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer st.Close()
+
+	var count int
+	if err := st.DataDB().QueryRow(`SELECT COUNT(1) FROM pending_keys WHERE fingerprint = ?`, fp).Scan(&count); err != nil {
+		t.Fatalf("count approved fingerprint: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("approved fingerprint should be removed from pending_keys, got count=%d", count)
+	}
+	if err := st.DataDB().QueryRow(`SELECT COUNT(1) FROM pending_keys WHERE fingerprint = ?`, otherFP).Scan(&count); err != nil {
+		t.Fatalf("count other fingerprint: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("other fingerprint should remain pending, got count=%d", count)
+	}
+
+	logData, err := os.ReadFile(filepath.Join(logDir, "pending-keys.log"))
+	if err != nil {
+		t.Fatalf("read pending log: %v", err)
+	}
+	if strings.Contains(string(logData), fp) {
+		t.Fatalf("approved fingerprint should be removed from pending log:\n%s", string(logData))
+	}
+	if !strings.Contains(string(logData), otherFP) {
+		t.Fatalf("other pending fingerprint should remain in log:\n%s", string(logData))
+	}
+}
+
+func TestApprove_ClearsPendingDBWhenLogMissing(t *testing.T) {
+	key, fp := genTestKey(t, "Alice")
+	configDir := setupConfig(t, nil, nil)
+	dataDir := setupDataDir(t, nil)
+
+	st, err := store.Open(dataDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if _, err := st.DataDB().Exec(`INSERT INTO pending_keys (fingerprint, remote_addr) VALUES (?, ?)`, fp, "127.0.0.1:2222"); err != nil {
+		st.Close()
+		t.Fatalf("seed pending_keys: %v", err)
+	}
+	st.Close()
+
+	if err := cmdApprove(configDir, dataDir, []string{"--key", key, "--name", "Alice"}); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	st, err = store.Open(dataDir)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer st.Close()
+	var count int
+	if err := st.DataDB().QueryRow(`SELECT COUNT(1) FROM pending_keys WHERE fingerprint = ?`, fp).Scan(&count); err != nil {
+		t.Fatalf("count approved fingerprint: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("approved fingerprint should be removed from pending_keys, got count=%d", count)
+	}
+}
+
 func TestApprove_RejectsNonEd25519(t *testing.T) {
 	dir := setupConfig(t, nil, nil)
 	// Generate a real ECDSA key to test type rejection

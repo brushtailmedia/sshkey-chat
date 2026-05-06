@@ -50,6 +50,7 @@ docker/keys/*
 # Design docs (internal working files, not checked in)
 refactor_plan.md
 init.md
+sshkey-admin.md
 docs/security/*
 
 # OS

@@ -371,9 +371,17 @@ func cmdApprove(configDir, dataDir string, args []string) error {
 	// so operators can verify the auto-join fired.
 	defaultRoomsAdded := addUserToDefaultRooms(st, username)
 
+	// Clear this key from pending state now that it is approved.
+	// Non-fatal: approval has already been persisted. If cleanup fails we
+	// surface a warning so operators can still connect the user immediately.
+	fingerprint := ssh.FingerprintSHA256(parsed)
+	if err := clearPendingKeyState(dataDir, st, fingerprint); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: approved user, but failed to clear pending state for %s: %v\n", fingerprint, err)
+	}
+
 	fmt.Printf("Approved %s\n", displayName)
 	fmt.Printf("  Username:    %s\n", username)
-	fmt.Printf("  Fingerprint: %s\n", ssh.FingerprintSHA256(parsed))
+	fmt.Printf("  Fingerprint: %s\n", fingerprint)
 	if rooms != "" {
 		fmt.Printf("  Rooms:       %s\n", rooms)
 	}
@@ -384,6 +392,55 @@ func cmdApprove(configDir, dataDir string, args []string) error {
 	// sessions, so there's nothing to notify. Next time they SSH in,
 	// the server reads their key from users.db and authenticates them.
 	fmt.Println("\nThe user can now connect.")
+	return nil
+}
+
+// clearPendingKeyState removes a fingerprint from the authoritative pending_keys
+// table and best-effort prunes matching lines from pending-keys.log.
+func clearPendingKeyState(dataDir string, st *store.Store, fingerprint string) error {
+	if st != nil && st.DataDB() != nil {
+		if _, err := st.DataDB().Exec(`DELETE FROM pending_keys WHERE fingerprint = ?`, fingerprint); err != nil {
+			return err
+		}
+	}
+
+	logPath := filepath.Join(dataDir, "data", "pending-keys.log")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	var kept []string
+	removed := false
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" {
+			continue
+		}
+		if strings.Contains(line, "fingerprint="+fingerprint) {
+			removed = true
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if !removed {
+		return nil
+	}
+
+	content := strings.Join(kept, "\n")
+	if content != "" {
+		content += "\n"
+	}
+	tmpPath := logPath + ".tmp"
+	if err := os.WriteFile(tmpPath, []byte(content), 0640); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, logPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
 	return nil
 }
 

@@ -30,7 +30,8 @@ func TestLogPendingKey_WritesToDataDirPath(t *testing.T) {
 	})
 
 	const fp = "SHA256:test-pending-log-path"
-	s.logPendingKey(fp, "127.0.0.1:2222")
+	const key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestPendingKey"
+	s.logPendingKey(fp, "127.0.0.1:2222", key)
 
 	wantPath := filepath.Join(dataDir, "data", "pending-keys.log")
 	b, err := os.ReadFile(wantPath)
@@ -39,6 +40,9 @@ func TestLogPendingKey_WritesToDataDirPath(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "fingerprint="+fp) {
 		t.Fatalf("pending log missing fingerprint; got %q", string(b))
+	}
+	if !strings.Contains(string(b), "key=\""+key+"\"") {
+		t.Fatalf("pending log missing key; got %q", string(b))
 	}
 
 	legacyPath := filepath.Join(filepath.Dir(cfg.Dir), "data", "pending-keys.log")
