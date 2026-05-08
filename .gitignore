@@ -51,6 +51,7 @@ docker/keys/*
 refactor_plan.md
 init.md
 sshkey-admin.md
+topic.md
 docs/security/*
 
 # OS
