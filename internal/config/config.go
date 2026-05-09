@@ -1,9 +1,9 @@
 // Package config handles parsing of server.toml.
 //
-// User accounts are created via `sshkey-ctl approve` (for users who
-// SSH in with their own key) or `sshkey-ctl bootstrap-admin` (for
-// admin keypair generation on the server side). Rooms are created
-// via `sshkey-ctl init` or `sshkey-ctl add-room`. No seed files.
+// User accounts are created via `sshkey-ctl approve` (every user
+// supplies their own SSH key — the server never generates keys).
+// The first admin is bootstrapped with `approve --admin`. Rooms are
+// created via `sshkey-ctl init` or `sshkey-ctl add-room`. No seed files.
 package config
 
 import (
@@ -454,8 +454,9 @@ func (c ServerConfig) Validate() (warnings []string, err error) {
 }
 
 // Config holds all loaded configuration. Safe for concurrent reads via RLock/RUnlock.
-// The first admin on a fresh server is created via `sshkey-ctl bootstrap-admin`;
-// additional users join via the pending-keys + `sshkey-ctl approve` flow.
+// The first admin on a fresh server is created via `sshkey-ctl approve --admin`
+// against a key that arrived through the pending-keys queue; additional users
+// join via the same pending-keys + `sshkey-ctl approve` flow without `--admin`.
 type Config struct {
 	sync.RWMutex
 	Server ServerConfig
@@ -464,7 +465,7 @@ type Config struct {
 
 // Load reads all config files from the given directory.
 // Only server.toml is read; the first admin is created via
-// `sshkey-ctl bootstrap-admin`.
+// `sshkey-ctl approve --admin` against a key from the pending queue.
 func Load(dir string) (*Config, error) {
 	serverPath := filepath.Join(dir, "server.toml")
 

@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/brushtailmedia/sshkey-chat/internal/audit"
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/lockfile"
 	"github.com/brushtailmedia/sshkey-chat/internal/server"
@@ -60,10 +61,10 @@ func run() error {
 		return cmdPending(dataDir)
 	case "approve":
 		return cmdApprove(configDir, dataDir, cmdArgs)
-	case "bootstrap-admin":
-		return cmdBootstrapAdmin(configDir, dataDir, cmdArgs)
-	case "reject":
-		return cmdReject(dataDir, cmdArgs)
+	case "purge-pending":
+		return cmdPurgePending(dataDir, cmdArgs)
+	case "reject-pending":
+		return cmdRejectPending(dataDir, cmdArgs)
 	case "list-users":
 		return cmdListUsers(dataDir)
 	case "show-user":
@@ -163,12 +164,11 @@ Commands:
                                           Guided first-run setup (writes server.toml
                                           if missing; initializes SQLite store)
   pending                                 View pending key requests
-  approve --key "ssh-ed25519 AAAA... name" --rooms ROOMS  Approve (display name from key comment)
-  approve --key "ssh-ed25519 AAAA..." --name NAME --rooms ROOMS  Approve (override display name)
-  bootstrap-admin DISPLAY_NAME [--out DIR]
-                                          Generate admin keypair (server-side keygen,
-                                          encrypted, prompts for passphrase)
-  reject --fingerprint FP                 Reject/clear a pending key
+  approve --key "ssh-ed25519 AAAA... name" [--rooms ROOMS] [--admin]  Approve a pending key (display name from key comment, optional admin flag)
+  approve --key "ssh-ed25519 AAAA..." --name NAME [--rooms ROOMS] [--admin]  Approve a pending key (override display name)
+  purge-pending --fp FP                   Clear a single pending key from DB and log (allows retry)
+  purge-pending --all [--yes]             Clear ALL pending keys from DB and log (--yes to skip confirmation)
+  reject-pending --fp FP [--reason TEXT]  Clear a pending key AND add its fingerprint to the block list (prevents retry)
   list-users                              List all users
   show-user <id|display_name>             Full user details (key, rooms, devices)
   show-room <display_name|id>             Full room details (members, topic, status)
@@ -252,6 +252,7 @@ func cmdPending(dataDir string) error {
 
 func cmdApprove(configDir, dataDir string, args []string) error {
 	var displayName, key, rooms string
+	admin := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--name":
@@ -269,12 +270,31 @@ func cmdApprove(configDir, dataDir string, args []string) error {
 				rooms = args[i+1]
 				i++
 			}
+		case "--admin":
+			// Flip the new user's admin flag in the same approval
+			// transaction. Equivalent to running `approve` followed by
+			// `promote <user_id>`, but with two advantages:
+			//
+			//   1. Single command for the first-admin bootstrap case
+			//      (post-bootstrap-admin removal). Operators no longer
+			//      need to look up the freshly-generated user_id to
+			//      promote. The fresh-server "no users in users.db"
+			//      log warning explicitly recommends this path.
+			//   2. Atomic — there's no observable mid-state where the
+			//      user exists as a non-admin. Less interesting than
+			//      promote/demote which run against existing users
+			//      with active sessions, but cleaner for a brand-new
+			//      user that has no sessions yet.
+			//
+			// promote/demote remain the post-approval verbs for
+			// changing admin status of existing users.
+			admin = true
 		}
 	}
 
 	if key == "" {
-		return fmt.Errorf("usage: approve --key \"ssh-ed25519 AAAA... name\" --rooms ROOMS\n" +
-			"   or: approve --key \"ssh-ed25519 AAAA...\" --name NAME --rooms ROOMS")
+		return fmt.Errorf("usage: approve --key \"ssh-ed25519 AAAA... name\" [--rooms ROOMS] [--admin]\n" +
+			"   or: approve --key \"ssh-ed25519 AAAA...\" --name NAME [--rooms ROOMS] [--admin]")
 	}
 
 	// Parse the key
@@ -348,6 +368,19 @@ func cmdApprove(configDir, dataDir string, args []string) error {
 		return fmt.Errorf("insert user: %w", err)
 	}
 
+	// Apply the admin flag immediately if --admin was passed. Done
+	// after InsertUser rather than at insert time because users.db's
+	// schema defaults admin=0; SetAdmin is the single primitive used
+	// by both this path and `promote`. Failure here leaves the user
+	// inserted as a non-admin — surface the error so the operator can
+	// retry via `promote` rather than treating the partial state as
+	// success.
+	if admin {
+		if err := st.SetAdmin(username, true); err != nil {
+			return fmt.Errorf("approved user but failed to flip admin flag (run `sshkey-ctl promote %s` to retry): %w", username, err)
+		}
+	}
+
 	// Add room memberships to rooms.db
 	if rooms != "" {
 		for _, r := range strings.Split(rooms, ",") {
@@ -387,6 +420,9 @@ func cmdApprove(configDir, dataDir string, args []string) error {
 	}
 	if defaultRoomsAdded > 0 {
 		fmt.Printf("  Default rooms auto-joined: %d\n", defaultRoomsAdded)
+	}
+	if admin {
+		fmt.Printf("  Admin:       yes\n")
 	}
 	// No broadcast needed: a newly-approved user has zero active
 	// sessions, so there's nothing to notify. Next time they SSH in,
@@ -444,57 +480,191 @@ func clearPendingKeyState(dataDir string, st *store.Store, fingerprint string) e
 	return nil
 }
 
-func cmdReject(dataDir string, args []string) error {
+// cmdPurgePending clears pending-key entries from BOTH the
+// authoritative `pending_keys` SQLite table AND the
+// `pending-keys.log` file (which is what the `pending` command
+// reads). Two modes:
+//
+//   - --fp FINGERPRINT: clear a single pending key
+//   - --all [--yes]:    wholesale clear; --yes skips the
+//                       interactive confirmation prompt
+//
+// Crucially, this does NOT add the fingerprint(s) to the
+// block list — the rejected user can retry on next connect and
+// will land back in the queue. For "clear AND prevent retry,"
+// use `reject-pending`.
+//
+// History note: replaced the previous `reject` command which only
+// pruned the log file, leaving the DB row intact. That mismatch
+// caused stale `pending_keys` rows to accumulate even after an
+// admin "rejected" them. This implementation routes through the
+// existing `clearPendingKeyState` helper that the `approve` flow
+// already uses, so DB and log stay in lockstep.
+func cmdPurgePending(dataDir string, args []string) error {
 	var fingerprint string
+	all := false
+	yes := false
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--fingerprint" && i+1 < len(args) {
-			fingerprint = args[i+1]
-			i++
+		switch args[i] {
+		case "--fp", "--fingerprint":
+			if i+1 < len(args) {
+				fingerprint = args[i+1]
+				i++
+			}
+		case "--all":
+			all = true
+		case "--yes":
+			yes = true
+		}
+	}
+
+	if fingerprint == "" && !all {
+		return fmt.Errorf("usage: purge-pending --fp FP\n   or: purge-pending --all [--yes]")
+	}
+	if fingerprint != "" && all {
+		return fmt.Errorf("--fp and --all are mutually exclusive")
+	}
+
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	if fingerprint != "" {
+		if err := clearPendingKeyState(dataDir, st, fingerprint); err != nil {
+			return fmt.Errorf("clear pending state for %s: %w", fingerprint, err)
+		}
+		auditLog := audit.New(dataDir)
+		auditLog.LogOS("purge-pending", "fingerprint="+fingerprint)
+		fmt.Printf("Purged pending key %s (DB + log)\n", fingerprint)
+		return nil
+	}
+
+	// --all path. Count first so the prompt and the audit log have
+	// a meaningful number; also so we can print "no pending keys"
+	// without doing destructive work.
+	var count int
+	if err := st.DataDB().QueryRow(`SELECT COUNT(*) FROM pending_keys`).Scan(&count); err != nil {
+		return fmt.Errorf("count pending keys: %w", err)
+	}
+	logPath := filepath.Join(dataDir, "data", "pending-keys.log")
+	logExists := false
+	if info, err := os.Stat(logPath); err == nil && info.Size() > 0 {
+		logExists = true
+	}
+	if count == 0 && !logExists {
+		fmt.Println("No pending keys to purge.")
+		return nil
+	}
+
+	if !yes {
+		fmt.Printf("Would purge %d pending key(s) from the DB and clear pending-keys.log.\n", count)
+		fmt.Println("Re-run with --yes to confirm.")
+		return nil
+	}
+
+	if _, err := st.DataDB().Exec(`DELETE FROM pending_keys`); err != nil {
+		return fmt.Errorf("delete from pending_keys: %w", err)
+	}
+	// Truncate the log: write an empty file atomically. Best-effort —
+	// log absence isn't an error.
+	if logExists {
+		tmpPath := logPath + ".tmp"
+		if err := os.WriteFile(tmpPath, []byte{}, 0640); err != nil {
+			return fmt.Errorf("write empty log: %w", err)
+		}
+		if err := os.Rename(tmpPath, logPath); err != nil {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("rename log: %w", err)
+		}
+	}
+
+	auditLog := audit.New(dataDir)
+	auditLog.LogOS("purge-pending-all", fmt.Sprintf("count=%d", count))
+	fmt.Printf("Purged %d pending key(s) (DB + log).\n", count)
+	return nil
+}
+
+// cmdRejectPending is purge-pending --fp PLUS adds the fingerprint
+// to the block list. The user is prevented from re-entering the
+// pending queue on next connect (the SSH handshake checks the
+// blocklist BEFORE writing pending_keys; see internal/store/
+// blocked_fingerprints.go).
+//
+// Use this when "I don't want this AND I don't want it back."
+// For "I just want to dismiss the queue entry," use purge-pending.
+//
+// Inherits the approved-user warning from the underlying
+// BlockFingerprint call site pattern: if the fingerprint somehow
+// matches an already-approved user, print a hint pointing at
+// retire-user instead. Pending-key fingerprints by definition
+// shouldn't match an approved user, but the warning is a safety
+// rail against operator error.
+func cmdRejectPending(dataDir string, args []string) error {
+	var fingerprint, reason string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--fp", "--fingerprint":
+			if i+1 < len(args) {
+				fingerprint = args[i+1]
+				i++
+			}
+		case "--reason":
+			if i+1 < len(args) {
+				reason = args[i+1]
+				i++
+			}
 		}
 	}
 	if fingerprint == "" {
-		return fmt.Errorf("usage: reject --fingerprint FP")
+		return fmt.Errorf("usage: reject-pending --fp FP [--reason TEXT]")
+	}
+	if !strings.HasPrefix(fingerprint, "SHA256:") {
+		return fmt.Errorf("fingerprint should start with SHA256: (got %q)", fingerprint)
 	}
 
-	// Remove from pending-keys.log
-	logPath := filepath.Join(dataDir, "data", "pending-keys.log")
-	data, err := os.ReadFile(logPath)
+	st, err := store.Open(dataDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("no pending keys log found")
-		}
-		return err
+		return fmt.Errorf("open store: %w", err)
 	}
+	defer st.Close()
 
-	var kept []string
-	removed := false
-	for _, line := range strings.Split(string(data), "\n") {
-		if line == "" {
-			continue
-		}
-		if strings.Contains(line, "fingerprint="+fingerprint) {
-			removed = true
-		} else {
-			kept = append(kept, line)
+	// Approved-user warning, mirrors block.go:54-64.
+	for _, u := range st.GetAllUsersIncludingRetired() {
+		if st.GetUserFingerprint(u.ID) == fingerprint {
+			fmt.Fprintf(os.Stderr, "Warning: fingerprint %s belongs to approved user %s (%s).\n", fingerprint, u.DisplayName, u.ID)
+			fmt.Fprintf(os.Stderr, "Did you mean: sshkey-ctl retire-user %s ?\n", u.ID)
+			fmt.Fprintf(os.Stderr, "Reject-pending will block re-authentication but does NOT run the retirement cascade.\n\n")
 		}
 	}
 
-	if !removed {
-		return fmt.Errorf("fingerprint %s not found in pending keys", fingerprint)
+	if st.IsFingerprintBlocked(fingerprint) {
+		// Already blocked — but we may still need to clear the
+		// pending-key entry. Run the clear path and report.
+		if err := clearPendingKeyState(dataDir, st, fingerprint); err != nil {
+			return fmt.Errorf("clear pending state: %w", err)
+		}
+		fmt.Printf("Cleared pending key %s. Already on block list (no change).\n", fingerprint)
+		return nil
 	}
 
-	// Atomic write: temp file + rename
-	content := strings.Join(kept, "\n") + "\n"
-	tmpPath := logPath + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(content), 0640); err != nil {
-		return fmt.Errorf("write temp file: %w", err)
+	if err := clearPendingKeyState(dataDir, st, fingerprint); err != nil {
+		return fmt.Errorf("clear pending state: %w", err)
 	}
-	if err := os.Rename(tmpPath, logPath); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("rename: %w", err)
+	blockedBy := fmt.Sprintf("os:%d", os.Getuid())
+	if err := st.BlockFingerprint(fingerprint, reason, blockedBy); err != nil {
+		return fmt.Errorf("block fingerprint: %w", err)
 	}
 
-	fmt.Printf("Rejected pending key %s\n", fingerprint)
+	auditLog := audit.New(dataDir)
+	auditLog.LogOS("reject-pending", "fingerprint="+fingerprint+" reason="+reason)
+
+	fmt.Printf("Rejected pending key %s (cleared from DB + log, added to block list).\n", fingerprint)
+	if reason != "" {
+		fmt.Printf("Reason: %s\n", reason)
+	}
+	fmt.Println("This key will be rejected at the SSH handshake layer going forward.")
 	return nil
 }
 
@@ -534,10 +704,6 @@ func cmdListUsers(dataDir string) error {
 //     Separate design; not currently implemented.
 //   - "Clean up test accounts during development" → drop the data
 //     dir entirely.
-//
-// `store.DeleteUser` is retained for bootstrap-admin's cleanup-on-error
-// path (insert user → SetAdmin fails → delete the orphan row). It is
-// not exposed via the CLI.
 
 func cmdRetireUser(dataDir string, args []string) error {
 	if len(args) == 0 {
@@ -832,7 +998,7 @@ func cmdRenameUser(dataDir string, args []string) error {
 	}
 
 	// Uniqueness check across all users (active and retired). Same
-	// logic as cmdApprove and cmdBootstrapAdmin.
+	// logic as cmdApprove.
 	allUsers := st.GetAllUsersIncludingRetired()
 	for _, other := range allUsers {
 		if other.ID == userID {

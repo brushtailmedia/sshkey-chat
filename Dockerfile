@@ -27,8 +27,7 @@ COPY --from=builder /sshkey-ctl /usr/local/bin/sshkey-ctl
 
 # Config and data directories
 RUN mkdir -p /etc/sshkey-chat /var/sshkey-chat/data \
-    /keys \
-    && chown -R sshkey:sshkey /etc/sshkey-chat /var/sshkey-chat /keys
+    && chown -R sshkey:sshkey /etc/sshkey-chat /var/sshkey-chat
 
 VOLUME ["/etc/sshkey-chat", "/var/sshkey-chat"]
 
@@ -36,11 +35,11 @@ EXPOSE 2222
 
 USER sshkey
 
-# WORKDIR is /var/sshkey-chat so bootstrap-admin without --out still
-# writes to a persistent writable path. Docker docs prefer
-# `bootstrap-admin --out /keys` with a host bind mount (`./docker/keys:/keys`)
-# so operators can read generated keys directly from the host without
-# docker cp.
+# WORKDIR is /var/sshkey-chat — the persistent data volume — so any
+# command run via `docker exec` lands in a writable path owned by
+# the sshkey user by default (sshkey's home dir is also this path).
+# Without it, exec'd commands run from `/`, which the sshkey user
+# can't write to, breaking operations that touch the working dir.
 WORKDIR /var/sshkey-chat
 
 ENTRYPOINT ["sshkey-server"]

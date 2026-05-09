@@ -84,10 +84,12 @@ func (s *Store) UsersDBEmpty() bool {
 	return count == 0
 }
 
-// Users are created exclusively via `sshkey-ctl approve` (for users
-// who SSH in with their own key) or `sshkey-ctl bootstrap-admin` (for
-// admin keypair generation on the server side). There is no seed-file
-// entry point.
+// Users are created exclusively via `sshkey-ctl approve` — every
+// user supplies their own SSH public key (which arrives through the
+// pending-keys queue when they first attempt a connection). The
+// first admin uses `approve --admin` to flip the admin bit in the
+// same transaction. There is no seed-file entry point and no
+// server-side keygen path.
 
 // --- Reads ---
 
@@ -319,12 +321,6 @@ func (s *Store) SetAdmin(userID string, admin bool) error {
 		val = 1
 	}
 	_, err := s.usersDB.Exec(`UPDATE users SET admin = ? WHERE id = ?`, val, userID)
-	return err
-}
-
-// DeleteUser removes a user from users.db entirely.
-func (s *Store) DeleteUser(userID string) error {
-	_, err := s.usersDB.Exec(`DELETE FROM users WHERE id = ?`, userID)
 	return err
 }
 

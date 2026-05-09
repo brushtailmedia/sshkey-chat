@@ -2,10 +2,9 @@ package server
 
 // Phase 16 Gap 4 — the audit log has been extracted into a standalone
 // `internal/audit` package so the CLI (sshkey-ctl) can append entries
-// for bootstrap-admin, retire-user, promote, etc. without reaching
-// into server internals. This file is now a thin alias layer that
-// keeps the existing call sites (s.audit.Log(...) in 5 places)
-// working unchanged.
+// for approve, retire-user, promote, etc. without reaching into server
+// internals. This file is now a thin alias layer that keeps the
+// existing call sites (s.audit.Log(...) in 5 places) working unchanged.
 
 import (
 	"github.com/brushtailmedia/sshkey-chat/internal/audit"

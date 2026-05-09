@@ -410,6 +410,64 @@ func TestApprove_LongDisplayNameRejected(t *testing.T) {
 	}
 }
 
+// TestApprove_AdminFlagSetsAdminBit covers the `--admin` flag that
+// replaced bootstrap-admin's first-admin path (2026-05-09). Without the
+// flag, approve must leave admin=0 (the schema default); with the flag,
+// the user must come out as admin=1 in users.db.
+func TestApprove_AdminFlagSetsAdminBit(t *testing.T) {
+	// Without --admin: control case — must NOT be admin.
+	plainKey, _ := genTestKey(t, "Plain")
+	plainConfig := setupConfig(t, nil, nil)
+	plainData := setupDataDir(t, nil)
+	if err := cmdApprove(plainConfig, plainData, []string{"--key", plainKey, "--name", "Plain"}); err != nil {
+		t.Fatalf("approve plain: %v", err)
+	}
+	st, err := store.Open(plainData)
+	if err != nil {
+		t.Fatalf("open plain store: %v", err)
+	}
+	var plainID string
+	for _, u := range st.GetAllUsers() {
+		if u.DisplayName == "Plain" {
+			plainID = u.ID
+		}
+	}
+	st.Close()
+	if plainID == "" {
+		t.Fatal("plain user not found after approve")
+	}
+	st, _ = store.Open(plainData)
+	if st.IsAdmin(plainID) {
+		t.Error("approve without --admin must leave admin=0")
+	}
+	st.Close()
+
+	// With --admin: bit must flip.
+	adminKey, _ := genTestKey(t, "Admin")
+	adminConfig := setupConfig(t, nil, nil)
+	adminData := setupDataDir(t, nil)
+	if err := cmdApprove(adminConfig, adminData, []string{"--key", adminKey, "--name", "Admin", "--admin"}); err != nil {
+		t.Fatalf("approve --admin: %v", err)
+	}
+	st, err = store.Open(adminData)
+	if err != nil {
+		t.Fatalf("open admin store: %v", err)
+	}
+	defer st.Close()
+	var adminID string
+	for _, u := range st.GetAllUsers() {
+		if u.DisplayName == "Admin" {
+			adminID = u.ID
+		}
+	}
+	if adminID == "" {
+		t.Fatal("admin user not found after approve --admin")
+	}
+	if !st.IsAdmin(adminID) {
+		t.Error("approve --admin must set admin=1")
+	}
+}
+
 // --- Add/Remove Room tests ---
 
 func TestAddToRoom_Success(t *testing.T) {
@@ -642,8 +700,18 @@ func TestListRooms(t *testing.T) {
 	}
 }
 
-// --- Reject tests ---
+// --- purge-pending and reject-pending tests ---
+//
+// Replaces the previous `reject` command which only pruned the log
+// (DB row stayed behind, allowing the same key to retry and re-queue).
+// purge-pending = clear DB + log, allow retry. reject-pending =
+// clear DB + log AND add to fingerprint blocklist, prevent retry.
+// See cmdPurgePending / cmdRejectPending in main.go.
 
+// setupPendingLog seeds <dataDir>/data/pending-keys.log only.
+// Sufficient for tests that don't care about the DB row (e.g.
+// initial purge-pending log-only assertions). DB-aware tests use
+// setupPendingDBAndLog below.
 func setupPendingLog(t *testing.T, lines ...string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -654,62 +722,196 @@ func setupPendingLog(t *testing.T, lines ...string) string {
 	return dir
 }
 
-func TestReject_RemovesFingerprint(t *testing.T) {
-	dir := setupPendingLog(t,
-		"fingerprint=SHA256:aaa attempts=1",
-		"fingerprint=SHA256:bbb attempts=3",
-	)
-	err := cmdReject(dir, []string{"--fingerprint", "SHA256:aaa"})
+// setupPendingDBAndLog seeds both `pending_keys` rows and
+// `pending-keys.log` lines with matching fingerprints. Used by the
+// purge/reject tests to assert both halves of the cleanup primitive.
+func setupPendingDBAndLog(t *testing.T, fingerprints ...string) string {
+	t.Helper()
+	dir := setupDataDir(t, nil)
+	st, err := store.Open(dir)
 	if err != nil {
-		t.Fatalf("reject: %v", err)
+		t.Fatalf("open store: %v", err)
+	}
+	for i, fp := range fingerprints {
+		addr := fmt.Sprintf("127.0.0.1:%d", 3000+i)
+		if _, err := st.DataDB().Exec(
+			`INSERT INTO pending_keys (fingerprint, remote_addr) VALUES (?, ?)`, fp, addr,
+		); err != nil {
+			st.Close()
+			t.Fatalf("seed pending_keys: %v", err)
+		}
+	}
+	st.Close()
+
+	logDir := filepath.Join(dir, "data")
+	os.MkdirAll(logDir, 0750)
+	var lines []string
+	for i, fp := range fingerprints {
+		lines = append(lines, fmt.Sprintf("fingerprint=%s remote=127.0.0.1:%d", fp, 3000+i))
+	}
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(logDir, "pending-keys.log"), []byte(content), 0640); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	return dir
+}
+
+func countPendingDB(t *testing.T, dataDir string) int {
+	t.Helper()
+	st, err := store.Open(dataDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	var count int
+	if err := st.DataDB().QueryRow(`SELECT COUNT(*) FROM pending_keys`).Scan(&count); err != nil {
+		t.Fatalf("count pending_keys: %v", err)
+	}
+	return count
+}
+
+func TestPurgePending_FpClearsDBAndLog(t *testing.T) {
+	dir := setupPendingDBAndLog(t, "SHA256:aaa", "SHA256:bbb")
+
+	if err := cmdPurgePending(dir, []string{"--fp", "SHA256:aaa"}); err != nil {
+		t.Fatalf("purge-pending: %v", err)
+	}
+
+	// Both DB row and log line for SHA256:aaa should be gone; bbb stays.
+	if got := countPendingDB(t, dir); got != 1 {
+		t.Errorf("DB row count = %d, want 1 (bbb only)", got)
 	}
 	data, _ := os.ReadFile(filepath.Join(dir, "data", "pending-keys.log"))
 	if strings.Contains(string(data), "SHA256:aaa") {
-		t.Error("rejected fingerprint should be removed")
+		t.Errorf("SHA256:aaa should be cleared from log, got:\n%s", string(data))
 	}
 	if !strings.Contains(string(data), "SHA256:bbb") {
-		t.Error("other fingerprint should be kept")
+		t.Errorf("SHA256:bbb should remain in log, got:\n%s", string(data))
 	}
 }
 
-func TestReject_FingerprintNotFound(t *testing.T) {
-	dir := setupPendingLog(t, "fingerprint=SHA256:aaa attempts=1")
-	err := cmdReject(dir, []string{"--fingerprint", "SHA256:zzz"})
-	if err == nil {
-		t.Fatal("should error when fingerprint not found")
+func TestPurgePending_FpUnknownIsNoop(t *testing.T) {
+	dir := setupPendingDBAndLog(t, "SHA256:aaa")
+
+	// Purging an unknown fingerprint shouldn't error or affect existing entries.
+	if err := cmdPurgePending(dir, []string{"--fp", "SHA256:zzz"}); err != nil {
+		t.Fatalf("purge-pending unknown fp: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("wrong error: %v", err)
+	if got := countPendingDB(t, dir); got != 1 {
+		t.Errorf("DB row count = %d, want 1 (existing aaa unchanged)", got)
 	}
 }
 
-func TestReject_NoLogFile(t *testing.T) {
-	dir := t.TempDir()
-	err := cmdReject(dir, []string{"--fingerprint", "SHA256:aaa"})
-	if err == nil {
-		t.Fatal("should error when no log file")
+func TestPurgePending_AllRequiresYes(t *testing.T) {
+	dir := setupPendingDBAndLog(t, "SHA256:aaa", "SHA256:bbb")
+
+	// Without --yes, should be a dry run: prints the count, doesn't delete.
+	if err := cmdPurgePending(dir, []string{"--all"}); err != nil {
+		t.Fatalf("purge-pending --all (no --yes): %v", err)
 	}
-	if !strings.Contains(err.Error(), "no pending keys log") {
-		t.Errorf("wrong error: %v", err)
+	if got := countPendingDB(t, dir); got != 2 {
+		t.Errorf("DB row count = %d, want 2 (no destructive action without --yes)", got)
 	}
 }
 
-func TestReject_MissingFlag(t *testing.T) {
-	err := cmdReject(t.TempDir(), nil)
+func TestPurgePending_AllYesClearsEverything(t *testing.T) {
+	dir := setupPendingDBAndLog(t, "SHA256:aaa", "SHA256:bbb", "SHA256:ccc")
+
+	if err := cmdPurgePending(dir, []string{"--all", "--yes"}); err != nil {
+		t.Fatalf("purge-pending --all --yes: %v", err)
+	}
+	if got := countPendingDB(t, dir); got != 0 {
+		t.Errorf("DB row count = %d, want 0 (wholesale clear)", got)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "data", "pending-keys.log"))
+	if len(strings.TrimSpace(string(data))) != 0 {
+		t.Errorf("log should be empty after --all --yes, got:\n%s", string(data))
+	}
+}
+
+func TestPurgePending_RejectsConflictingFlags(t *testing.T) {
+	dir := setupPendingDBAndLog(t, "SHA256:aaa")
+	err := cmdPurgePending(dir, []string{"--fp", "SHA256:aaa", "--all"})
 	if err == nil {
-		t.Fatal("should error without --fingerprint")
+		t.Fatal("--fp + --all should error")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("error should call out the conflict: %v", err)
+	}
+}
+
+func TestPurgePending_MissingFlag(t *testing.T) {
+	if err := cmdPurgePending(t.TempDir(), nil); err == nil {
+		t.Fatal("purge-pending without --fp or --all should error")
+	}
+}
+
+func TestRejectPending_ClearsAndBlocks(t *testing.T) {
+	dir := setupPendingDBAndLog(t, "SHA256:aaa", "SHA256:bbb")
+
+	if err := cmdRejectPending(dir, []string{"--fp", "SHA256:aaa", "--reason", "spam"}); err != nil {
+		t.Fatalf("reject-pending: %v", err)
+	}
+
+	// DB row gone for SHA256:aaa
+	if got := countPendingDB(t, dir); got != 1 {
+		t.Errorf("DB row count = %d, want 1 (bbb only)", got)
+	}
+	// Log line for SHA256:aaa gone
+	data, _ := os.ReadFile(filepath.Join(dir, "data", "pending-keys.log"))
+	if strings.Contains(string(data), "SHA256:aaa") {
+		t.Errorf("SHA256:aaa should be cleared from log, got:\n%s", string(data))
+	}
+	// Blocklist contains SHA256:aaa
+	st, _ := store.Open(dir)
+	defer st.Close()
+	if !st.IsFingerprintBlocked("SHA256:aaa") {
+		t.Error("SHA256:aaa should be on the block list after reject-pending")
+	}
+	if st.IsFingerprintBlocked("SHA256:bbb") {
+		t.Error("SHA256:bbb should NOT be on the block list (only the rejected one)")
+	}
+}
+
+func TestRejectPending_AlreadyBlockedIsIdempotent(t *testing.T) {
+	dir := setupPendingDBAndLog(t, "SHA256:aaa")
+
+	st, _ := store.Open(dir)
+	if err := st.BlockFingerprint("SHA256:aaa", "earlier", "test"); err != nil {
+		st.Close()
+		t.Fatalf("seed block: %v", err)
+	}
+	st.Close()
+
+	// Second call shouldn't error and should still clear the pending entry.
+	if err := cmdRejectPending(dir, []string{"--fp", "SHA256:aaa"}); err != nil {
+		t.Fatalf("reject-pending on already-blocked: %v", err)
+	}
+	if got := countPendingDB(t, dir); got != 0 {
+		t.Errorf("DB row count = %d, want 0 (pending entry cleared even when already blocked)", got)
+	}
+}
+
+func TestRejectPending_RejectsBareFingerprint(t *testing.T) {
+	// Reject-pending requires SHA256: prefix to match the blocklist
+	// and pending_keys table conventions.
+	if err := cmdRejectPending(t.TempDir(), []string{"--fp", "abcdef"}); err == nil {
+		t.Fatal("reject-pending should require SHA256: prefix on fingerprint")
+	}
+}
+
+func TestRejectPending_MissingFlag(t *testing.T) {
+	if err := cmdRejectPending(t.TempDir(), nil); err == nil {
+		t.Fatal("reject-pending without --fp should error")
 	}
 }
 
 // Phase 16 Gap 3: TestRemoveUser_* and the cmdRemoveUser command they
 // exercised were deleted entirely. See cmdRemoveUser's deletion
 // comment in main.go for the rationale (TOML-era holdover, breaks
-// invariants, no valid use case post-retirement).
-//
-// The store.DeleteUser helper is still kept because bootstrap-admin
-// uses it as a cleanup-on-error path (insert user → SetAdmin fails →
-// delete the orphan). DeleteUser is no longer reachable via any CLI
-// verb.
+// invariants, no valid use case post-retirement). store.DeleteUser
+// itself was removed in 2026-05-09 alongside bootstrap-admin (its
+// only consumer).
 
 // --- rename-user tests (Phase 16 Gap 1) ---
 

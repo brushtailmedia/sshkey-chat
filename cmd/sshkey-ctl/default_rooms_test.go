@@ -14,8 +14,8 @@ package main
 //   - cmdListRooms: shows [default] marker on flagged rooms
 //   - cmdRetireRoom: clears is_default during retirement
 //   - cmdApprove auto-join hook: new user lands in flagged rooms
-//   - cmdBootstrapAdmin auto-join hook: new admin lands in flagged
-//     rooms
+//     (also covers the `--admin` first-admin path, which shares the
+//     same auto-join code path post-bootstrap-admin removal)
 
 import (
 	"strings"

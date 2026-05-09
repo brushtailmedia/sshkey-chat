@@ -2,11 +2,11 @@ package main
 
 // Phase 16 — default rooms feature.
 //
-// Operators flag rooms as "default" so every new user approved or
-// bootstrapped lands in them automatically. When set-default-room
-// runs against a room with existing users, the CLI ALSO backfills
-// every active user as a member (Variant 2 chosen during planning:
-// always backfill on flag set, not opt-in).
+// Operators flag rooms as "default" so every new user approved
+// lands in them automatically. When set-default-room runs against
+// a room with existing users, the CLI ALSO backfills every active
+// user as a member (Variant 2 chosen during planning: always
+// backfill on flag set, not opt-in).
 //
 // CLI verbs:
 //   set-default-room <name>    — flips is_default=1 + backfills
@@ -17,11 +17,11 @@ package main
 //                                 to mass-kick a whole room)
 //   list-default-rooms          — show flagged non-retired rooms
 //
-// Approve-path integration: cmdApprove and cmdBootstrapAdmin both
-// call addUserToDefaultRooms(...) right after the user row insert,
-// so brand-new users automatically appear in flagged rooms on first
-// connect (no broadcast needed — they're connecting fresh and
-// receive their full room_list during the handshake).
+// Approve-path integration: cmdApprove calls addUserToDefaultRooms(...)
+// right after the user row insert, so brand-new users automatically
+// appear in flagged rooms on first connect (no broadcast needed —
+// they're connecting fresh and receive their full room_list during
+// the handshake).
 //
 // Backfill broadcast story (worth flagging): existing connected
 // users who are added as members during a set-default-room call do
@@ -164,9 +164,9 @@ func cmdListDefaultRooms(dataDir string) error {
 }
 
 // addUserToDefaultRooms is the auto-join hook called from cmdApprove
-// and cmdBootstrapAdmin right after a new user row is inserted.
-// Walks every flagged non-retired room and adds the user as a
-// member via AddRoomMember (idempotent).
+// right after a new user row is inserted. Walks every flagged
+// non-retired room and adds the user as a member via AddRoomMember
+// (idempotent).
 //
 // Errors are logged to stderr but don't fail the caller — the user
 // row is already committed and the operator can manually re-run

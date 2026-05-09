@@ -46,7 +46,7 @@ func writeTestAuditLog(t *testing.T) string {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.log")
 	content := strings.Join([]string{
-		`2026-04-16T08:00:00Z  os:1000      bootstrap-admin  user_id=usr_alice fingerprint=SHA256:abc`,
+		`2026-04-16T08:00:00Z  os:1000      approve          user_id=usr_alice fingerprint=SHA256:abc admin=true`,
 		`2026-04-16T09:00:00Z  os:1000      promote          user=usr_bob`,
 		`2026-04-16T10:00:00Z  os:1000      retire-user      user=usr_carol reason=key_lost`,
 		`2026-04-16T11:00:00Z  usr_alice    rename-room      room=rm_general`,
@@ -69,7 +69,7 @@ func TestAuditLog_NoArgsShowsAllEntries(t *testing.T) {
 	})
 
 	for _, want := range []string{
-		"bootstrap-admin",
+		"approve",
 		"promote",
 		"retire-user",
 		"rename-room",
@@ -87,14 +87,14 @@ func TestAuditLog_NewestFirst(t *testing.T) {
 		cmdAuditLog(dir, nil)
 	})
 
-	// revoke-device (12:00) should appear before bootstrap-admin (08:00)
+	// revoke-device (12:00) should appear before approve (08:00)
 	revokeIdx := strings.Index(out, "revoke-device")
-	bootIdx := strings.Index(out, "bootstrap-admin")
-	if revokeIdx == -1 || bootIdx == -1 {
+	approveIdx := strings.Index(out, "approve")
+	if revokeIdx == -1 || approveIdx == -1 {
 		t.Fatalf("output missing entries: %q", out)
 	}
-	if revokeIdx > bootIdx {
-		t.Error("expected revoke-device to appear before bootstrap-admin (newest first)")
+	if revokeIdx > approveIdx {
+		t.Error("expected revoke-device to appear before approve (newest first)")
 	}
 }
 
@@ -111,8 +111,11 @@ func TestAuditLog_LimitFlag(t *testing.T) {
 	if !strings.Contains(out, "rename-room") {
 		t.Error("missing rename-room (second-newest)")
 	}
-	if strings.Contains(out, "bootstrap-admin") {
-		t.Error("bootstrap-admin should be excluded by --limit 2")
+	// `approve` (08:00) is the third-newest, so --limit 2 must exclude
+	// it. Match the action token at column position to avoid false
+	// positives if any other entry's details mention "approve".
+	if strings.Contains(out, "  approve  ") {
+		t.Error("approve should be excluded by --limit 2")
 	}
 }
 
@@ -159,12 +162,12 @@ func TestAuditUser_FiltersBySource(t *testing.T) {
 	})
 
 	// usr_alice is the SOURCE of the rename-room entry (in-chat
-	// admin action), and the TARGET of bootstrap-admin and
-	// revoke-device entries (in details). Should match all three.
+	// admin action), and the TARGET of approve and revoke-device
+	// entries (in details). Should match all three.
 	for _, want := range []string{
-		"bootstrap-admin", // user_id=usr_alice in details
-		"rename-room",     // usr_alice as source
-		"revoke-device",   // user=usr_alice in details
+		"approve",       // user_id=usr_alice in details
+		"rename-room",   // usr_alice as source
+		"revoke-device", // user=usr_alice in details
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q, got: %q", want, out)
@@ -207,7 +210,10 @@ func TestAuditUser_LimitFlag(t *testing.T) {
 	if !strings.Contains(out, "revoke-device") {
 		t.Errorf("expected newest matching entry, got: %q", out)
 	}
-	if strings.Contains(out, "bootstrap-admin") {
-		t.Error("bootstrap-admin should be excluded by --limit 1")
+	// approve (08:00) is older than revoke-device (12:00), so --limit 1
+	// must exclude it. Anchor the action token at column position to
+	// avoid colliding with detail strings.
+	if strings.Contains(out, "  approve  ") {
+		t.Error("approve should be excluded by --limit 1")
 	}
 }

@@ -4,8 +4,8 @@
 // a single place to look for "who did what when."
 //
 // Extracted from internal/server/audit.go in Phase 16 Gap 4 so the CLI
-// could write entries for bootstrap-admin, retire-user, promote, etc.
-// without needing to reach into server internals.
+// could write entries for approve, retire-user, promote, etc. without
+// needing to reach into server internals.
 //
 // The log file format is line-oriented plain text:
 //

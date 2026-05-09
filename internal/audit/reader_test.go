@@ -45,8 +45,9 @@ func TestParse_HappyPath(t *testing.T) {
 func TestParse_LongSourceField(t *testing.T) {
 	// Source longer than the 12-char minimum width — written
 	// without padding, so the gap to action is just the separator
-	// (2 spaces).
-	line := "2026-04-16T10:30:45Z  usr_3f9a1b2c  bootstrap-admin  user_id=usr_alice"
+	// (2 spaces). Action chosen as `block-fingerprint` for similar
+	// length to exercise the no-padding case for both fields.
+	line := "2026-04-16T10:30:45Z  usr_3f9a1b2c  block-fingerprint  user_id=usr_alice"
 	entry, err := Parse(line)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -54,7 +55,7 @@ func TestParse_LongSourceField(t *testing.T) {
 	if entry.Source != "usr_3f9a1b2c" {
 		t.Errorf("Source = %q, want usr_3f9a1b2c", entry.Source)
 	}
-	if entry.Action != "bootstrap-admin" {
+	if entry.Action != "block-fingerprint" {
 		t.Errorf("Action = %q", entry.Action)
 	}
 	if entry.Details != "user_id=usr_alice" {

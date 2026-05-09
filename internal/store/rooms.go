@@ -321,8 +321,8 @@ func (s *Store) GetAllRooms() ([]RoomRecord, error) {
 }
 
 // GetDefaultRooms returns all non-retired rooms flagged as default.
-// Phase 16 — used by cmdApprove and cmdBootstrapAdmin to auto-add
-// new users to flagged rooms, and by cmdListDefaultRooms.
+// Phase 16 — used by cmdApprove to auto-add new users to flagged
+// rooms, and by cmdListDefaultRooms.
 func (s *Store) GetDefaultRooms() ([]RoomRecord, error) {
 	rows, err := s.roomsDB.Query(
 		`SELECT id, display_name, topic, retired, retired_at, retired_by, created_at, is_default FROM rooms WHERE is_default = 1 AND retired = 0 ORDER BY display_name`)

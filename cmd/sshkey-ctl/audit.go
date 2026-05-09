@@ -3,9 +3,9 @@ package main
 // Phase 16 — audit-log and audit-user CLI commands.
 //
 // Phase 16 added many state-changing commands that write audit
-// entries via internal/audit (bootstrap-admin, retire-user,
-// unretire-user, promote, demote, rename-user, update-topic,
-// rename-room, revoke-device, etc.). These two commands are the
+// entries via internal/audit (approve, retire-user, unretire-user,
+// promote, demote, rename-user, update-topic, rename-room,
+// revoke-device, etc.). These two commands are the
 // reader side: a way for operators to actually look at the audit
 // trail without `tail -f /var/sshkey-chat/audit.log` directly.
 //

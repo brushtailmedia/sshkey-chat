@@ -1,10 +1,10 @@
 package audit
 
 // Phase 16 — audit log reader. Phase 16 added many CLI commands that
-// write audit entries via the Log type above (bootstrap-admin,
-// retire-user, unretire-user, promote, demote, rename-user,
-// update-topic, rename-room, revoke-device, etc.) but the entries
-// were invisible to operators because nothing read the file.
+// write audit entries via the Log type above (approve, retire-user,
+// unretire-user, promote, demote, rename-user, update-topic,
+// rename-room, revoke-device, etc.) but the entries were invisible
+// to operators because nothing read the file.
 //
 // This reader supplies the missing piece: parse the line-oriented
 // text format, filter by time range / count / user, return entries
@@ -36,7 +36,7 @@ import (
 type Entry struct {
 	Timestamp time.Time // parsed from the RFC3339 prefix
 	Source    string    // e.g. "server", "user", "usr_3f9a...", "os:1000"
-	Action    string    // e.g. "promote", "retire-user", "bootstrap-admin"
+	Action    string    // e.g. "promote", "retire-user", "approve"
 	Details   string    // free-form rest of the line
 	Raw       string    // the original line as read from the file (for fallback display)
 }

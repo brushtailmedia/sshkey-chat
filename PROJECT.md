@@ -1148,23 +1148,28 @@ grace_period = "10s"             # time to finish in-flight transfers on shutdow
 
 > **Full reference:** `docker/config/server.toml` documents every knob (including `[server.auto_revoke]`, `[server.quotas.user]`, `[backup]`, the expanded `[rate_limits]` surface added by Phases 17 / 17b / 17c, and the `[files].max_file_ids_per_message` cap) with inline trade-off comments. The example above is the minimal learn-by-shape subset.
 
-**Users are not configured via a seed file.** On a fresh deployment, create the first admin with:
+**Users are not configured via a seed file.** On a fresh deployment, the first admin (and every subsequent user) goes through the bring-your-own-key flow — there is no server-side keygen path. The first admin generates an Ed25519 keypair on their own machine, attempts a connection (rejected, but the public key lands in `pending_keys`), and the operator approves on the server shell with `--admin` to flip the admin flag in the same transaction:
 
 ```bash
-sshkey-ctl bootstrap-admin admin-name
+# On the admin's machine
+ssh-keygen -t ed25519 -f ~/.ssh/admin_ed25519 -C "admin"
+sshkey-term --host <server> --key ~/.ssh/admin_ed25519   # rejected; key logged to pending_keys
+
+# On the server box
+sshkey-ctl pending
+sshkey-ctl approve --key "ssh-ed25519 AAAA... admin" --rooms general --admin
 ```
 
-This generates an Ed25519 keypair (interactive passphrase prompt, zxcvbn score ≥ 3 required), inserts the user row into `users.db` with `is_admin = true`, and writes the encrypted private key to the current directory (or `--out DIR`). Subsequent users join via the normal pending-keys + `sshkey-ctl approve` flow.
+The admin's private key never touches the server — only the public key, transferred via the SSH handshake's pending-keys channel. Subsequent users go through the same flow without `--admin`. `promote` / `demote` flip admin status of existing users at any time.
 
 **Docker onboarding flow:**
-- one-time host preflight for key export mount:
-  `mkdir -p ./docker/keys && sudo chown 2222:2222 ./docker/keys && sudo chmod 700 ./docker/keys`
+- one-time host preflight: none. The operator never holds private key material, so no key-export mount is required. (Earlier docs that mentioned `./docker/keys` are obsolete; the mount and the `/keys` directory inside the image were removed alongside `bootstrap-admin`.)
 - runtime sequence:
   `docker compose run --rm --entrypoint sshkey-ctl sshkey-chat init --docker`
   `docker compose up -d`
-  `docker compose exec -it sshkey-chat sshkey-ctl bootstrap-admin <name> --out /keys`
-- ownership note: generated private key may be `2222:2222` with mode `0600`; Linux operators can hand off with:
-  `sudo install -m 600 ./docker/keys/<name>_ed25519 ~/.ssh/<name>_ed25519 && sudo chown $(id -u):$(id -g) ~/.ssh/<name>_ed25519`
+  (admin tries to connect from their machine, key lands in pending)
+  `docker exec sshkey-chat sshkey-ctl pending`
+  `docker exec sshkey-chat sshkey-ctl approve --key "ssh-ed25519 AAAA... admin" --rooms general --admin`
 
 Server watches `server.toml` for changes (fsnotify) or reloads it on SIGHUP.
 
@@ -1179,8 +1184,12 @@ sshkey-ctl pending
 # Approve a user and assign rooms
 sshkey-ctl approve --fingerprint xx:yy:zz --name carol --rooms general,engineering
 
-# Reject / clear from pending log
-sshkey-ctl reject --fingerprint xx:yy:zz
+# Clear pending keys (DB + log; allows retry)
+sshkey-ctl purge-pending --fp SHA256:abc...
+sshkey-ctl purge-pending --all --yes
+
+# Clear AND block fingerprint (prevents retry)
+sshkey-ctl reject-pending --fp SHA256:abc... --reason "spam"
 
 # Purge old messages (delete + vacuum)
 sshkey-ctl purge --older-than 5y
@@ -1244,7 +1253,7 @@ Clients receiving `server_shutdown` should:
 User and room data lives in SQLite databases (`users.db`, `rooms.db`). Changes via `sshkey-ctl` CLI take effect immediately — the server reads from DB on demand, no reload needed. Server watches `server.toml` via fsnotify for hot-reload of runtime settings.
 
 **Immediate (via `sshkey-ctl`, no restart):**
-- User management — `approve`, `bootstrap-admin`, `retire-user`, `unretire-user`, `promote`, `demote`, `rename-user`
+- User management — `approve` (with optional `--admin` flag), `retire-user`, `unretire-user`, `promote`, `demote`, `rename-user`
 - Room management — `add-room`, `add-to-room`, `remove-from-room`, `retire-room`, `update-topic`, `rename-room`, `set-default-room`, `unset-default-room`
 - Device management — `revoke-device`, `restore-device`, `prune-devices`
 - Security — `block-fingerprint`, `unblock-fingerprint`
@@ -1265,9 +1274,9 @@ All state-changing commands (retire-user, promote, demote, rename-user, update-t
 Append-only log of all administrative actions. Stored at `/var/sshkey-chat/audit.log`.
 
 ```
-2026-04-03T14:22:00Z  sshkey-ctl  bootstrap-admin  user=usr_admin fingerprint=xx:yy:zz
+2026-04-03T14:22:00Z  sshkey-ctl  approve          user=usr_admin fingerprint=xx:yy:zz admin=true
 2026-04-03T14:22:00Z  sshkey-ctl  approve          user=usr_carol fingerprint=yy:zz:aa rooms=general,engineering
-2026-04-03T14:25:00Z  sshkey-ctl  reject           fingerprint=aa:bb:cc
+2026-04-03T14:25:00Z  sshkey-ctl  reject-pending   fingerprint=aa:bb:cc
 2026-04-03T15:00:00Z  server      reload           trigger=fsnotify file=server.toml
 2026-04-03T15:10:00Z  sshkey-ctl  retire-user      user=usr_dave reason="offboarded"
 2026-04-03T16:00:00Z  sshkey-ctl  revoke-device    user=usr_alice device=dev_macbook_abc
