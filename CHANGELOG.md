@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v0.3.0] - 2026-05-12
+
 ### Removed
 - **`sshkey-ctl bootstrap-admin` command + server-side admin keygen path entirely (2026-05-09).** The command and its supporting code (`cmd/sshkey-ctl/bootstrap_admin.go`, `bootstrap_admin_test.go`, ~880 lines together) generated an Ed25519 keypair on the server, encrypted the private key with an interactively-prompted passphrase, wrote it to disk, and instructed the operator to `scp` it off and `shred -u` the original. **The model itself was wrong for a key-as-identity protocol.** Server-side keygen meant the operator briefly held the new admin's private key — even encrypted — and the cleanup relied on `shred`, which is not reliably destructive on APFS / SSDs with wear-leveling / Docker overlay layers. A compromised server during the window between keygen and shred would yield the admin's private key. The whole point of the rest of the system (key-as-identity, no rotation, fingerprint-pinned profiles) is that private keys never leave the user's machine — bootstrap-admin inverted that property and patched it with a workflow assumption.
 
