@@ -9,12 +9,13 @@ package server
 // These tests lock in that fix — a regression that restores the bare
 // return would be caught by the counter assertion.
 //
-// Handlers covered (14):
-//   session.go: handleTyping, handleRead, handleUnreact, handlePin,
-//               handleUnpin, handleDelete, handleLeaveGroup,
-//               handleDeleteGroup, handleLeaveRoom, handleDeleteRoom,
-//               handleRenameGroup, handleLeaveDM, handleSetProfile,
-//               handleSetStatus
+// Handlers covered (15):
+//   session.go:       handleTyping, handleRead, handleUnreact, handlePin,
+//                     handleUnpin, handleDelete, handleLeaveGroup,
+//                     handleDeleteGroup, handleLeaveRoom, handleDeleteRoom,
+//                     handleRenameGroup, handleLeaveDM, handleSetProfile,
+//                     handleSetStatus
+//   room_update.go:   handleRoomUpdate
 
 import (
 	"testing"
@@ -145,5 +146,14 @@ func TestHandleSetStatus_MalformedFrameFiresSignal(t *testing.T) {
 	s.handleSetStatus(alice.Client, malformedRaw())
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_setstatus_malformed"); got != 1 {
 		t.Errorf("SignalMalformedFrame on handleSetStatus = %d, want 1", got)
+	}
+}
+
+func TestHandleRoomUpdate_MalformedFrameFiresSignal(t *testing.T) {
+	s := newTestServer(t)
+	alice := testClientFor("alice", "dev_alice_roomupdate_malformed")
+	s.handleRoomUpdate(alice.Client, malformedRaw())
+	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_roomupdate_malformed"); got != 1 {
+		t.Errorf("SignalMalformedFrame on handleRoomUpdate = %d, want 1", got)
 	}
 }

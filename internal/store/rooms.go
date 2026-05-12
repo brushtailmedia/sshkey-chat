@@ -2,6 +2,7 @@ package store
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"fmt"
 	"math/big"
 	"strings"
@@ -263,8 +264,11 @@ func (s *Store) GetRoomByID(id string) (*RoomRecord, error) {
 	err := s.roomsDB.QueryRow(
 		`SELECT id, display_name, topic, retired, retired_at, retired_by, created_at, is_default FROM rooms WHERE id = ?`,
 		id).Scan(&r.ID, &r.DisplayName, &r.Topic, &retired, &r.RetiredAt, &r.RetiredBy, &r.CreatedAt, &isDefault)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
 	if err != nil {
-		return nil, nil // not found
+		return nil, err
 	}
 	r.Retired = retired != 0
 	r.IsDefault = isDefault != 0

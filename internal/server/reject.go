@@ -298,10 +298,10 @@ func (s *Server) respondUploadError(c *Client, corrID, uploadID, code, message s
 // logs via rejectAndLog, and returns false — caller must immediately
 // return. Empty corr_id is valid (omitempty convention).
 //
-// Phase 17c Step 2 D9 wiring: applied to the 15 CorrID-carrying verb
+// Phase 17c Step 2 D9 wiring: applied to the 16 CorrID-carrying verb
 // handlers (send, send_group, send_dm, edit, edit_group, edit_dm,
 // react, unreact, delete, pin, unpin, room_members, history, download,
-// upload_start).
+// upload_start, room_update).
 func (s *Server) validateCorrIDOrReject(c *Client, verb, corrID string) bool {
 	if err := protocol.ValidateCorrID(corrID); err != nil {
 		s.rejectAndLog(c, counters.SignalMalformedFrame, verb,

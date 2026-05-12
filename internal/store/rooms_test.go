@@ -203,6 +203,30 @@ func TestGetRoomByID(t *testing.T) {
 	}
 }
 
+func TestGetRoomByID_PropagatesQueryError(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	st.SeedRooms(map[string]RoomSeed{"general": {Topic: "Chat"}})
+	all, _ := st.GetAllRooms()
+	id := all[0].ID
+
+	if err := st.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	room, err := st.GetRoomByID(id)
+	if err == nil {
+		t.Fatal("expected query error on closed rooms DB, got nil")
+	}
+	if room != nil {
+		t.Fatalf("room = %+v, want nil when query fails", room)
+	}
+}
+
 func TestGetRoomByDisplayName(t *testing.T) {
 	dir := t.TempDir()
 	st, err := Open(dir)

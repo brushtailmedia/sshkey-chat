@@ -160,9 +160,10 @@ func printUsage() error {
 Usage: sshkey-ctl [--config DIR] [--data DIR] <command> [args]
 
 Commands:
-  init [--docker] [--yes] [--bind ADDR] [--port N]
+  init [--profile dev|docker|prod] [--minimal] [--docker] [--yes] [--bind ADDR] [--port N]
                                           Guided first-run setup (writes server.toml
-                                          if missing; initializes SQLite store)
+                                          if missing; initializes SQLite store;
+                                          default is full recommended template)
   pending                                 View pending key requests
   approve --key "ssh-ed25519 AAAA... name" [--rooms ROOMS] [--admin]  Approve a pending key (display name from key comment, optional admin flag)
   approve --key "ssh-ed25519 AAAA..." --name NAME [--rooms ROOMS] [--admin]  Approve a pending key (override display name)
@@ -487,7 +488,7 @@ func clearPendingKeyState(dataDir string, st *store.Store, fingerprint string) e
 //
 //   - --fp FINGERPRINT: clear a single pending key
 //   - --all [--yes]:    wholesale clear; --yes skips the
-//                       interactive confirmation prompt
+//     interactive confirmation prompt
 //
 // Crucially, this does NOT add the fingerprint(s) to the
 // block list — the rejected user can retry on next connect and

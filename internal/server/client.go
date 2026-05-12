@@ -36,7 +36,6 @@ type Client struct {
 	Channel         ssh.Channel // NDJSON control-plane channel (1st "session" channel)
 	DownloadChannel ssh.Channel // shared download channel (2nd "session" channel); nil only if the client failed to open it within the grace period — downloads fail closed with not_found
 	Conn            *ssh.ServerConn
-	Capabilities    []string // negotiated capabilities
 
 	// LastActivity is the unix-seconds timestamp of the most recent
 	// successful NDJSON decode on Channel 1. Updated by messageLoop

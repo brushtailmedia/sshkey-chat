@@ -65,8 +65,10 @@ Only Ed25519 SSH keys are supported. The server rejects RSA, ECDSA, and other ke
 
 ```bash
 # 1. Initialize config + SQLite state (interactive; press Enter to accept defaults)
-docker compose run --rm --entrypoint sshkey-ctl sshkey-chat init --docker
+docker compose run --rm --entrypoint sshkey-ctl sshkey-chat init --profile docker
 # Non-interactive (CI / scripted):
+# docker compose run --rm --entrypoint sshkey-ctl sshkey-chat init --profile docker --yes
+# Legacy alias (still supported):
 # docker compose run --rm --entrypoint sshkey-ctl sshkey-chat init --docker --yes
 
 # 2. Start the server
@@ -168,13 +170,22 @@ go build -o sshkey-ctl ./cmd/sshkey-ctl
 ```bash
 # Guided first-run setup (interactive; press Enter to accept defaults)
 sshkey-ctl init
+# Optional profiles:
+# sshkey-ctl init --profile dev
+# sshkey-ctl init --profile docker
+# Legacy alias (same as --profile docker):
+# sshkey-ctl init --docker
 # Non-interactive:
 # sshkey-ctl init --yes
+# Keep old tiny config output (opt-in):
+# sshkey-ctl init --yes --minimal
 ```
 
 `sshkey-ctl init` creates config/data directories, writes `server.toml`
 when missing, initializes SQLite DBs, and creates starter rooms
-(`general`, `support`) by default.
+(`general`, `support`) by default. By default it writes the full
+annotated recommended `server.toml`; use `--minimal` to opt into the
+legacy compact file.
 
 **`/etc/sshkey-chat/server.toml`**
 
@@ -203,7 +214,7 @@ profiles_per_minute = 5
 pins_per_minute = 10
 ```
 
-See `docker/config/server.toml` for the complete reference with every option documented inline. (`testdata/config/server.toml` mirrors the same section shape for test fixtures but with test-friendly values — not intended as an operator reference.)
+`sshkey-ctl init` now writes the complete annotated template by default, so the generated `server.toml` is the primary operator reference. The source template is [`cmd/sshkey-ctl/default_server.toml`](cmd/sshkey-ctl/default_server.toml). (`testdata/config/server.toml` mirrors the same section shape for test fixtures but with test-friendly values — not intended as an operator reference.)
 
 **Users** are not configured via a seed file. On a fresh deployment, the first admin (and every subsequent user) goes through the bring-your-own-key flow:
 
@@ -366,15 +377,15 @@ sshkey-ctl backup --out /mnt/archive                           # write to a cust
 
 ## Protocol
 
-NDJSON (newline-delimited JSON) over SSH. One JSON object per line. Capabilities are individually negotiated on connect.
+NDJSON (newline-delimited JSON) over SSH. One JSON object per line.
 
 ### Handshake
 
 ```
 Client connects via SSH with Ed25519 key
-  Server -> server_hello (capabilities)
-  Client -> client_hello (device_id, requested capabilities)
-  Server -> welcome (user, active capabilities)
+  Server -> server_hello
+  Client -> client_hello (device_id, last_synced_at)
+  Server -> welcome (user, room/group IDs, pending_sync)
   Server -> retired_rooms, deleted_rooms  (Phase 12 catchup — BEFORE room_list)
   Server -> deleted_groups                (Phase 11 catchup — BEFORE group_list)
   Server -> room_list, group_list, dm_list

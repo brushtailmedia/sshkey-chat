@@ -7,45 +7,42 @@ import "encoding/json"
 // Handshake messages
 
 type ServerHello struct {
-	Type         string   `json:"type"`          // "server_hello"
-	Protocol     string   `json:"protocol"`      // "sshkey-chat"
-	Version      int      `json:"version"`       // 1
-	ServerID     string   `json:"server_id"`     // e.g. "chat.example.com"
-	Capabilities []string `json:"capabilities"`  // advertised capabilities
+	Type     string `json:"type"`      // "server_hello"
+	Protocol string `json:"protocol"`  // "sshkey-chat"
+	Version  int    `json:"version"`   // 1
+	ServerID string `json:"server_id"` // e.g. "chat.example.com"
 }
 
 type ClientHello struct {
-	Type          string   `json:"type"`           // "client_hello"
-	Protocol      string   `json:"protocol"`       // "sshkey-chat"
-	Version       int      `json:"version"`        // 1
-	Client        string   `json:"client"`         // "terminal", "gui", etc.
-	ClientVersion string   `json:"client_version"` // e.g. "0.1.0"
-	DeviceID      string   `json:"device_id"`      // e.g. "dev_V1StGXR8_Z5jdHi6B-myT"
-	LastSyncedAt  string   `json:"last_synced_at"` // ISO 8601 timestamp or empty
-	Capabilities  []string `json:"capabilities"`   // requested capabilities
+	Type          string `json:"type"`           // "client_hello"
+	Protocol      string `json:"protocol"`       // "sshkey-chat"
+	Version       int    `json:"version"`        // 1
+	Client        string `json:"client"`         // "terminal", "gui", etc.
+	ClientVersion string `json:"client_version"` // e.g. "0.1.0"
+	DeviceID      string `json:"device_id"`      // e.g. "dev_V1StGXR8_Z5jdHi6B-myT"
+	LastSyncedAt  string `json:"last_synced_at"` // ISO 8601 timestamp or empty
 }
 
 type Welcome struct {
-	Type               string   `json:"type"`                // "welcome"
-	User               string   `json:"user"`                // authenticated username
-	DisplayName        string   `json:"display_name"`        // display name from config
-	Admin              bool     `json:"admin"`               // true if user is a server admin
-	Rooms              []string `json:"rooms"`               // room nanoid IDs the user has access to
-	Groups             []string `json:"groups"`              // group DM IDs the user is a member of
-	PendingSync        bool     `json:"pending_sync"`        // true if sync batches follow
-	ActiveCapabilities []string `json:"active_capabilities"` // negotiated capabilities
+	Type        string   `json:"type"`         // "welcome"
+	User        string   `json:"user"`         // authenticated username
+	DisplayName string   `json:"display_name"` // display name from config
+	Admin       bool     `json:"admin"`        // true if user is a server admin
+	Rooms       []string `json:"rooms"`        // room nanoid IDs the user has access to
+	Groups      []string `json:"groups"`       // group DM IDs the user is a member of
+	PendingSync bool     `json:"pending_sync"` // true if sync batches follow
 }
 
 // Sync messages
 
 type SyncBatch struct {
-	Type      string          `json:"type"`                 // "sync_batch"
-	Messages  []RawMessage    `json:"messages"`             // mixed room + DM messages
-	Reactions []RawMessage    `json:"reactions,omitempty"`  // reactions on the synced messages
-	Events    []RawMessage    `json:"events,omitempty"`     // Phase 14: group admin events (join/leave/promote/demote/rename) for offline replay
-	EpochKeys []SyncEpochKey  `json:"epoch_keys"`           // room epoch keys needed for this batch
-	Page      int             `json:"page"`
-	HasMore   bool            `json:"has_more"`
+	Type      string         `json:"type"`                // "sync_batch"
+	Messages  []RawMessage   `json:"messages"`            // mixed room + DM messages
+	Reactions []RawMessage   `json:"reactions,omitempty"` // reactions on the synced messages
+	Events    []RawMessage   `json:"events,omitempty"`    // Phase 14: group admin events (join/leave/promote/demote/rename) for offline replay
+	EpochKeys []SyncEpochKey `json:"epoch_keys"`          // room epoch keys needed for this batch
+	Page      int            `json:"page"`
+	HasMore   bool           `json:"has_more"`
 }
 
 type SyncEpochKey struct {
@@ -62,23 +59,23 @@ type SyncComplete struct {
 // Room messages
 
 type Send struct {
-	Type      string   `json:"type"`                // "send"
+	Type      string   `json:"type"` // "send"
 	Room      string   `json:"room"`
 	Epoch     int64    `json:"epoch"`
-	Payload   string   `json:"payload"`             // base64 encrypted
+	Payload   string   `json:"payload"` // base64 encrypted
 	FileIDs   []string `json:"file_ids,omitempty"`
-	Signature string   `json:"signature"`           // base64 Ed25519 signature
-	CorrID    string   `json:"corr_id,omitempty"`   // Phase 17c: client-generated correlation tag; server echoes on error/success
+	Signature string   `json:"signature"`         // base64 Ed25519 signature
+	CorrID    string   `json:"corr_id,omitempty"` // Phase 17c: client-generated correlation tag; server echoes on error/success
 }
 
 type Message struct {
-	Type      string   `json:"type"`                // "message"
-	ID        string   `json:"id"`                  // server-assigned, msg_ prefix
+	Type      string   `json:"type"` // "message"
+	ID        string   `json:"id"`   // server-assigned, msg_ prefix
 	From      string   `json:"from"`
 	Room      string   `json:"room"`
-	TS        int64    `json:"ts"`                  // unix epoch seconds
+	TS        int64    `json:"ts"` // unix epoch seconds
 	Epoch     int64    `json:"epoch"`
-	Payload   string   `json:"payload"`             // base64 encrypted, pass-through
+	Payload   string   `json:"payload"` // base64 encrypted, pass-through
 	FileIDs   []string `json:"file_ids,omitempty"`
 	Signature string   `json:"signature"`           // base64, pass-through
 	EditedAt  int64    `json:"edited_at,omitempty"` // Phase 15: server sets on edit, absent on unedited messages
@@ -94,13 +91,13 @@ type Message struct {
 // preserved by the client via the preserve-and-replace pattern before
 // re-encrypting (see message_editing.md Chunk 6).
 type Edit struct {
-	Type      string `json:"type"`                // "edit"
-	ID        string `json:"id"`                  // msg ID of the message being edited
-	Room      string `json:"room"`                // room nanoid
-	Epoch     int64  `json:"epoch"`               // current epoch (grace window same as send)
-	Payload   string `json:"payload"`             // base64 encrypted new payload
-	Signature string `json:"signature"`           // base64 Ed25519 signature over canonical form
-	CorrID    string `json:"corr_id,omitempty"`   // Phase 17c
+	Type      string `json:"type"`              // "edit"
+	ID        string `json:"id"`                // msg ID of the message being edited
+	Room      string `json:"room"`              // room nanoid
+	Epoch     int64  `json:"epoch"`             // current epoch (grace window same as send)
+	Payload   string `json:"payload"`           // base64 encrypted new payload
+	Signature string `json:"signature"`         // base64 Ed25519 signature over canonical form
+	CorrID    string `json:"corr_id,omitempty"` // Phase 17c
 }
 
 // Edited is the server → client broadcast shape after a successful
@@ -111,17 +108,17 @@ type Edit struct {
 // locally-cached reactions for this message ID when they process this
 // event (see message_editing.md Decision log Q12).
 type Edited struct {
-	Type      string   `json:"type"`                // "edited"
+	Type      string   `json:"type"` // "edited"
 	ID        string   `json:"id"`
 	From      string   `json:"from"`
 	Room      string   `json:"room"`
-	TS        int64    `json:"ts"`                  // ORIGINAL send time, preserved
+	TS        int64    `json:"ts"` // ORIGINAL send time, preserved
 	Epoch     int64    `json:"epoch"`
-	Payload   string   `json:"payload"`             // new encrypted payload
-	FileIDs   []string `json:"file_ids,omitempty"`  // preserved from stored row
+	Payload   string   `json:"payload"`            // new encrypted payload
+	FileIDs   []string `json:"file_ids,omitempty"` // preserved from stored row
 	Signature string   `json:"signature"`
-	EditedAt  int64    `json:"edited_at"`           // server-authoritative edit wall clock
-	CorrID    string   `json:"corr_id,omitempty"`   // Phase 17c: originator-only ack echo
+	EditedAt  int64    `json:"edited_at"`         // server-authoritative edit wall clock
+	CorrID    string   `json:"corr_id,omitempty"` // Phase 17c: originator-only ack echo
 }
 
 // Group DM messages
@@ -131,55 +128,55 @@ type Edited struct {
 // `DM`, `LeaveDM`, `DMInfo`, etc. See the DM section further down.)
 
 type CreateGroup struct {
-	Type    string   `json:"type"`              // "create_group"
-	Members []string `json:"members"`           // other usernames (sender is implicit)
-	Name    string   `json:"name,omitempty"`    // optional group name
+	Type    string   `json:"type"`           // "create_group"
+	Members []string `json:"members"`        // other usernames (sender is implicit)
+	Name    string   `json:"name,omitempty"` // optional group name
 }
 
 type GroupCreated struct {
-	Type    string   `json:"type"`              // "group_created"
-	Group   string   `json:"group"`             // group_ prefixed Nano ID
-	Members []string `json:"members"`           // all members including sender
-	Admins  []string `json:"admins,omitempty"`  // Phase 14: admin user IDs (includes creator)
+	Type    string   `json:"type"`             // "group_created"
+	Group   string   `json:"group"`            // group_ prefixed Nano ID
+	Members []string `json:"members"`          // all members including sender
+	Admins  []string `json:"admins,omitempty"` // Phase 14: admin user IDs (includes creator)
 	Name    string   `json:"name,omitempty"`
 }
 
 type RenameGroup struct {
-	Type  string `json:"type"`             // "rename_group"
+	Type  string `json:"type"` // "rename_group"
 	Group string `json:"group"`
-	Name  string `json:"name"`             // new name (empty to clear)
-	Quiet bool   `json:"quiet,omitempty"`  // Phase 14: suppress inline system message
+	Name  string `json:"name"`            // new name (empty to clear)
+	Quiet bool   `json:"quiet,omitempty"` // Phase 14: suppress inline system message
 }
 
 type GroupRenamed struct {
-	Type      string `json:"type"`       // "group_renamed"
+	Type      string `json:"type"` // "group_renamed"
 	Group     string `json:"group"`
 	Name      string `json:"name"`
 	RenamedBy string `json:"renamed_by"`
 }
 
 type SendGroup struct {
-	Type        string            `json:"type"`                  // "send_group"
+	Type        string            `json:"type"` // "send_group"
 	Group       string            `json:"group"`
-	WrappedKeys map[string]string `json:"wrapped_keys"`          // userID -> base64 wrapped key
-	Payload     string            `json:"payload"`               // base64 encrypted
+	WrappedKeys map[string]string `json:"wrapped_keys"` // userID -> base64 wrapped key
+	Payload     string            `json:"payload"`      // base64 encrypted
 	FileIDs     []string          `json:"file_ids,omitempty"`
-	Signature   string            `json:"signature"`             // base64 Ed25519 signature
-	CorrID      string            `json:"corr_id,omitempty"`     // Phase 17c
+	Signature   string            `json:"signature"`         // base64 Ed25519 signature
+	CorrID      string            `json:"corr_id,omitempty"` // Phase 17c
 }
 
 type GroupMessage struct {
-	Type        string            `json:"type"`                  // "group_message"
-	ID          string            `json:"id"`                    // server-assigned
+	Type        string            `json:"type"` // "group_message"
+	ID          string            `json:"id"`   // server-assigned
 	From        string            `json:"from"`
 	Group       string            `json:"group"`
 	TS          int64             `json:"ts"`
-	WrappedKeys map[string]string `json:"wrapped_keys"`          // pass-through
-	Payload     string            `json:"payload"`               // pass-through
+	WrappedKeys map[string]string `json:"wrapped_keys"` // pass-through
+	Payload     string            `json:"payload"`      // pass-through
 	FileIDs     []string          `json:"file_ids,omitempty"`
-	Signature   string            `json:"signature"`             // pass-through
-	EditedAt    int64             `json:"edited_at,omitempty"`   // Phase 15
-	CorrID      string            `json:"corr_id,omitempty"`     // Phase 17c: originator-only ack echo
+	Signature   string            `json:"signature"`           // pass-through
+	EditedAt    int64             `json:"edited_at,omitempty"` // Phase 15
+	CorrID      string            `json:"corr_id,omitempty"`   // Phase 17c: originator-only ack echo
 }
 
 // EditGroup is the client → server envelope for replacing a group DM
@@ -188,35 +185,35 @@ type GroupMessage struct {
 // server validates against GetGroupMembers at edit time). FileIDs is
 // omitted; the server preserves file_ids from the stored row.
 type EditGroup struct {
-	Type        string            `json:"type"`                // "edit_group"
+	Type        string            `json:"type"` // "edit_group"
 	ID          string            `json:"id"`
 	Group       string            `json:"group"`
 	WrappedKeys map[string]string `json:"wrapped_keys"`
 	Payload     string            `json:"payload"`
 	Signature   string            `json:"signature"`
-	CorrID      string            `json:"corr_id,omitempty"`   // Phase 17c
+	CorrID      string            `json:"corr_id,omitempty"` // Phase 17c
 }
 
 // GroupEdited is the server → client broadcast for a successful group
 // DM edit. Shape mirrors GroupMessage plus EditedAt.
 type GroupEdited struct {
-	Type        string            `json:"type"`                // "group_edited"
+	Type        string            `json:"type"` // "group_edited"
 	ID          string            `json:"id"`
 	From        string            `json:"from"`
 	Group       string            `json:"group"`
-	TS          int64             `json:"ts"`                  // ORIGINAL send time
+	TS          int64             `json:"ts"` // ORIGINAL send time
 	WrappedKeys map[string]string `json:"wrapped_keys"`
 	Payload     string            `json:"payload"`
-	FileIDs     []string          `json:"file_ids,omitempty"`  // preserved from stored row
+	FileIDs     []string          `json:"file_ids,omitempty"` // preserved from stored row
 	Signature   string            `json:"signature"`
 	EditedAt    int64             `json:"edited_at"`
-	CorrID      string            `json:"corr_id,omitempty"`   // Phase 17c
+	CorrID      string            `json:"corr_id,omitempty"` // Phase 17c
 }
 
 // Leave group
 
 type LeaveGroup struct {
-	Type  string `json:"type"`  // "leave_group"
+	Type  string `json:"type"` // "leave_group"
 	Group string `json:"group"`
 }
 
@@ -245,9 +242,9 @@ type LeaveGroup struct {
 // Reason values for Event="promote":
 //   - ""                        normal admin promote; By required
 //   - "retirement_succession"   auto-promote of oldest member when the last
-//                               admin retires their account; By empty
+//     admin retires their account; By empty
 type GroupEvent struct {
-	Type   string `json:"type"`             // "group_event"
+	Type   string `json:"type"` // "group_event"
 	Group  string `json:"group"`
 	Event  string `json:"event"`            // "leave" | "join" | "promote" | "demote" | "rename"
 	User   string `json:"user"`             // target user (the one being removed/added/promoted/demoted)
@@ -265,9 +262,9 @@ type GroupEvent struct {
 // Reason distinguishes self-leave from admin-triggered removal:
 //   - "" (empty): the user ran /leave themselves
 //   - "removed": an admin removed the user via handleRemoveFromGroup (Phase 14).
-//                By carries the kicking admin's user ID so the client can
-//                render "You were removed from the group by alice" instead of
-//                the generic "You were removed from the group by an admin".
+//     By carries the kicking admin's user ID so the client can
+//     render "You were removed from the group by alice" instead of
+//     the generic "You were removed from the group by an admin".
 //   - "retirement": the user's account was retired
 //
 // Phase 14 historical note: "admin" was the reason code used by the
@@ -280,7 +277,7 @@ type GroupEvent struct {
 // group" vs "You were removed from group X by alice" — so the kicked user
 // understands why they were ejected and by whom.
 type GroupLeft struct {
-	Type   string `json:"type"`             // "group_left"
+	Type   string `json:"type"` // "group_left"
 	Group  string `json:"group"`
 	Reason string `json:"reason,omitempty"` // "" | "removed" | "retirement"
 	By     string `json:"by,omitempty"`     // Phase 14: kicking admin's user ID; required when Reason="removed", empty otherwise
@@ -297,7 +294,7 @@ type GroupLeft struct {
 // then echoes group_deleted to all of the user's connected sessions.
 // Idempotent: re-running for the same group is safe.
 type DeleteGroup struct {
-	Type  string `json:"type"`  // "delete_group"
+	Type  string `json:"type"` // "delete_group"
 	Group string `json:"group"`
 }
 
@@ -313,7 +310,7 @@ type DeleteGroup struct {
 // works for currently-connected devices. Offline devices catch up via
 // deleted_groups during sync.
 type GroupDeleted struct {
-	Type  string `json:"type"`  // "group_deleted"
+	Type  string `json:"type"` // "group_deleted"
 	Group string `json:"group"`
 }
 
@@ -349,67 +346,67 @@ type DeletedGroupsList struct {
 // group. The caller must be an admin of the group. Multi-target adds are
 // done client-side by sending one AddToGroup per target.
 type AddToGroup struct {
-	Type  string `json:"type"`             // "add_to_group"
+	Type  string `json:"type"` // "add_to_group"
 	Group string `json:"group"`
-	User  string `json:"user"`             // target to add
-	Quiet bool   `json:"quiet,omitempty"`  // suppress inline system message
+	User  string `json:"user"`            // target to add
+	Quiet bool   `json:"quiet,omitempty"` // suppress inline system message
 }
 
 // RemoveFromGroup requests that an admin remove a member from a group DM.
 // Callers who pass their own user ID fall through to the self-leave path
 // (handleLeaveGroup) rather than generating a "alice removed alice" event.
 type RemoveFromGroup struct {
-	Type  string `json:"type"`  // "remove_from_group"
+	Type  string `json:"type"` // "remove_from_group"
 	Group string `json:"group"`
-	User  string `json:"user"`  // target to remove
+	User  string `json:"user"` // target to remove
 }
 
 // PromoteGroupAdmin requests that an admin promote a member to admin.
 // Unilateral: any admin can promote any member, no cross-admin approval
 // needed. Target must currently be a non-admin member.
 type PromoteGroupAdmin struct {
-	Type  string `json:"type"`             // "promote_group_admin"
+	Type  string `json:"type"` // "promote_group_admin"
 	Group string `json:"group"`
-	User  string `json:"user"`             // target to promote
-	Quiet bool   `json:"quiet,omitempty"`  // suppress inline system message
+	User  string `json:"user"`            // target to promote
+	Quiet bool   `json:"quiet,omitempty"` // suppress inline system message
 }
 
 // DemoteGroupAdmin requests that an admin demote another admin (or themselves)
 // back to regular member. Rejected if the demotion would leave the group with
 // zero admins — the caller must promote a successor first in that case.
 type DemoteGroupAdmin struct {
-	Type  string `json:"type"`             // "demote_group_admin"
+	Type  string `json:"type"` // "demote_group_admin"
 	Group string `json:"group"`
-	User  string `json:"user"`             // target to demote (may equal caller for self-demote)
-	Quiet bool   `json:"quiet,omitempty"`  // suppress inline system message
+	User  string `json:"user"`            // target to demote (may equal caller for self-demote)
+	Quiet bool   `json:"quiet,omitempty"` // suppress inline system message
 }
 
 // AddGroupResult echoes a successful add_to_group back to the calling admin.
 type AddGroupResult struct {
-	Type  string `json:"type"`  // "add_group_result"
+	Type  string `json:"type"` // "add_group_result"
 	Group string `json:"group"`
-	User  string `json:"user"`  // added user
+	User  string `json:"user"` // added user
 }
 
 // RemoveGroupResult echoes a successful remove_from_group back to the calling admin.
 type RemoveGroupResult struct {
-	Type  string `json:"type"`  // "remove_group_result"
+	Type  string `json:"type"` // "remove_group_result"
 	Group string `json:"group"`
-	User  string `json:"user"`  // removed user
+	User  string `json:"user"` // removed user
 }
 
 // PromoteAdminResult echoes a successful promote_group_admin back to the calling admin.
 type PromoteAdminResult struct {
-	Type  string `json:"type"`  // "promote_admin_result"
+	Type  string `json:"type"` // "promote_admin_result"
 	Group string `json:"group"`
-	User  string `json:"user"`  // promoted user
+	User  string `json:"user"` // promoted user
 }
 
 // DemoteAdminResult echoes a successful demote_group_admin back to the calling admin.
 type DemoteAdminResult struct {
-	Type  string `json:"type"`  // "demote_admin_result"
+	Type  string `json:"type"` // "demote_admin_result"
 	Group string `json:"group"`
-	User  string `json:"user"`  // demoted user
+	User  string `json:"user"` // demoted user
 }
 
 // GroupAddedTo is a direct notification sent to a user's sessions when an
@@ -420,7 +417,7 @@ type DemoteAdminResult struct {
 // The added user receives no pre-join history — their first decryptable
 // message is the next group_message broadcast after the add lands.
 type GroupAddedTo struct {
-	Type    string   `json:"type"`    // "group_added_to"
+	Type    string   `json:"type"` // "group_added_to"
 	Group   string   `json:"group"`
 	Name    string   `json:"name,omitempty"`
 	Members []string `json:"members"`
@@ -452,7 +449,7 @@ type LeaveRoom struct {
 //   - "retirement": the room itself was retired (Phase 12)
 //   - "user_retired": the leaving user's account was retired
 type RoomLeft struct {
-	Type   string `json:"type"`             // "room_left"
+	Type   string `json:"type"` // "room_left"
 	Room   string `json:"room"`
 	Reason string `json:"reason,omitempty"` // "" | "admin" | "retirement" | "user_retired"
 }
@@ -482,12 +479,12 @@ type RoomLeft struct {
 // Also used by the retired_rooms catchup list (RetiredRoomsList) sent
 // during the connect handshake for offline devices.
 type RoomRetired struct {
-	Type        string `json:"type"`              // "room_retired"
-	Room        string `json:"room"`              // room nanoid (unchanged by retirement)
-	DisplayName string `json:"display_name"`      // post-retirement suffixed name
-	RetiredAt   string `json:"retired_at"`        // RFC3339 timestamp
-	RetiredBy   string `json:"retired_by"`        // admin user ID
-	Reason      string `json:"reason,omitempty"`  // optional free-text reason
+	Type        string `json:"type"`             // "room_retired"
+	Room        string `json:"room"`             // room nanoid (unchanged by retirement)
+	DisplayName string `json:"display_name"`     // post-retirement suffixed name
+	RetiredAt   string `json:"retired_at"`       // RFC3339 timestamp
+	RetiredBy   string `json:"retired_by"`       // admin user ID
+	Reason      string `json:"reason,omitempty"` // optional free-text reason
 }
 
 // RetiredRoomsList is sent during the connect handshake (BEFORE
@@ -525,6 +522,52 @@ type RoomUpdated struct {
 	Room        string `json:"room"`         // room nanoid
 	DisplayName string `json:"display_name"` // post-change display name
 	Topic       string `json:"topic"`        // post-change topic
+}
+
+// RoomUpdate is the client-initiated request to set a room's topic.
+// Companion to the operator-only CLI path (`sshkey-ctl update-topic`)
+// which writes to rooms.db + enqueues pending_room_updates; this
+// request-path lets a server admin who is also a current room member
+// apply the change live from their connected session, bypassing the
+// 5-second queue tick.
+//
+// Authorization: caller must be a server admin (`users.admin == true`
+// — set via `sshkey-ctl approve --admin` / `sshkey-ctl promote`) AND
+// a current member of the target room. Rooms have no per-room admin
+// role in this phase; the membership requirement is what restricts
+// in-session topic moderation to admins who are participants of the
+// affected room. The CLI path bypasses the membership check (operator
+// override).
+//
+// Scope: topic only. Room rename is intentionally NOT in this wire
+// surface — renames stay operator-only via `sshkey-ctl rename-room`.
+//
+// Empty Topic is allowed and clears the topic. Same-value Topic
+// (request matches current room.Topic) is accepted as a successful
+// no-op: the caller still receives `room_updated` for UI
+// confirmation, but no DB write, no audit row, no `room_event`, and
+// no fanout to other members.
+//
+// Success path: server persists the change via SetRoomTopic, writes
+// an audit log entry (verb = "update-topic"), records a `room_event`
+// row of type "topic" via RecordRoomEvent, and fans out RoomUpdated
+// to every connected member of the room (including the caller).
+// Failure path returns a typed `error` frame echoing CorrID.
+//
+// CorrID is optional. When present, the handler echoes it on all
+// typed errors (`forbidden`, `rate_limited`, `unknown_room`,
+// `room_retired`) for send-queue correlation parity with the other
+// corr_id-carrying verbs. Empty CorrID is valid (omitempty
+// convention). Today's client (`sshkey-term`) doesn't populate the
+// field — the client's `SendRoomUpdate(room, topic)` helper has no
+// send-queue integration for `room_update` yet. The omitempty tag
+// means today's outgoing JSON is byte-identical to a pre-CorrID
+// version of the struct.
+type RoomUpdate struct {
+	Type   string `json:"type"`              // "room_update"
+	Room   string `json:"room"`              // room nanoid (NOT display name)
+	Topic  string `json:"topic"`             // empty string clears
+	CorrID string `json:"corr_id,omitempty"` // optional correlation tag
 }
 
 // DeleteRoom is the client-initiated request to remove a room from the
@@ -643,27 +686,27 @@ type DMCreated struct {
 }
 
 type SendDM struct {
-	Type        string            `json:"type"`                  // "send_dm"
+	Type        string            `json:"type"` // "send_dm"
 	DM          string            `json:"dm"`
-	WrappedKeys map[string]string `json:"wrapped_keys"`          // exactly 2 entries
-	Payload     string            `json:"payload"`               // base64 encrypted
+	WrappedKeys map[string]string `json:"wrapped_keys"` // exactly 2 entries
+	Payload     string            `json:"payload"`      // base64 encrypted
 	FileIDs     []string          `json:"file_ids,omitempty"`
 	Signature   string            `json:"signature"`
-	CorrID      string            `json:"corr_id,omitempty"`     // Phase 17c
+	CorrID      string            `json:"corr_id,omitempty"` // Phase 17c
 }
 
 type DM struct {
-	Type        string            `json:"type"`                  // "dm"
-	ID          string            `json:"id"`                    // server-assigned msg ID
+	Type        string            `json:"type"` // "dm"
+	ID          string            `json:"id"`   // server-assigned msg ID
 	From        string            `json:"from"`
-	DM          string            `json:"dm"`                    // DM row ID
+	DM          string            `json:"dm"` // DM row ID
 	TS          int64             `json:"ts"`
 	WrappedKeys map[string]string `json:"wrapped_keys"`
 	Payload     string            `json:"payload"`
 	FileIDs     []string          `json:"file_ids,omitempty"`
 	Signature   string            `json:"signature"`
-	EditedAt    int64             `json:"edited_at,omitempty"`   // Phase 15
-	CorrID      string            `json:"corr_id,omitempty"`     // Phase 17c: originator-only ack echo
+	EditedAt    int64             `json:"edited_at,omitempty"` // Phase 15
+	CorrID      string            `json:"corr_id,omitempty"`   // Phase 17c: originator-only ack echo
 }
 
 // EditDM is the client → server envelope for replacing a 1:1 DM
@@ -672,30 +715,30 @@ type DM struct {
 // if the caller's per-user left_at ratchet is set (frozen view
 // can't be mutated).
 type EditDM struct {
-	Type        string            `json:"type"`                // "edit_dm"
+	Type        string            `json:"type"` // "edit_dm"
 	ID          string            `json:"id"`
 	DM          string            `json:"dm"`
 	WrappedKeys map[string]string `json:"wrapped_keys"`
 	Payload     string            `json:"payload"`
 	Signature   string            `json:"signature"`
-	CorrID      string            `json:"corr_id,omitempty"`   // Phase 17c
+	CorrID      string            `json:"corr_id,omitempty"` // Phase 17c
 }
 
 // DMEdited is the server → client broadcast for a successful 1:1 DM
 // edit. Delivered to both parties' active sessions, provided neither
 // has a frozen view on the affected message.
 type DMEdited struct {
-	Type        string            `json:"type"`                // "dm_edited"
+	Type        string            `json:"type"` // "dm_edited"
 	ID          string            `json:"id"`
 	From        string            `json:"from"`
 	DM          string            `json:"dm"`
-	TS          int64             `json:"ts"`                  // ORIGINAL send time
+	TS          int64             `json:"ts"` // ORIGINAL send time
 	WrappedKeys map[string]string `json:"wrapped_keys"`
 	Payload     string            `json:"payload"`
-	FileIDs     []string          `json:"file_ids,omitempty"`  // preserved from stored row
+	FileIDs     []string          `json:"file_ids,omitempty"` // preserved from stored row
 	Signature   string            `json:"signature"`
 	EditedAt    int64             `json:"edited_at"`
-	CorrID      string            `json:"corr_id,omitempty"`   // Phase 17c
+	CorrID      string            `json:"corr_id,omitempty"` // Phase 17c
 }
 
 type LeaveDM struct {
@@ -737,13 +780,13 @@ type DMInfo struct {
 // Message deletion
 
 type Delete struct {
-	Type   string `json:"type"`                // "delete"
-	ID     string `json:"id"`                  // message ID to delete
-	CorrID string `json:"corr_id,omitempty"`   // Phase 17c
+	Type   string `json:"type"`              // "delete"
+	ID     string `json:"id"`                // message ID to delete
+	CorrID string `json:"corr_id,omitempty"` // Phase 17c
 }
 
 type Deleted struct {
-	Type      string `json:"type"`              // "deleted"
+	Type      string `json:"type"` // "deleted"
 	ID        string `json:"id"`
 	DeletedBy string `json:"deleted_by"`
 	TS        int64  `json:"ts"`
@@ -756,7 +799,7 @@ type Deleted struct {
 // Typing indicators (capability: typing)
 
 type Typing struct {
-	Type  string `json:"type"`           // "typing"
+	Type  string `json:"type"` // "typing"
 	Room  string `json:"room,omitempty"`
 	Group string `json:"group,omitempty"`
 	DM    string `json:"dm,omitempty"`
@@ -766,19 +809,19 @@ type Typing struct {
 // Read receipts (capability: read_receipts)
 
 type Read struct {
-	Type     string `json:"type"`              // "read"
+	Type     string `json:"type"` // "read"
 	Room     string `json:"room,omitempty"`
 	Group    string `json:"group,omitempty"`
 	DM       string `json:"dm,omitempty"`
-	User     string `json:"user,omitempty"`    // set by server on broadcast
-	LastRead string `json:"last_read"`         // message ID
+	User     string `json:"user,omitempty"` // set by server on broadcast
+	LastRead string `json:"last_read"`      // message ID
 }
 
 // Reactions (capability: reactions)
 
 type React struct {
-	Type        string            `json:"type"`                   // "react"
-	ID          string            `json:"id"`                     // target message ID
+	Type        string            `json:"type"` // "react"
+	ID          string            `json:"id"`   // target message ID
 	Room        string            `json:"room,omitempty"`
 	Group       string            `json:"group,omitempty"`
 	DM          string            `json:"dm,omitempty"`
@@ -786,13 +829,13 @@ type React struct {
 	WrappedKeys map[string]string `json:"wrapped_keys,omitempty"` // DMs (group + 1:1)
 	Payload     string            `json:"payload"`                // base64 encrypted emoji
 	Signature   string            `json:"signature"`
-	CorrID      string            `json:"corr_id,omitempty"`      // Phase 17c
+	CorrID      string            `json:"corr_id,omitempty"` // Phase 17c
 }
 
 type Reaction struct {
-	Type        string            `json:"type"`                   // "reaction"
-	ReactionID  string            `json:"reaction_id"`            // server-assigned, react_ prefix
-	ID          string            `json:"id"`                     // target message ID
+	Type        string            `json:"type"`        // "reaction"
+	ReactionID  string            `json:"reaction_id"` // server-assigned, react_ prefix
+	ID          string            `json:"id"`          // target message ID
 	Room        string            `json:"room,omitempty"`
 	Group       string            `json:"group,omitempty"`
 	DM          string            `json:"dm,omitempty"`
@@ -806,15 +849,15 @@ type Reaction struct {
 }
 
 type Unreact struct {
-	Type       string `json:"type"`                // "unreact"
+	Type       string `json:"type"` // "unreact"
 	ReactionID string `json:"reaction_id"`
-	CorrID     string `json:"corr_id,omitempty"`   // Phase 17c
+	CorrID     string `json:"corr_id,omitempty"` // Phase 17c
 }
 
 type ReactionRemoved struct {
-	Type       string `json:"type"`              // "reaction_removed"
+	Type       string `json:"type"` // "reaction_removed"
 	ReactionID string `json:"reaction_id"`
-	ID         string `json:"id"`                // target message ID
+	ID         string `json:"id"` // target message ID
 	Room       string `json:"room,omitempty"`
 	Group      string `json:"group,omitempty"`
 	DM         string `json:"dm,omitempty"`
@@ -825,10 +868,10 @@ type ReactionRemoved struct {
 // Pinned messages (rooms only)
 
 type Pin struct {
-	Type   string `json:"type"`                // "pin"
+	Type   string `json:"type"` // "pin"
 	Room   string `json:"room"`
-	ID     string `json:"id"`                  // message ID
-	CorrID string `json:"corr_id,omitempty"`   // Phase 17c
+	ID     string `json:"id"`                // message ID
+	CorrID string `json:"corr_id,omitempty"` // Phase 17c
 }
 
 type Pinned struct {
@@ -840,10 +883,10 @@ type Pinned struct {
 }
 
 type Unpin struct {
-	Type   string `json:"type"`                // "unpin"
+	Type   string `json:"type"` // "unpin"
 	Room   string `json:"room"`
 	ID     string `json:"id"`
-	CorrID string `json:"corr_id,omitempty"`   // Phase 17c
+	CorrID string `json:"corr_id,omitempty"` // Phase 17c
 }
 
 type Unpinned struct {
@@ -862,21 +905,21 @@ type Pins struct {
 // User profile
 
 type SetProfile struct {
-	Type        string `json:"type"`         // "set_profile"
+	Type        string `json:"type"` // "set_profile"
 	DisplayName string `json:"display_name"`
 	AvatarID    string `json:"avatar_id,omitempty"`
 }
 
 type Profile struct {
-	Type           string `json:"type"`            // "profile"
+	Type           string `json:"type"` // "profile"
 	User           string `json:"user"`
 	DisplayName    string `json:"display_name"`
 	AvatarID       string `json:"avatar_id,omitempty"`
-	PubKey         string `json:"pubkey"`          // ssh-ed25519 public key
-	KeyFingerprint string `json:"key_fingerprint"` // SHA256:...
-	Admin          bool   `json:"admin,omitempty"`        // true if user is a server admin
-	Retired        bool   `json:"retired,omitempty"`      // true if the account has been retired
-	RetiredAt      string `json:"retired_at,omitempty"`   // RFC3339 timestamp of retirement
+	PubKey         string `json:"pubkey"`               // ssh-ed25519 public key
+	KeyFingerprint string `json:"key_fingerprint"`      // SHA256:...
+	Admin          bool   `json:"admin,omitempty"`      // true if user is a server admin
+	Retired        bool   `json:"retired,omitempty"`    // true if the account has been retired
+	RetiredAt      string `json:"retired_at,omitempty"` // RFC3339 timestamp of retirement
 }
 
 // User status
@@ -889,7 +932,7 @@ type SetStatus struct {
 // Unread counts
 
 type Unread struct {
-	Type     string `json:"type"`            // "unread"
+	Type     string `json:"type"` // "unread"
 	Room     string `json:"room,omitempty"`
 	Group    string `json:"group,omitempty"`
 	DM       string `json:"dm,omitempty"`
@@ -900,27 +943,27 @@ type Unread struct {
 // Presence (capability: presence)
 
 type Presence struct {
-	Type        string `json:"type"`                   // "presence"
+	Type        string `json:"type"` // "presence"
 	User        string `json:"user"`
-	Status      string `json:"status"`                 // "online", "offline"
+	Status      string `json:"status"` // "online", "offline"
 	DisplayName string `json:"display_name"`
 	AvatarID    string `json:"avatar_id,omitempty"`
 	StatusText  string `json:"status_text,omitempty"`
-	LastSeen    string `json:"last_seen,omitempty"`    // ISO 8601, offline only
+	LastSeen    string `json:"last_seen,omitempty"` // ISO 8601, offline only
 }
 
 // Room list
 
 type RoomList struct {
-	Type  string     `json:"type"`  // "room_list"
+	Type  string     `json:"type"` // "room_list"
 	Rooms []RoomInfo `json:"rooms"`
 }
 
 type RoomInfo struct {
-	ID          string `json:"id"`           // room nanoid
-	Name        string `json:"name"`         // display name (human-visible)
-	Topic       string `json:"topic"`
-	Members     int    `json:"members"`
+	ID      string `json:"id"`   // room nanoid
+	Name    string `json:"name"` // display name (human-visible)
+	Topic   string `json:"topic"`
+	Members int    `json:"members"`
 }
 
 // Room events
@@ -938,9 +981,9 @@ type RoomInfo struct {
 // model. By carries the acting operator/admin; Name carries the new
 // topic/display-name for topic/rename events.
 type RoomEvent struct {
-	Type   string `json:"type"`             // "room_event"
+	Type   string `json:"type"` // "room_event"
 	Room   string `json:"room"`
-	Event  string `json:"event"`            // "join" | "leave" | "topic" | "rename" | "retire"
+	Event  string `json:"event"` // "join" | "leave" | "topic" | "rename" | "retire"
 	User   string `json:"user"`
 	By     string `json:"by,omitempty"`     // Phase 20: acting admin/operator
 	Reason string `json:"reason,omitempty"` // "" | "removed" | "user_retired"
@@ -950,7 +993,7 @@ type RoomEvent struct {
 // Group list
 
 type GroupList struct {
-	Type   string      `json:"type"`   // "group_list"
+	Type   string      `json:"type"` // "group_list"
 	Groups []GroupInfo `json:"groups"`
 }
 
@@ -964,41 +1007,41 @@ type GroupInfo struct {
 // History (lazy scroll-back)
 
 type History struct {
-	Type   string `json:"type"`                // "history"
+	Type   string `json:"type"` // "history"
 	Room   string `json:"room,omitempty"`
 	Group  string `json:"group,omitempty"`
 	DM     string `json:"dm,omitempty"`
-	Before string `json:"before"`              // message ID
+	Before string `json:"before"` // message ID
 	Limit  int    `json:"limit"`
-	CorrID string `json:"corr_id,omitempty"`   // Phase 17c
+	CorrID string `json:"corr_id,omitempty"` // Phase 17c
 }
 
 type HistoryResult struct {
-	Type      string         `json:"type"`                  // "history_result"
+	Type      string         `json:"type"` // "history_result"
 	Room      string         `json:"room,omitempty"`
 	Group     string         `json:"group,omitempty"`
 	DM        string         `json:"dm,omitempty"`
 	Messages  []RawMessage   `json:"messages"`
-	Reactions []RawMessage   `json:"reactions,omitempty"`   // reactions on the returned messages
-	EpochKeys []SyncEpochKey `json:"epoch_keys,omitempty"`  // rooms only
+	Reactions []RawMessage   `json:"reactions,omitempty"`  // reactions on the returned messages
+	EpochKeys []SyncEpochKey `json:"epoch_keys,omitempty"` // rooms only
 	HasMore   bool           `json:"has_more"`
-	CorrID    string         `json:"corr_id,omitempty"`     // Phase 17c
+	CorrID    string         `json:"corr_id,omitempty"` // Phase 17c
 }
 
 // Key exchange -- epoch keys (rooms)
 
 type EpochKey struct {
-	Type       string `json:"type"`        // "epoch_key"
+	Type       string `json:"type"` // "epoch_key"
 	Room       string `json:"room"`
 	Epoch      int64  `json:"epoch"`
 	WrappedKey string `json:"wrapped_key"` // base64, wrapped for recipient
 }
 
 type EpochTrigger struct {
-	Type     string        `json:"type"`      // "epoch_trigger"
-	Room     string        `json:"room"`
-	NewEpoch int64         `json:"new_epoch"`
-	Members  []MemberKey   `json:"members"`
+	Type     string      `json:"type"` // "epoch_trigger"
+	Room     string      `json:"room"`
+	NewEpoch int64       `json:"new_epoch"`
+	Members  []MemberKey `json:"members"`
 }
 
 type MemberKey struct {
@@ -1007,7 +1050,7 @@ type MemberKey struct {
 }
 
 type EpochRotate struct {
-	Type        string            `json:"type"`        // "epoch_rotate"
+	Type        string            `json:"type"` // "epoch_rotate"
 	Room        string            `json:"room"`
 	Epoch       int64             `json:"epoch"`
 	WrappedKeys map[string]string `json:"wrapped_keys"` // userID -> base64 wrapped key
@@ -1015,7 +1058,7 @@ type EpochRotate struct {
 }
 
 type EpochConfirmed struct {
-	Type  string `json:"type"`  // "epoch_confirmed"
+	Type  string `json:"type"` // "epoch_confirmed"
 	Room  string `json:"room"`
 	Epoch int64  `json:"epoch"`
 }
@@ -1023,24 +1066,24 @@ type EpochConfirmed struct {
 // File transfer
 
 type UploadStart struct {
-	Type        string `json:"type"`                // "upload_start"
-	UploadID    string `json:"upload_id"`           // client-generated, up_ prefix
-	Size        int64  `json:"size"`                // bytes (encrypted)
-	ContentHash string `json:"content_hash"`        // "blake2b-256:<hex>" of encrypted bytes
+	Type        string `json:"type"`         // "upload_start"
+	UploadID    string `json:"upload_id"`    // client-generated, up_ prefix
+	Size        int64  `json:"size"`         // bytes (encrypted)
+	ContentHash string `json:"content_hash"` // "blake2b-256:<hex>" of encrypted bytes
 	Room        string `json:"room,omitempty"`
 	Group       string `json:"group,omitempty"`
 	DM          string `json:"dm,omitempty"`
-	CorrID      string `json:"corr_id,omitempty"`   // Phase 17c
+	CorrID      string `json:"corr_id,omitempty"` // Phase 17c
 }
 
 type UploadReady struct {
-	Type     string `json:"type"`              // "upload_ready"
+	Type     string `json:"type"` // "upload_ready"
 	UploadID string `json:"upload_id"`
 	CorrID   string `json:"corr_id,omitempty"` // Phase 17c
 }
 
 type UploadComplete struct {
-	Type     string `json:"type"`              // "upload_complete"
+	Type     string `json:"type"` // "upload_complete"
 	UploadID string `json:"upload_id"`
 	FileID   string `json:"file_id"`           // server-assigned, file_ prefix
 	CorrID   string `json:"corr_id,omitempty"` // Phase 17c
@@ -1051,30 +1094,30 @@ type UploadComplete struct {
 // instead of waiting forever for upload_ready. Code matches the protocol
 // error codes (Err* constants).
 type UploadError struct {
-	Type         string `json:"type"`                      // "upload_error"
+	Type         string `json:"type"` // "upload_error"
 	UploadID     string `json:"upload_id"`
 	Code         string `json:"code"`
 	Message      string `json:"message"`
-	RetryAfterMs int64  `json:"retry_after_ms,omitempty"`  // Phase 17 Step 6: populated on rate-limit rejections
-	CorrID       string `json:"corr_id,omitempty"`         // Phase 17c
+	RetryAfterMs int64  `json:"retry_after_ms,omitempty"` // Phase 17 Step 6: populated on rate-limit rejections
+	CorrID       string `json:"corr_id,omitempty"`        // Phase 17c
 }
 
 type Download struct {
-	Type   string `json:"type"`                // "download"
+	Type   string `json:"type"` // "download"
 	FileID string `json:"file_id"`
-	CorrID string `json:"corr_id,omitempty"`   // Phase 17c
+	CorrID string `json:"corr_id,omitempty"` // Phase 17c
 }
 
 type DownloadStart struct {
-	Type        string `json:"type"`                    // "download_start"
+	Type        string `json:"type"` // "download_start"
 	FileID      string `json:"file_id"`
 	Size        int64  `json:"size"`
-	ContentHash string `json:"content_hash"`            // "blake2b-256:<hex>" of encrypted bytes
-	CorrID      string `json:"corr_id,omitempty"`       // Phase 17c
+	ContentHash string `json:"content_hash"`      // "blake2b-256:<hex>" of encrypted bytes
+	CorrID      string `json:"corr_id,omitempty"` // Phase 17c
 }
 
 type DownloadComplete struct {
-	Type   string `json:"type"`   // "download_complete"
+	Type   string `json:"type"` // "download_complete"
 	FileID string `json:"file_id"`
 }
 
@@ -1083,11 +1126,11 @@ type DownloadComplete struct {
 // FileID to fail the pending download instead of waiting forever for
 // binary frames on Channel 2.
 type DownloadError struct {
-	Type    string `json:"type"`                // "download_error"
+	Type    string `json:"type"` // "download_error"
 	FileID  string `json:"file_id"`
 	Code    string `json:"code"`
 	Message string `json:"message"`
-	CorrID  string `json:"corr_id,omitempty"`   // Phase 17c
+	CorrID  string `json:"corr_id,omitempty"` // Phase 17c
 }
 
 // Message signatures (capability: signatures)
@@ -1096,23 +1139,23 @@ type DownloadError struct {
 // Device revocation
 
 type DeviceRevoked struct {
-	Type     string `json:"type"`     // "device_revoked"
+	Type     string `json:"type"` // "device_revoked"
 	DeviceID string `json:"device_id"`
-	Reason   string `json:"reason"`   // "admin_action"
+	Reason   string `json:"reason"` // "admin_action"
 }
 
 // Device management (user-scoped; admin uses sshkey-ctl instead)
 
 // ListDevices requests the list of devices registered for the authenticated user.
 type ListDevices struct {
-	Type   string `json:"type"`                // "list_devices"
-	CorrID string `json:"corr_id,omitempty"`   // Phase 17c
+	Type   string `json:"type"`              // "list_devices"
+	CorrID string `json:"corr_id,omitempty"` // Phase 17c
 }
 
 // DeviceList is the server's response to ListDevices, listing all devices
 // for the requesting user.
 type DeviceList struct {
-	Type    string       `json:"type"`              // "device_list"
+	Type    string       `json:"type"` // "device_list"
 	Devices []DeviceInfo `json:"devices"`
 	CorrID  string       `json:"corr_id,omitempty"` // Phase 17c
 }
@@ -1135,7 +1178,7 @@ type RevokeDevice struct {
 
 // DeviceRevokeResult is the server's response to RevokeDevice.
 type DeviceRevokeResult struct {
-	Type     string `json:"type"`      // "device_revoke_result"
+	Type     string `json:"type"` // "device_revoke_result"
 	DeviceID string `json:"device_id"`
 	Success  bool   `json:"success"`
 	Error    string `json:"error,omitempty"`
@@ -1144,23 +1187,23 @@ type DeviceRevokeResult struct {
 // Admin notifications
 
 type AdminNotify struct {
-	Type        string `json:"type"`        // "admin_notify"
-	Event       string `json:"event"`       // "pending_key"
+	Type        string `json:"type"`  // "admin_notify"
+	Event       string `json:"event"` // "pending_key"
 	Fingerprint string `json:"fingerprint"`
 	Attempts    int    `json:"attempts"`
-	FirstSeen   string `json:"first_seen"`  // ISO 8601
+	FirstSeen   string `json:"first_seen"` // ISO 8601
 }
 
 // AdminNotifyQuota is the admin_notify shape for per-user daily upload
 // quota events. Three event kinds:
 //
 //   - "quota_warn":      user crossed daily_upload_bytes_warn for the
-//                        first time today
+//     first time today
 //   - "quota_sustained": user crossed warn AND yesterday also crossed
-//                        warn (consecutive_days condition met)
+//     warn (consecutive_days condition met)
 //   - "quota_block":     upload rejected because today_bytes +
-//                        attempted_bytes would exceed
-//                        daily_upload_bytes_block
+//     attempted_bytes would exceed
+//     daily_upload_bytes_block
 //
 // All three share the User / Date / BytesToday / ThresholdBytes fields.
 // quota_sustained adds BytesYesterday + ConsecutiveDays. quota_block
@@ -1198,13 +1241,13 @@ type PendingKeysList struct {
 // Room membership
 
 type RoomMembers struct {
-	Type   string `json:"type"`                // "room_members"
+	Type   string `json:"type"` // "room_members"
 	Room   string `json:"room"`
-	CorrID string `json:"corr_id,omitempty"`   // Phase 17c
+	CorrID string `json:"corr_id,omitempty"` // Phase 17c
 }
 
 type RoomMembersList struct {
-	Type    string   `json:"type"`              // "room_members_list"
+	Type    string   `json:"type"` // "room_members_list"
 	Room    string   `json:"room"`
 	Members []string `json:"members"`
 	CorrID  string   `json:"corr_id,omitempty"` // Phase 17c
@@ -1213,21 +1256,21 @@ type RoomMembersList struct {
 // Mobile push registration
 
 type PushRegister struct {
-	Type     string `json:"type"`      // "push_register"
-	Platform string `json:"platform"`  // "ios", "android"
+	Type     string `json:"type"`     // "push_register"
+	Platform string `json:"platform"` // "ios", "android"
 	DeviceID string `json:"device_id"`
-	Token    string `json:"token"`     // APNs/FCM token
+	Token    string `json:"token"` // APNs/FCM token
 }
 
 type PushRegistered struct {
-	Type     string `json:"type"`     // "push_registered"
+	Type     string `json:"type"` // "push_registered"
 	Platform string `json:"platform"`
 }
 
 // Server shutdown
 
 type ServerShutdown struct {
-	Type        string `json:"type"`         // "server_shutdown"
+	Type        string `json:"type"` // "server_shutdown"
 	Message     string `json:"message"`
 	ReconnectIn int    `json:"reconnect_in"` // seconds
 }
@@ -1250,7 +1293,7 @@ type RetireMe struct {
 type UserRetired struct {
 	Type string `json:"type"` // "user_retired"
 	User string `json:"user"`
-	Ts   int64  `json:"ts"`   // unix seconds
+	Ts   int64  `json:"ts"` // unix seconds
 }
 
 // UserUnretired is the inverse of UserRetired — broadcast when an
@@ -1268,14 +1311,14 @@ type UserRetired struct {
 type UserUnretired struct {
 	Type string `json:"type"` // "user_unretired"
 	User string `json:"user"`
-	Ts   int64  `json:"ts"`   // unix seconds
+	Ts   int64  `json:"ts"` // unix seconds
 }
 
 // RetiredUsers is sent on connect (after welcome, alongside profiles) with
 // the list of retired users visible to this client. Allows fresh clients to
 // learn about retirements that happened while they were offline.
 type RetiredUsers struct {
-	Type  string        `json:"type"`  // "retired_users"
+	Type  string        `json:"type"` // "retired_users"
 	Users []RetiredUser `json:"users"`
 }
 
@@ -1287,12 +1330,12 @@ type RetiredUser struct {
 // Errors
 
 type Error struct {
-	Type         string `json:"type"`                      // "error"
-	Code         string `json:"code"`                      // machine-readable error code
-	Message      string `json:"message"`                   // human-readable description
-	Ref          string `json:"ref,omitempty"`             // message ID that caused the error
-	RetryAfterMs int64  `json:"retry_after_ms,omitempty"`  // Phase 17: populated on rate-limit rejections; client backoff hint
-	CorrID       string `json:"corr_id,omitempty"`         // Phase 17c: echoed from the inbound request so clients correlate errors to their send queue entries
+	Type         string `json:"type"`                     // "error"
+	Code         string `json:"code"`                     // machine-readable error code
+	Message      string `json:"message"`                  // human-readable description
+	Ref          string `json:"ref,omitempty"`            // message ID that caused the error
+	RetryAfterMs int64  `json:"retry_after_ms,omitempty"` // Phase 17: populated on rate-limit rejections; client backoff hint
+	CorrID       string `json:"corr_id,omitempty"`        // Phase 17c: echoed from the inbound request so clients correlate errors to their send queue entries
 }
 
 // Error codes

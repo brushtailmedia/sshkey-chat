@@ -305,7 +305,6 @@ func (e *testEnv) connect(keyPath, deviceID string) *testClient {
 		Client:        "test",
 		ClientVersion: "0.0.1",
 		DeviceID:      deviceID,
-		Capabilities:  []string{"typing", "reactions", "signatures"},
 	})
 
 	// Read welcome
@@ -573,7 +572,6 @@ func TestSyncOnReconnect(t *testing.T) {
 		ClientVersion: "0.0.1",
 		DeviceID:      "dev_alice_sync2",
 		LastSyncedAt:  "2020-01-01T00:00:00Z", // far in the past
-		Capabilities:  []string{"typing", "reactions"},
 	})
 
 	// Read through welcome, room_list, profiles until we hit sync_batch or sync_complete
@@ -1477,7 +1475,6 @@ func TestDMDelete_OfflineCatchupViaDMList(t *testing.T) {
 		Client:        "test",
 		ClientVersion: "0.0.1",
 		DeviceID:      "dev_alice_catchup2",
-		Capabilities:  []string{"typing", "reactions", "signatures"},
 	})
 	device2.expectType("welcome")
 
@@ -1805,7 +1802,6 @@ func TestDeleteGroup_LastMemberCleanupAndOfflineCatchup(t *testing.T) {
 		Client:        "test",
 		ClientVersion: "0.0.1",
 		DeviceID:      "dev_alice_solo_B",
-		Capabilities:  []string{"typing", "reactions", "signatures"},
 	})
 	deviceB.expectType("welcome")
 

@@ -19,21 +19,6 @@ import (
 
 const maxPayloadBytes = 16 * 1024 // 16KB max message body
 
-// allCapabilities is the full set of capabilities the server supports.
-var allCapabilities = []string{
-	"typing",
-	"reactions",
-	"read_receipts",
-	"file_transfer",
-	"link_previews",
-	"presence",
-	"pins",
-	"mentions",
-	"unread",
-	"status",
-	"signatures",
-}
-
 // handleSession runs the protocol session on an accepted SSH channel.
 // The session channel is the NDJSON control plane (1st session channel
 // on the SSH connection).
@@ -56,11 +41,10 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 
 	// Step 1: Send server_hello
 	err := enc.Encode(protocol.ServerHello{
-		Type:         "server_hello",
-		Protocol:     "sshkey-chat",
-		Version:      1,
-		ServerID:     s.cfg.Server.Server.Bind,
-		Capabilities: allCapabilities,
+		Type:     "server_hello",
+		Protocol: "sshkey-chat",
+		Version:  1,
+		ServerID: s.cfg.Server.Server.Bind,
 	})
 	if err != nil {
 		s.logger.Error("failed to send server_hello", "user", userID, "error", err)
@@ -119,9 +103,6 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 		return
 	}
 
-	// Negotiate capabilities
-	active := negotiateCapabilities(clientHello.Capabilities)
-
 	// Build room and group DM lists for this user (nanoid IDs)
 	var rooms []string
 	if s.store != nil {
@@ -145,14 +126,13 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 	// Step 3: Send welcome
 	pendingSync := clientHello.LastSyncedAt != "" // sync follows if client has a last_synced_at
 	err = enc.Encode(protocol.Welcome{
-		Type:               "welcome",
-		User:               userID,
-		DisplayName:        displayName,
-		Admin:              isAdmin,
-		Rooms:              rooms,
-		Groups:             groups,
-		PendingSync:        pendingSync,
-		ActiveCapabilities: active,
+		Type:        "welcome",
+		User:        userID,
+		DisplayName: displayName,
+		Admin:       isAdmin,
+		Rooms:       rooms,
+		Groups:      groups,
+		PendingSync: pendingSync,
 	})
 	if err != nil {
 		s.logger.Error("failed to send welcome", "user", userID, "error", err)
@@ -162,7 +142,6 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 	s.logger.Info("handshake complete",
 		"user", userID,
 		"device", clientHello.DeviceID,
-		"capabilities", active,
 	)
 
 	// Check device revocation and register
@@ -198,15 +177,14 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 		bufSize = 256
 	}
 	client := &Client{
-		UserID:       userID,
-		DeviceID:     clientHello.DeviceID,
-		Encoder:      enc,
-		Decoder:      dec,
-		Channel:      ch,
-		Conn:         conn,
-		Capabilities: active,
-		sendCh:       make(chan any, bufSize),
-		sessionDone:  make(chan struct{}),
+		UserID:      userID,
+		DeviceID:    clientHello.DeviceID,
+		Encoder:     enc,
+		Decoder:     dec,
+		Channel:     ch,
+		Conn:        conn,
+		sendCh:      make(chan any, bufSize),
+		sessionDone: make(chan struct{}),
 	}
 
 	s.mu.Lock()
@@ -342,22 +320,6 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 // sendInstallBanner sends the install instructions and closes.
 func (s *Server) sendInstallBanner(enc *safeEncoder) {
 	enc.Encode(map[string]string{"type": "error", "code": "client_required", "message": "This server requires the sshkey-chat client. Install: https://sshkey.chat"})
-}
-
-// negotiateCapabilities returns the intersection of server and client capabilities.
-func negotiateCapabilities(requested []string) []string {
-	serverSet := make(map[string]bool, len(allCapabilities))
-	for _, c := range allCapabilities {
-		serverSet[c] = true
-	}
-
-	var active []string
-	for _, c := range requested {
-		if serverSet[c] {
-			active = append(active, c)
-		}
-	}
-	return active
 }
 
 // sendRoomList sends the room_list message to the client.
@@ -775,6 +737,8 @@ func (s *Server) handleMessage(c *Client, msgType string, raw json.RawMessage) {
 		s.handleLeaveRoom(c, raw)
 	case "delete_room":
 		s.handleDeleteRoom(c, raw)
+	case "room_update":
+		s.handleRoomUpdate(c, raw)
 	case "create_dm":
 		s.handleCreateDM(c, raw)
 	case "send_dm":

@@ -18,6 +18,11 @@ coverage.*
 *.coverprofile
 profile.cov
 
+# Go build cache (local GOCACHE override — appears when GOCACHE=$(pwd)/.gocache
+# is used to keep build artifacts inside the repo for sandboxing / clean
+# rebuilds rather than scattered under ~/Library/Caches/go-build)
+/.gocache/
+
 # Go workspace
 go.work
 go.work.sum
@@ -50,6 +55,7 @@ docker/keys/*
 # Design docs (internal working files, not checked in)
 refactor_plan.md
 init.md
+server-init.md
 sshkey-admin.md
 topic.md
 docs/security/*

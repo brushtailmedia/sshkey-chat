@@ -2,6 +2,63 @@
 
 ## [Unreleased]
 
+### Added
+- **`sshkey-ctl init` now writes a full annotated recommended `server.toml` by default (2026-05-12).** The previous behavior wrote only a minimal `[server]` block (`port` + `bind`), which hid active defaults and forced operators to cross-reference source/docs to discover available knobs. Init now emits the complete operator-facing template by default (embedded from `cmd/sshkey-ctl/default_server.toml`) with all major sections visible (`[server]`, `[server.auto_revoke]`, `[server.quotas.user]`, `[messages]`, `[files]`, `[rate_limits]`, `[backup]`, `[push]`, etc.). Starter-room bootstrap behavior is unchanged.
+
+  New init flags:
+  - `--minimal` restores the old compact output (opt-in).
+  - `--profile dev|docker|prod` selects context-aware defaults before prompts/overrides apply.
+  - `--docker` remains supported as a compatibility alias for `--profile docker`.
+
+  Profile defaults:
+  - `prod` (default): `/etc/sshkey-chat`, `/var/sshkey-chat`, `bind = "0.0.0.0"`, `port = 2222`
+  - `docker`: same runtime defaults as prod, with docker alias compatibility
+  - `dev`: `$HOME/.sshkey-chat/config`, `$HOME/.sshkey-chat/data`, `bind = "127.0.0.1"`, `port = 2222`
+
+  Additional init hardening:
+  - conflicting `--docker` + non-docker `--profile` now fails with an actionable error
+  - generated recommended config rewrites `[logging].file` to `<dataDir>/server.log` so custom/profile data paths stay coherent
+  - usage/help text updated for the new init shape
+
+  **Tests:** expanded `cmd/sshkey-ctl/init_test.go` coverage for recommended-by-default output, `--minimal`, profile selection/validation, docker/profile conflict handling, and parseability of generated recommended config through `config.LoadServerConfig`.
+
+- **`room_update` client request handler — in-session topic updates for server admins (2026-05-12).** Closes the long-standing silent-drop bug where `sshkey-term` clients sent `room_update` envelopes (via `handleTopicCommand` + `SendRoomUpdate`) but the server dispatcher had no matching case, so the requests went nowhere and the only feedback path was the client's optimistic "Topic update sent — pending server confirmation" status-bar message. Server-side spec: `topic.md` in this repo.
+
+  Wire shape (`protocol.RoomUpdate`): `{type:"room_update", room:"rm_...", topic:"...", corr_id:"corr_..."}`. Scope is intentionally topic-only — room renames stay operator-only via `sshkey-ctl rename-room`. Empty `topic` clears the topic.
+
+  Authorization is **server-admin** (`users.admin` flag — set via `sshkey-ctl approve --admin` / `sshkey-ctl promote`) AND **current room member**. Rooms have no per-room admin role in this phase; the membership requirement restricts in-session topic moderation to admins who are also participants of the affected room. The CLI path (`sshkey-ctl update-topic`) continues to bypass the membership check for operator-override scenarios.
+
+  Handler flow (`handleRoomUpdate` in new `internal/server/room_update.go`, 12 steps): decode → corr_id validate → store nil-guard → rate limit (BEFORE auth, so unauthorized spam is bucket-bounded against DB-read DoS) → server-admin → room membership → load row → retired check → idempotency → `SetRoomTopic` → shared post-write side-effects → no direct success frame (caller receives `room_updated` via fan-out).
+
+  **Same-value topic** is accepted as a successful no-op: the caller receives a `room_updated` echo for UI confirmation, but no DB write, audit row, `room_event` insert, or fanout to other members. Symmetric with the CLI path which silently writes the same value.
+
+  **Errors** (all post-unmarshal errors echo `corr_id` for send-queue correlation parity with the other corr_id-carrying verbs): `forbidden` (non-admin), `rate_limited` with `retry_after_ms` (`room_admin_action:<user>:<room>` bucket — distinct prefix from `group_admin:` so grep + audit-log review unambiguously identifies which path produced a signal), `unknown_room` (non-member OR room doesn't exist — privacy parity), `room_retired`, `invalid_message` (malformed frame; pre-unmarshal, carries empty corr_id). Malformed `corr_id` is silent-drop with `SignalMalformedFrame` counter increment (matches every other corr_id-carrying verb).
+
+  **Shared helper `emitRoomUpdate`** extracted from the existing CLI queue processor in `room_updates.go`. Both trigger paths (CLI `update-topic` via `processPendingRoomUpdates` + in-session request via `handleRoomUpdate`) now converge through one helper that owns the post-write side-effect pipeline (re-read room → audit log → record `room_event` → narrow fan-out via Phase 17 Step 3 lock-release pattern). Audit messages, `room_event` rows, and `room_updated` broadcasts are byte-identical between the two paths (within TS tolerance). Locked in by `TestHandleRoomUpdate_SharedHelperParity`.
+
+  **New rate-limit helper `checkRoomAdminActionRateLimit` in new `internal/server/room_admin.go`** parallel to `checkAdminActionRateLimit` in `group_admin.go` but with `room_admin_action:` bucket-key prefix (vs `group_admin:`) and `room_admin_action` rejection verb tag (vs `group_admin`). Reuses `AdminActionsPerMinute` config — no separate room knob.
+
+  **Tests:** 12 new tests in `internal/server/room_update_test.go` mirroring `topic.md` §7 one-for-one (happy path with audit + room_event drift guard, non-admin-member→forbidden, admin-non-member→unknown_room, unknown-room-ID→unknown_room, retired-room, idempotency no-op, malformed JSON, clear-topic, malformed corr_id silent-drop, typed-error corr_id echo, rate-limit room-scoping with engineering + group_admin probe, shared-helper byte-parity between request and CLI paths). Plus a 15th entry in `silent_drop_test.go` for the malformed-frame counter inventory. Existing 6 `room_updates_test.go` tests pass unchanged — the refactor preserves byte-identical CLI behavior.
+
+  **Adjacent doc cleanup:** `validateCorrIDOrReject` doc comment at `internal/server/reject.go:301` bumped from "applied to the 15 CorrID-carrying verb handlers" to "16" with `room_update` added to the inline list.
+
+  No client-side changes shipped in this entry — sshkey-term already had the matching wire shape (`protocol.RoomUpdate` struct with `{Type, Room, Topic, CorrID}`) and the optimistic-feedback `/topic` slash command path. PROTOCOL.md gains a `#### room_update Request (Phase 24)` subsection within the existing `### Room Updates (Phase 16)` section documenting the request shape, auth requirements, error code table, corr_id echo behavior, idempotency, and success-via-`room_updated` convention.
+
+- **Topic-update UX cleanup — close live-broadcast gaps surfaced in first end-to-end test (2026-05-13).** Follow-up to the 2026-05-12 `room_update` handler landing. The handler worked correctly at the data-plane layer (round-trip succeeded, store updated, `room_updated` broadcast arrived at the client), but three UX-layer gaps remained when testing against `sshkey-term`. This entry captures the server-side close; client-side cleanup tracked in the sister `sshkey-term` CHANGELOG entry. Full design record + landed-state details in `topic.md` §11.
+
+  **§11.3a — live `room_event` broadcast added to `emitRoomUpdate`.** Previously the shared post-write helper recorded a `room_event` audit row via `RecordRoomEvent` but did not broadcast a live `room_event` envelope — the Phase 20 comment in `room_updates.go:160` explicitly said "members see inline … on their **next sync**", sync-replay-only delivery. Other room-mutation handlers (`add_to_room.go:73`, `session.go:2522`, `:2664`) already did BOTH (record + broadcast); `emitRoomUpdate` was structured for the broadcast-`room_updated`-only model and never gained the room_event broadcast. Now fires `s.broadcastToRoom(roomID, protocol.RoomEvent{Type:"room_event", Room:roomID, Event:eventType, By:changedBy, Name:newValue})` after the `RecordRoomEvent` insert (`room_updates.go:170-179`). Both trigger paths (CLI `update-topic` queue + in-session `room_update` request) benefit because they share the helper. Connected members now see the inline "alice changed the topic to 'foo'" / "alice renamed the room to 'bar'" system message immediately instead of waiting for sync replay on next reconnect.
+
+  **Rate-limit bucket key narrowed `room_admin_action:<user>:<room>` → `room_admin_action:<user>` (per-user only).** Real security improvement, not just stylistic. The original per-user-per-room key let an attacker rotate room IDs to escape the bucket entirely — each new room ID = fresh bucket. The per-user key enforces an actual cap on the user's total admin activity across all rooms. Stated rationale in the helper's doc comment: "prevents room-ID rotation from bypassing the pre-auth choke point". Trade-off: legitimate admins can't bulk-update topics across multiple rooms back-to-back via the in-session path without hitting the `AdminActionsPerMinute` cap. CLI path bypasses this limiter so bulk operations via `sshkey-ctl update-topic` remain unaffected. `room_admin.go:41`.
+
+  **CorrID echo on `rate_limited` response.** The original handler's rate-limit response fired `SignalRateLimited` and returned the typed `rate_limited` frame, but didn't echo `req.CorrID` — the other typed errors (`forbidden`, `unknown_room`, `room_retired`) all echoed corrID per the §5.2 CorrID rule, leaving `rate_limited` as the inconsistent one. Now threaded through via `checkRoomAdminActionRateLimit(c *Client, corrID string)`. Closes the inconsistency without changing the rest of the rate-limit shape.
+
+  **Tests updated:** `TestHandleRoomUpdate_HappyPath` now expects TWO frames in the recipient buffer (room_updated + room_event), uses new `roomUpdateCountType` + `roomUpdateFindRoomUpdated` helpers to find each frame type. The drift guard asserting the `room_updated` frame doesn't carry `corr_id` is preserved. `TestHandleRoomUpdate_RateLimitRoomScoped` renamed to `TestHandleRoomUpdate_RateLimitUserScopedAndCorrIDEcho`, with assertion shape rebuilt: engineering probe now must ALSO be `rate_limited` (per-user bucket means alice's general bucket exhaustion affects engineering too), and the `corr_id` is asserted on the rate-limited error frame. `group_admin` probe still uses a separate bucket — that assertion preserved. All 12 `TestHandleRoomUpdate_*` tests pass; 6 existing `TestProcessPendingRoomUpdates_*` tests still pass (refactor parity holds against the new broadcast path).
+
+  **No new wire types.** The `protocol.RoomEvent` envelope is the existing Phase 20 type — already documented in PROTOCOL.md and already handled by sshkey-term's `client.go:602` room_event handler. No protocol surface change beyond the new emission site.
+
+### Changed
+- **Handshake capability fields removed from protocol and logs (2026-05-12).** The server no longer emits or consumes `capabilities` / `active_capabilities` in `server_hello`, `client_hello`, and `welcome`. The negotiation scaffold (`allCapabilities`, `negotiateCapabilities`) was removed, along with capability details in handshake-complete logging. This trims unused wire surface and reduces startup/session log noise without changing auth, sync, or message behavior. `PROTOCOL.md` and README handshake examples were updated to match.
+
 ## [v0.3.0] - 2026-05-12
 
 ### Removed

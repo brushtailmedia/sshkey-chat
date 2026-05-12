@@ -74,7 +74,6 @@ func tryConnectHandshake(port int, keyPath, deviceID string) error {
 		Client:        "test",
 		ClientVersion: "0.0.1",
 		DeviceID:      deviceID,
-		Capabilities:  []string{"typing", "reactions", "signatures"},
 	}); err != nil {
 		return fmt.Errorf("write client_hello: %w", err)
 	}

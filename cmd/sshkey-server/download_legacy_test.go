@@ -174,7 +174,6 @@ func (e *testEnv) connectLegacy(keyPath, deviceID string) *legacyClient {
 		Client:        "test",
 		ClientVersion: "0.0.1",
 		DeviceID:      deviceID,
-		Capabilities:  []string{"typing", "reactions", "signatures"},
 	})
 	tc.expectType("welcome")
 	tc.drainUntil("sync_complete")

@@ -45,31 +45,24 @@ Client opens SSH connection with Ed25519 key
 Client opens 3 session channels (1st: control/NDJSON, 2nd: download, 3rd: upload)
 
   Server -> {"type":"server_hello","protocol":"sshkey-chat","version":1,
-             "server_id":"chat.example.com",
-             "capabilities":["typing","reactions","read_receipts","file_transfer",
-                             "link_previews","presence","pins","mentions","unread",
-                             "status","signatures"]}
+             "server_id":"chat.example.com"}
 
   Client -> {"type":"client_hello","protocol":"sshkey-chat","version":1,
              "client":"my-client","client_version":"0.1.0",
              "device_id":"dev_V1StGXR8_Z5jdHi6B-myT",
-             "last_synced_at":"2026-04-01T00:00:00Z",
-             "capabilities":["typing","reactions","read_receipts","file_transfer",
-                             "presence","pins","mentions","unread","status","signatures"]}
+             "last_synced_at":"2026-04-01T00:00:00Z"}
 
   Server -> {"type":"welcome","user":"usr_alice","display_name":"Alice Chen","admin":true,
              "rooms":["room_V1StGXR8_Z5jdHi6B","room_abc123def456"],
              "groups":["group_xK9mQ2pR"],
-             "pending_sync":true,
-             "active_capabilities":["typing","reactions","read_receipts","file_transfer",
-                                    "presence","pins","mentions","unread","status","signatures"]}
+             "pending_sync":true}
 ```
 
 **Handshake rules:**
 
 - The client must send `client_hello` within **2 seconds** of receiving `server_hello`. Timeout = the server disconnects with a `client_required` error and an install banner.
 - `protocol` must be `"sshkey-chat"` and `version` must be `1`. Mismatch = disconnect with install banner.
-- The `capabilities` fields exist in the handshake but **the server currently sends all message types regardless of the negotiated set**. The fields are informational and reserved for future gating. Clients must handle (or ignore) any message type the server sends, not rely on the capability list to suppress them.
+- There is currently no capability negotiation in the handshake. Clients must handle (or ignore) any message type the server sends.
 - `last_synced_at` controls whether sync batches follow: empty string = no sync (first connect, or client doesn't want catchup), non-empty ISO 8601 timestamp = server sends messages newer than that timestamp.
 - `pending_sync` in the welcome is `true` when `last_synced_at` was non-empty — it tells the client to expect `sync_batch` messages before `sync_complete`.
 
@@ -1319,6 +1312,37 @@ When an admin changes a room's display name (`sshkey-ctl rename-room`) or topic 
 The event carries the FULL post-change room state (both fields populated, not a diff). The client upserts its local `rooms` table row from the payload — whichever field changed gets reflected on the next render; the unchanged field is overwritten with its current value (a no-op). One handler covers both `rename-room` and `update-topic`.
 
 Delivered only to current members of the affected room (narrow broadcast). Non-members and offline devices pick up the change via the standard `room_list` refresh on their next connect.
+
+#### `room_update` Request (Phase 24)
+
+In-session companion to the operator-only CLI path. Server admins who are also current room members can update a room's topic live from their connected session, bypassing the 5-second CLI queue tick:
+
+```json
+// Client -> Server
+{"type":"room_update","room":"room_abc123","topic":"New topic","corr_id":"corr_<21 nanoid chars>"}
+```
+
+**Scope: topic only.** Room renames stay operator-only via `sshkey-ctl rename-room` — the request surface has no rename verb. Empty `topic` clears the topic.
+
+**Authorization:**
+- Caller must be a server admin (`users.admin` flag, set via `sshkey-ctl approve --admin` / `sshkey-ctl promote`). Rooms have no per-room admin role.
+- Caller must be a current member of the target room. The CLI path bypasses this for operator-override on rooms the admin isn't currently in; this request path doesn't.
+
+**Errors** (all post-unmarshal errors echo `corr_id`):
+
+| Code             | Meaning                                                                   |
+|------------------|---------------------------------------------------------------------------|
+| `invalid_message`| Malformed frame (pre-unmarshal — `corr_id` is empty, no parsed value).    |
+| `forbidden`      | Caller is not a server admin.                                             |
+| `rate_limited`   | `room_admin_action:<user>:<room>` bucket exhausted; `retry_after_ms` set. |
+| `unknown_room`   | Caller is not a member, OR room does not exist (deliberate privacy parity — non-members can't probe room existence). |
+| `room_retired`   | Room has been archived; topic is read-only.                               |
+
+Malformed `corr_id` is silent-drop on the wire (server log + `SignalMalformedFrame` counter, no typed response — matches every other corr_id-carrying verb).
+
+**Success:** delivered via the existing `room_updated` broadcast (above) to all connected members of the room INCLUDING the caller. No separate ack/success frame.
+
+**Idempotency:** if the request's `topic` matches the room's current topic, the server treats it as a successful no-op — the caller receives a `room_updated` echo for UI confirmation, but no DB write, no audit row, no `room_event`, and no fanout to other members. Symmetric with the CLI `update-topic` path which silently writes the same value.
 
 ### Live Profile Updates (Phase 16)
 

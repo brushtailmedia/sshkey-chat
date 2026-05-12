@@ -20,6 +20,10 @@ const (
 	defaultPort      = 2222
 	defaultConfigDir = "/etc/sshkey-chat"
 	defaultDataDir   = "/var/sshkey-chat"
+
+	initProfileDev    = "dev"
+	initProfileDocker = "docker"
+	initProfileProd   = "prod"
 )
 
 type initOptions struct {
@@ -27,10 +31,20 @@ type initOptions struct {
 	dataDir   string
 	bind      string
 	port      int
+	profile   string
+
+	minimalConfig bool
 
 	createStarterRooms bool
 	starterRooms       []string
 	markStarterDefault bool
+}
+
+type initProfileDefaults struct {
+	configDir string
+	dataDir   string
+	bind      string
+	port      int
 }
 
 func cmdInit(configDir, dataDir string, args []string) error {
@@ -42,8 +56,7 @@ func cmdInitWithIO(configDir, dataDir string, args []string, in io.Reader, out i
 	opts := initOptions{
 		configDir:          configDir,
 		dataDir:            dataDir,
-		bind:               defaultBindAddr,
-		port:               defaultPort,
+		profile:            initProfileProd,
 		createStarterRooms: true,
 		starterRooms:       []string{"general", "support"},
 		markStarterDefault: true,
@@ -52,6 +65,8 @@ func cmdInitWithIO(configDir, dataDir string, args []string, in io.Reader, out i
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var dockerPreset bool
+	var profileName string
+	var minimal bool
 	var yes bool
 	var noStarterRooms bool
 	var noDefaultStarter bool
@@ -61,6 +76,8 @@ func cmdInitWithIO(configDir, dataDir string, args []string, in io.Reader, out i
 	var configOverride string
 	var dataOverride string
 	fs.BoolVar(&dockerPreset, "docker", false, "use docker defaults")
+	fs.StringVar(&profileName, "profile", initProfileProd, "init profile: dev|docker|prod")
+	fs.BoolVar(&minimal, "minimal", false, "write a minimal server.toml instead of the recommended full template")
 	fs.BoolVar(&yes, "yes", false, "non-interactive mode")
 	fs.BoolVar(&noStarterRooms, "no-starter-rooms", false, "do not create starter rooms")
 	fs.BoolVar(&noDefaultStarter, "no-default-starter-rooms", false, "do not mark starter rooms as default")
@@ -70,21 +87,27 @@ func cmdInitWithIO(configDir, dataDir string, args []string, in io.Reader, out i
 	fs.StringVar(&configOverride, "config", "", "config directory")
 	fs.StringVar(&dataOverride, "data", "", "data directory")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("usage: init [--docker] [--yes] [--config DIR] [--data DIR] [--bind ADDR] [--port N]")
+		return fmt.Errorf("usage: init [--profile dev|docker|prod] [--minimal] [--docker] [--yes] [--config DIR] [--data DIR] [--bind ADDR] [--port N]")
 	}
 	if len(fs.Args()) != 0 {
-		return fmt.Errorf("usage: init [--docker] [--yes] [--config DIR] [--data DIR] [--bind ADDR] [--port N]")
+		return fmt.Errorf("usage: init [--profile dev|docker|prod] [--minimal] [--docker] [--yes] [--config DIR] [--data DIR] [--bind ADDR] [--port N]")
 	}
 
+	profileFlagSet := flagWasSet(fs, "profile")
 	if dockerPreset {
-		// Preserve explicit overrides if provided.
-		if configDir == defaultConfigDir {
-			opts.configDir = defaultConfigDir
+		if profileFlagSet && !strings.EqualFold(strings.TrimSpace(profileName), initProfileDocker) {
+			return fmt.Errorf("--docker cannot be combined with --profile=%q (use --profile docker or omit --profile)", profileName)
 		}
-		if dataDir == defaultDataDir {
-			opts.dataDir = defaultDataDir
-		}
+		profileName = initProfileDocker
 	}
+
+	profileName, err := normalizeInitProfile(profileName)
+	if err != nil {
+		return err
+	}
+	opts.profile = profileName
+	opts.minimalConfig = minimal
+	applyInitProfileDefaults(&opts, profileName, configDir, dataDir)
 	if configOverride != "" {
 		opts.configDir = configOverride
 	}
@@ -94,7 +117,7 @@ func cmdInitWithIO(configDir, dataDir string, args []string, in io.Reader, out i
 	if bind != "" {
 		opts.bind = strings.TrimSpace(bind)
 	}
-	if port != 0 {
+	if flagWasSet(fs, "port") {
 		opts.port = port
 	}
 	if noStarterRooms {
@@ -240,6 +263,83 @@ func promptInitYesNo(r *bufio.Reader, out io.Writer, label string, defYes bool) 
 	}
 }
 
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}
+
+func normalizeInitProfile(raw string) (string, error) {
+	profile := strings.ToLower(strings.TrimSpace(raw))
+	switch profile {
+	case "":
+		return initProfileProd, nil
+	case initProfileDev, initProfileDocker, initProfileProd:
+		return profile, nil
+	default:
+		return "", fmt.Errorf("invalid --profile %q (valid: dev, docker, prod)", raw)
+	}
+}
+
+func applyInitProfileDefaults(opts *initOptions, profile, baseConfigDir, baseDataDir string) {
+	defs := initProfileValues(profile)
+	opts.bind = defs.bind
+	opts.port = defs.port
+
+	if strings.TrimSpace(baseConfigDir) == "" || strings.TrimSpace(baseConfigDir) == defaultConfigDir {
+		opts.configDir = defs.configDir
+	}
+	if strings.TrimSpace(baseDataDir) == "" || strings.TrimSpace(baseDataDir) == defaultDataDir {
+		opts.dataDir = defs.dataDir
+	}
+}
+
+func initProfileValues(profile string) initProfileDefaults {
+	switch profile {
+	case initProfileDev:
+		home, err := os.UserHomeDir()
+		if err == nil {
+			home = strings.TrimSpace(home)
+		}
+		if home != "" {
+			return initProfileDefaults{
+				configDir: filepath.Join(home, ".sshkey-chat", "config"),
+				dataDir:   filepath.Join(home, ".sshkey-chat", "data"),
+				bind:      "127.0.0.1",
+				port:      defaultPort,
+			}
+		}
+		// If HOME is unavailable, fall back to production paths but keep the
+		// local-only loopback bind expected from the dev profile.
+		return initProfileDefaults{
+			configDir: defaultConfigDir,
+			dataDir:   defaultDataDir,
+			bind:      "127.0.0.1",
+			port:      defaultPort,
+		}
+	case initProfileDocker:
+		return initProfileDefaults{
+			configDir: defaultConfigDir,
+			dataDir:   defaultDataDir,
+			bind:      defaultBindAddr,
+			port:      defaultPort,
+		}
+	case initProfileProd:
+		fallthrough
+	default:
+		return initProfileDefaults{
+			configDir: defaultConfigDir,
+			dataDir:   defaultDataDir,
+			bind:      defaultBindAddr,
+			port:      defaultPort,
+		}
+	}
+}
+
 func parseStarterRooms(csv string) ([]string, error) {
 	parts := strings.Split(csv, ",")
 	var out []string
@@ -287,7 +387,7 @@ func runInit(opts initOptions, out io.Writer) error {
 	if _, err := os.Stat(serverPath); err == nil {
 		fmt.Fprintf(out, "server.toml already exists at %s, keeping existing file.\n", serverPath)
 	} else if os.IsNotExist(err) {
-		if err := writeInitServerToml(serverPath, opts.bind, opts.port); err != nil {
+		if err := writeInitServerToml(serverPath, opts.bind, opts.port, opts.dataDir, opts.profile, opts.minimalConfig); err != nil {
 			return err
 		}
 		fmt.Fprintf(out, "Wrote %s.\n", serverPath)
@@ -334,6 +434,12 @@ func runInit(opts initOptions, out io.Writer) error {
 	fmt.Fprintf(out, "  Data dir:   %s\n", opts.dataDir)
 	fmt.Fprintf(out, "  Bind:       %s\n", opts.bind)
 	fmt.Fprintf(out, "  Port:       %d\n", opts.port)
+	fmt.Fprintf(out, "  Profile:    %s\n", opts.profile)
+	if opts.minimalConfig {
+		fmt.Fprintln(out, "  server.toml mode: minimal (--minimal)")
+	} else {
+		fmt.Fprintln(out, "  server.toml mode: recommended template (default)")
+	}
 	if opts.createStarterRooms {
 		fmt.Fprintf(out, "  Starter rooms ensured: %d (created this run: %d)\n", len(opts.starterRooms), createdRooms)
 		if opts.markStarterDefault {
@@ -343,7 +449,14 @@ func runInit(opts initOptions, out io.Writer) error {
 	return nil
 }
 
-func writeInitServerToml(path, bind string, port int) error {
+func writeInitServerToml(path, bind string, port int, dataDir, profile string, minimal bool) error {
+	if minimal {
+		return writeInitServerTomlMinimal(path, bind, port)
+	}
+	return writeInitServerTomlRecommended(path, bind, port, dataDir, profile)
+}
+
+func writeInitServerTomlMinimal(path, bind string, port int) error {
 	content := fmt.Sprintf(`# Generated by sshkey-ctl init.
 # Edit this file as needed; missing sections use built-in defaults.
 
@@ -355,4 +468,78 @@ bind = %q
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
+}
+
+func writeInitServerTomlRecommended(path, bind string, port int, dataDir, profile string) error {
+	content, err := renderInitRecommendedServerToml(bind, port, dataDir, profile)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, []byte(content), 0640); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+func renderInitRecommendedServerToml(bind string, port int, dataDir, profile string) (string, error) {
+	if strings.TrimSpace(defaultServerTOMLRecommended) == "" {
+		return "", fmt.Errorf("default server.toml template is empty")
+	}
+	lines := strings.Split(defaultServerTOMLRecommended, "\n")
+	inServerSection := false
+	inLoggingSection := false
+	portReplaced := false
+	bindReplaced := false
+	logFileReplaced := false
+	for i := range lines {
+		line := strings.TrimSpace(lines[i])
+		switch {
+		case line == "[server]":
+			inServerSection = true
+			inLoggingSection = false
+		case line == "[logging]":
+			inLoggingSection = true
+			inServerSection = false
+		case strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]"):
+			inServerSection = false
+			inLoggingSection = false
+		}
+		if inServerSection {
+			if strings.HasPrefix(line, "port =") {
+				lines[i] = fmt.Sprintf("port = %d", port)
+				portReplaced = true
+				continue
+			}
+			if strings.HasPrefix(line, "bind =") {
+				lines[i] = fmt.Sprintf("bind = %q", bind)
+				bindReplaced = true
+				continue
+			}
+		}
+		if inLoggingSection && strings.HasPrefix(line, "file =") {
+			lines[i] = fmt.Sprintf("file = %q", filepath.Join(dataDir, "server.log"))
+			logFileReplaced = true
+			continue
+		}
+	}
+	if !portReplaced || !bindReplaced {
+		return "", fmt.Errorf("template missing [server] port/bind placeholders")
+	}
+	if !logFileReplaced {
+		return "", fmt.Errorf("template missing [logging] file placeholder")
+	}
+	header := fmt.Sprintf(`# Generated by sshkey-ctl init (%s profile).
+# This is the recommended full template with documented defaults.
+# Edit values in place as needed.
+`, profile)
+	start := 0
+	for start < len(lines) {
+		trimmed := strings.TrimSpace(lines[start])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			start++
+			continue
+		}
+		break
+	}
+	return header + "\n" + strings.Join(lines[start:], "\n"), nil
 }

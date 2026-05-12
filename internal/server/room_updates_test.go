@@ -19,6 +19,45 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
 
+func countEnvelopeType(t *testing.T, msgs []json.RawMessage, want string) int {
+	t.Helper()
+	n := 0
+	for _, raw := range msgs {
+		var env struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &env); err != nil {
+			t.Fatalf("parse envelope: %v", err)
+		}
+		if env.Type == want {
+			n++
+		}
+	}
+	return n
+}
+
+func firstRoomUpdated(t *testing.T, msgs []json.RawMessage) protocol.RoomUpdated {
+	t.Helper()
+	for _, raw := range msgs {
+		var env struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &env); err != nil {
+			t.Fatalf("parse envelope: %v", err)
+		}
+		if env.Type != "room_updated" {
+			continue
+		}
+		var ru protocol.RoomUpdated
+		if err := json.Unmarshal(raw, &ru); err != nil {
+			t.Fatalf("parse room_updated: %v", err)
+		}
+		return ru
+	}
+	t.Fatal("missing room_updated frame")
+	return protocol.RoomUpdated{}
+}
+
 // TestProcessPendingRoomUpdates_UpdateTopic verifies that an
 // update-topic row produces a room_updated broadcast with the new
 // topic.
@@ -46,13 +85,13 @@ func TestProcessPendingRoomUpdates_UpdateTopic(t *testing.T) {
 	s.processPendingRoomUpdates()
 
 	msgs := alice.messages()
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 broadcast, got %d", len(msgs))
+	if got := countEnvelopeType(t, msgs, "room_updated"); got != 1 {
+		t.Fatalf("expected 1 room_updated broadcast, got %d (total frames=%d)", got, len(msgs))
 	}
-	var ru protocol.RoomUpdated
-	if err := json.Unmarshal(msgs[0], &ru); err != nil {
-		t.Fatalf("parse: %v", err)
+	if got := countEnvelopeType(t, msgs, "room_event"); got != 1 {
+		t.Fatalf("expected 1 room_event broadcast, got %d (total frames=%d)", got, len(msgs))
 	}
+	ru := firstRoomUpdated(t, msgs)
 	if ru.Type != "room_updated" {
 		t.Errorf("type = %q, want room_updated", ru.Type)
 	}
@@ -89,11 +128,13 @@ func TestProcessPendingRoomUpdates_RenameRoom(t *testing.T) {
 	s.processPendingRoomUpdates()
 
 	msgs := alice.messages()
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 broadcast, got %d", len(msgs))
+	if got := countEnvelopeType(t, msgs, "room_updated"); got != 1 {
+		t.Fatalf("expected 1 room_updated broadcast, got %d (total frames=%d)", got, len(msgs))
 	}
-	var ru protocol.RoomUpdated
-	json.Unmarshal(msgs[0], &ru)
+	if got := countEnvelopeType(t, msgs, "room_event"); got != 1 {
+		t.Fatalf("expected 1 room_event broadcast, got %d (total frames=%d)", got, len(msgs))
+	}
+	ru := firstRoomUpdated(t, msgs)
 	if ru.DisplayName != "main" {
 		t.Errorf("display_name = %q, want main", ru.DisplayName)
 	}
@@ -152,8 +193,8 @@ func TestProcessPendingRoomUpdates_NarrowBroadcastMembersOnly(t *testing.T) {
 
 	s.processPendingRoomUpdates()
 
-	if msgs := alice.messages(); len(msgs) != 1 {
-		t.Errorf("alice (member) should receive 1 broadcast, got %d", len(msgs))
+	if msgs := alice.messages(); len(msgs) != 2 {
+		t.Errorf("alice (member) should receive 2 broadcasts (room_event + room_updated), got %d", len(msgs))
 	}
 	if msgs := dave.messages(); len(msgs) != 0 {
 		t.Errorf("dave (non-member) should receive 0 broadcasts, got %d", len(msgs))
@@ -213,7 +254,7 @@ func TestProcessPendingRoomUpdates_MultipleRowsInOneTick(t *testing.T) {
 	s.processPendingRoomUpdates()
 
 	msgs := alice.messages()
-	if len(msgs) != 2 {
-		t.Fatalf("expected 2 broadcasts, got %d", len(msgs))
+	if len(msgs) != 4 {
+		t.Fatalf("expected 4 broadcasts (2x room_event + 2x room_updated), got %d", len(msgs))
 	}
 }
