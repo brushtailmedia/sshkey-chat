@@ -708,20 +708,6 @@ func TestListRooms(t *testing.T) {
 // clear DB + log AND add to fingerprint blocklist, prevent retry.
 // See cmdPurgePending / cmdRejectPending in main.go.
 
-// setupPendingLog seeds <dataDir>/data/pending-keys.log only.
-// Sufficient for tests that don't care about the DB row (e.g.
-// initial purge-pending log-only assertions). DB-aware tests use
-// setupPendingDBAndLog below.
-func setupPendingLog(t *testing.T, lines ...string) string {
-	t.Helper()
-	dir := t.TempDir()
-	dataDir := filepath.Join(dir, "data")
-	os.MkdirAll(dataDir, 0750)
-	content := strings.Join(lines, "\n") + "\n"
-	os.WriteFile(filepath.Join(dataDir, "pending-keys.log"), []byte(content), 0640)
-	return dir
-}
-
 // setupPendingDBAndLog seeds both `pending_keys` rows and
 // `pending-keys.log` lines with matching fingerprints. Used by the
 // purge/reject tests to assert both halves of the cleanup primitive.

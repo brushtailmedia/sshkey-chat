@@ -57,7 +57,7 @@ window_days = 7
 history_page_size = 100
 
 [files]
-max_file_size = "50MB"
+max_file_size = "100MB"
 max_avatar_size = "256KB"
 allowed_avatar_types = ["image/png", "image/jpeg"]
 max_file_ids_per_message = 20

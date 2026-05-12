@@ -270,12 +270,12 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 	s.cfg.RUnlock()
 	maxSize, err := config.ParseSize(maxSizeStr)
 	if err != nil || maxSize <= 0 {
-		maxSize = 50 * 1024 * 1024 // fallback: 50MB
+		maxSize = 100 * 1024 * 1024 // fallback: 100MB (matches config default)
 	}
 	if msg.Size > maxSize {
 		// Phase 17 Step 4c Part 3: client declared upload size exceeds
-		// MaxFileSize (config knob, default 50MB). No legitimate client
-		// has a reason to declare >50MB for a chat attachment — this is
+		// MaxFileSize (config knob, default 100MB). No legitimate client
+		// has a reason to declare >100MB for a chat attachment — this is
 		// a hostile or broken client. SignalOversizedBody is an
 		// AutoRevokeSignals-eligible misbehavior signal; Phase 17b will
 		// threshold on sustained rate.

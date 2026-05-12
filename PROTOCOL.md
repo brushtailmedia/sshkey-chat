@@ -1114,7 +1114,7 @@ id_len (1 byte) | id (variable) | data_len (8 bytes, big-endian uint64) | data (
 The `id` is the `upload_id` (on the upload channel, client -> server) or `file_id` (on the download channel, server -> client). Read `id_len`, then `id`, then `data_len`, then exactly `data_len` bytes.
 
 **Server-enforced bounds on inbound upload-channel frames:**
-- `data_len` MUST NOT exceed `MaxFileSize` (server config; default 50MB). Frames claiming larger `data_len` are rejected before any allocation — the server does not stream into a buffer larger than the declared `size` of the preceding `upload_start`.
+- `data_len` MUST NOT exceed `MaxFileSize` (server config; default 100MB). Frames claiming larger `data_len` are rejected before any allocation — the server does not stream into a buffer larger than the declared `size` of the preceding `upload_start`.
 - `id_len` is bounded by the wire format (1 byte, max 255); server further caps at 128 to match the `upload_id` space.
 - Frames whose `id` doesn't match a pending upload are rejected (no corresponding `upload_start` seen).
 
@@ -1401,7 +1401,7 @@ Admin clients send `list_pending_keys` and present the result to the operator. A
 | `not_authorized` | Caller cannot perform the action (e.g. delete another user's message without admin rights) |
 | `rate_limited` | Any rate limit exceeded (messages, uploads, history, deletes, reactions, DM creation, profile changes, pins) |
 | `message_too_large` | Body exceeds 16KB |
-| `upload_too_large` | File exceeds server max (default 50MB) |
+| `upload_too_large` | File exceeds server max (default 100MB) |
 | `epoch_conflict` | Another client's rotation was accepted first |
 | `stale_member_list` | Membership changed during rotation |
 | `invalid_wrapped_keys` | DM or group DM `wrapped_keys` don't match the current member list |
@@ -1455,7 +1455,7 @@ Clients should handle `rate_limited` errors gracefully — show a "Slow down" me
 The server validates every incoming message. Common rejection reasons a client builder should handle:
 
 - **Message body size:** 16KB max. Exceeding returns `message_too_large`.
-- **File upload size:** 50MB max (configurable). Exceeding returns `upload_too_large`.
+- **File upload size:** 100MB max (configurable). Exceeding returns `upload_too_large`.
 - **Group DM member count:** 150 max. Exceeding returns `too_many_members`.
 - **Display name:** 2-32 characters, no leading/trailing whitespace, unique (case-insensitive). Invalid returns `invalid_profile`; taken returns `username_taken`.
 - **Ed25519 keys only:** RSA, ECDSA, and other key types are rejected at the SSH handshake level.

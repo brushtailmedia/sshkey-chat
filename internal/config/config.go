@@ -333,7 +333,16 @@ func DefaultServerConfig() ServerConfig {
 			HistoryPageSize: 100,
 		},
 		Files: FilesSection{
-			MaxFileSize:          "50MB",
+			// 100MB chosen as the "secure messaging" peer default —
+			// matches Signal and iMessage; comfortably covers phone
+			// videos, RAW photos, and multi-page PDFs that 50MB cut
+			// short. Operators on small VPSes can lower this in
+			// config.toml; operators running larger groups can raise
+			// it (subject to per-user / per-day quotas elsewhere in
+			// this section + the disk-space realities of fan-out:
+			// each upload is held at full size for retention and
+			// downloaded once per recipient).
+			MaxFileSize:          "100MB",
 			MaxAvatarSize:        "256KB",
 			AllowedAvatarTypes:   []string{"image/png", "image/jpeg"},
 			MaxFileIDsPerMessage: 20, // Phase 17 Step 4c: chat-app-appropriate ceiling

@@ -204,7 +204,7 @@ history_page_size = 100
 # ----------------------------------------------------------------------
 
 [files]
-max_file_size = "50MB"                           # increase with care — see grace_period below
+max_file_size = "100MB"                          # increase with care — see grace_period below
 max_avatar_size = "256KB"
 allowed_avatar_types = ["image/png", "image/jpeg"]
 

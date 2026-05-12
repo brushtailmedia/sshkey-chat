@@ -71,11 +71,11 @@ func TestHandleUploadStart_OversizedSizeFiresOversizedBody(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 	alice := testClientFor("alice", "dev_alice_sizesig")
 
-	// MaxFileSize default is 50MB; declare 100MB.
+	// MaxFileSize default is 100MB; declare 200MB.
 	msg := protocol.UploadStart{
 		Type:        "upload_start",
 		UploadID:    store.GenerateID("up_"),
-		Size:        100 * 1024 * 1024,
+		Size:        200 * 1024 * 1024,
 		ContentHash: "blake2b-256:" + strings.Repeat("a", 64),
 		Room:        generalID,
 	}

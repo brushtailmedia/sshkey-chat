@@ -1126,7 +1126,7 @@ window_days = 7                  # max age of messages in sync window
 history_page_size = 100          # messages per lazy scroll-back page
 
 [files]
-max_file_size = "50MB"                # if you increase this, also increase grace_period below
+max_file_size = "100MB"               # if you increase this, also increase grace_period below
 max_avatar_size = "256KB"
 allowed_avatar_types = ["image/png", "image/jpeg"]  # server can only filter unencrypted uploads (avatars)
 
@@ -1379,7 +1379,7 @@ The server stores encrypted file blobs and serves them via the upload/download c
 | `text/plain`, `text/csv` | inline preview | inline preview |
 | anything else | icon + filename + size, click to open | filename + size, open command |
 
-50MB max file size means no massive videos -- inline playback is viable for everything within the limit.
+100MB max file size means no massive videos -- inline playback is viable for everything within the limit.
 
 "Open" calls the system default handler (`open` on macOS, `xdg-open` on Linux).
 
@@ -1387,7 +1387,7 @@ The server stores encrypted file blobs and serves them via the upload/download c
 
 - **Images:** egui native image rendering
 - **Audio:** `rodio` (pure Rust decoders via Symphonia, MP3/FLAC/WAV/OGG, background thread, non-blocking)
-- **Video:** `egui-video-rs` (pure Rust fork, no ffmpeg/sdl2 dependency, CPU-decoded, fine for chat-sized clips under 50MB)
+- **Video:** `egui-video-rs` (pure Rust fork, no ffmpeg/sdl2 dependency, CPU-decoded, fine for chat-sized clips under 100MB)
 
 Files sync to the client's local DB / file cache. Viewable offline.
 
