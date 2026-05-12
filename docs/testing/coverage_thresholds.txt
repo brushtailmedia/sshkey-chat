@@ -7,7 +7,6 @@
 ./internal/backup | 75.0 | backup/restore primitives and safety checks
 ./internal/config | 85.0 | config validation and defaults
 ./internal/counters | 90.0 | auto-revoke signal accounting core
-./internal/keygen | 80.0 | key parsing and generation helpers
 ./internal/lockfile | 80.0 | single-instance and stale-lock behavior
 ./internal/protocol | 75.0 | protocol codec and error taxonomy helpers
 ./internal/push | 35.0 | push sender baseline (new in Phase 22)
