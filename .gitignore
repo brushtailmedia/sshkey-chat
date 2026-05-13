@@ -58,6 +58,7 @@ init.md
 server-init.md
 sshkey-admin.md
 topic.md
+unread-epoch-leak-fix.md
 docs/security/*
 
 # OS
