@@ -58,15 +58,16 @@ func (s *Server) sendUnreadCounts(c *Client) {
 	rooms := s.store.GetUserRoomIDs(c.UserID)
 
 	for _, roomID := range rooms {
-		count, lastRead, err := s.store.GetRoomUnreadCount(roomID, c.UserID, c.DeviceID)
-		if err != nil || count == 0 {
+		u, err := s.store.GetRoomUnreadCount(roomID, c.UserID, c.DeviceID)
+		if err != nil || u.Count == 0 {
 			continue
 		}
 		c.Encoder.Encode(protocol.Unread{
-			Type:     "unread",
-			Room:     roomID,
-			Count:    count,
-			LastRead: lastRead,
+			Type:          "unread",
+			Room:          roomID,
+			Count:         u.Count,
+			LastRead:      u.LastRead,
+			FirstUnreadID: u.FirstUnreadID,
 		})
 	}
 
@@ -75,15 +76,16 @@ func (s *Server) sendUnreadCounts(c *Client) {
 		return
 	}
 	for _, g := range groups {
-		count, lastRead, err := s.store.GetGroupUnreadCount(g.ID, c.UserID, c.DeviceID)
-		if err != nil || count == 0 {
+		u, err := s.store.GetGroupUnreadCount(g.ID, c.UserID, c.DeviceID)
+		if err != nil || u.Count == 0 {
 			continue
 		}
 		c.Encoder.Encode(protocol.Unread{
-			Type:     "unread",
-			Group:    g.ID,
-			Count:    count,
-			LastRead: lastRead,
+			Type:          "unread",
+			Group:         g.ID,
+			Count:         u.Count,
+			LastRead:      u.LastRead,
+			FirstUnreadID: u.FirstUnreadID,
 		})
 	}
 

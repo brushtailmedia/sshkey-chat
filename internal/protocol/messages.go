@@ -938,6 +938,15 @@ type Unread struct {
 	DM       string `json:"dm,omitempty"`
 	Count    int    `json:"count"`
 	LastRead string `json:"last_read"`
+	// FirstUnreadID is the explicit unread-divider boundary: the
+	// id of the earliest message the user has NOT read and CAN
+	// decrypt (epoch/membership-scoped, ordered by rowid). It is
+	// optional metadata for client divider placement — Count
+	// remains the canonical unread cardinality. Empty when there
+	// are no unread messages. Additive (pre-v1.0.0); keeps
+	// last_read single-purpose (the persisted read marker)
+	// instead of overloading it as an inferred boundary.
+	FirstUnreadID string `json:"first_unread_id,omitempty"`
 }
 
 // Presence (capability: presence)

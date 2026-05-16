@@ -130,6 +130,26 @@ func (s *Store) AddRoomMember(roomID, userID string, firstEpoch int64) error {
 	return err
 }
 
+// GetRoomMemberFirstEpoch returns the first_epoch the user gained
+// membership at in the given room.
+//
+// Explicit error semantics — deliberately NOT GetUserRoom: that
+// helper swallows every error (incl. real I/O) and returns
+// (0,0,nil) for not-found, which, used to scope an unread count,
+// would degrade to `epoch >= 0` = count every message = the exact
+// pre-join leak this fix closes, silently and undetectably. This
+// returns sql.ErrNoRows for a non-member (caller maps to unread 0)
+// and propagates real query errors (caller must NOT count).
+// See unread-epoch-leak-fix.md.
+func (s *Store) GetRoomMemberFirstEpoch(roomID, userID string) (int64, error) {
+	var firstEpoch int64
+	err := s.roomsDB.QueryRow(
+		`SELECT first_epoch FROM room_members WHERE room_id = ? AND user_id = ?`,
+		roomID, userID,
+	).Scan(&firstEpoch)
+	return firstEpoch, err
+}
+
 // RemoveRoomMember removes a user from a room.
 func (s *Store) RemoveRoomMember(roomID, userID string) error {
 	_, err := s.roomsDB.Exec(
