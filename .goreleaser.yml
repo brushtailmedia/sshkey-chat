@@ -31,6 +31,31 @@ builds:
     ldflags:
       - -s -w
 
+# Cross-platform macOS sign + notarize (GoReleaser OSS — uses
+# anchore/quill under the hood; runs fine on the Linux release
+# runner; Pro is only needed for .app/.dmg/.pkg, not bare
+# binaries). certificate/key accept base64 contents directly,
+# matching the APPLE_CERTIFICATE / APPLE_API_PRIVATE_KEY secrets.
+# Gated on all required Apple secrets so partial secret config
+# doesn't fail midway through release. `--snapshot` / fork runs
+# without secrets won't fail. Bare binaries can't be stapled —
+# Gatekeeper validates the notarization online on first run.
+notarize:
+  macos:
+    - enabled: '{{ and (isEnvSet "APPLE_CERTIFICATE") (isEnvSet "APPLE_CERTIFICATE_PASSWORD") (isEnvSet "APPLE_API_ISSUER") (isEnvSet "APPLE_API_KEY") (isEnvSet "APPLE_API_PRIVATE_KEY") }}'
+      ids:
+        - sshkey-server
+        - sshkey-ctl
+      sign:
+        certificate: "{{.Env.APPLE_CERTIFICATE}}"
+        password: "{{.Env.APPLE_CERTIFICATE_PASSWORD}}"
+      notarize:
+        issuer_id: "{{.Env.APPLE_API_ISSUER}}"
+        key_id: "{{.Env.APPLE_API_KEY}}"
+        key: "{{.Env.APPLE_API_PRIVATE_KEY}}"
+        wait: true
+        timeout: 20m
+
 archives:
   - id: default
     format: tar.gz
