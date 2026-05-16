@@ -97,6 +97,13 @@ func (w *slowWriter) bytesWritten() int {
 	return w.written
 }
 
+// lineCount returns the number of NDJSON lines written so far.
+func (w *slowWriter) lineCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return bytes.Count(w.buf.Bytes(), []byte("\n"))
+}
+
 // -----------------------------------------------------------------------------
 // fanOut helper tests.
 // -----------------------------------------------------------------------------
@@ -303,10 +310,19 @@ func TestSlowWriter_SetErrReturnsError(t *testing.T) {
 func TestFanOut_SlowRecipientDoesNotBlockFastRecipients(t *testing.T) {
 	s := newRejectTestServer(t, nil)
 
-	// Two fast recipients via plain bytes.Buffer.
-	var fast1, fast2 bytes.Buffer
-	cFast1 := newRejectTestClient("dev_fast_1", &fast1)
-	cFast2 := newRejectTestClient("dev_fast_2", &fast2)
+	// Two fast recipients via mutex-protected writers (no stalling).
+	fast1 := newSlowWriter(-1)
+	fast2 := newSlowWriter(-1)
+	cFast1 := &Client{
+		UserID:   "usr_fast_1",
+		DeviceID: "dev_fast_1",
+		Encoder:  newSafeEncoder(protocol.NewEncoder(fast1)),
+	}
+	cFast2 := &Client{
+		UserID:   "usr_fast_2",
+		DeviceID: "dev_fast_2",
+		Encoder:  newSafeEncoder(protocol.NewEncoder(fast2)),
+	}
 
 	// One slow recipient that blocks after 1 byte.
 	sw := newSlowWriter(1)
@@ -356,8 +372,8 @@ func TestFanOut_SlowRecipientDoesNotBlockFastRecipients(t *testing.T) {
 
 	// Fast recipients should have received the 1 (from stalled call) + 10
 	// NDJSON lines each.
-	for name, buf := range map[string]*bytes.Buffer{"fast1": &fast1, "fast2": &fast2} {
-		gotLines := bytes.Count(buf.Bytes(), []byte("\n"))
+	for name, w := range map[string]*slowWriter{"fast1": fast1, "fast2": fast2} {
+		gotLines := w.lineCount()
 		if gotLines < 10 {
 			t.Errorf("%s received %d lines, want at least 10", name, gotLines)
 		}
