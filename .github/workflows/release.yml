@@ -35,26 +35,156 @@ jobs:
       - name: Staticcheck
         run: staticcheck ./...
 
-  release:
+  release-linux:
     needs: test
+    strategy:
+      matrix:
+        include:
+          - goarch: amd64
+          - goarch: arm64
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.2"
-      - uses: goreleaser/goreleaser-action@v6
-        with:
-          version: latest
-          args: release --clean
+
+      - name: Build Linux binaries
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS sign + notarize (consumed by the notarize.macos
-          # block in .goreleaser.yml). API-key notarization method.
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          go build -ldflags="-s -w" -o sshkey-server ./cmd/sshkey-server
+          go build -ldflags="-s -w" -o sshkey-ctl ./cmd/sshkey-ctl
+          tar czf sshkey-chat_${{ github.ref_name }}_linux_${{ matrix.goarch }}.tar.gz \
+            sshkey-server sshkey-ctl README.md LICENSE CHANGELOG.md PROTOCOL.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.goarch }}
+          path: "*.tar.gz"
+
+  release-macos:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - goarch: amd64
+            runs_on: macos-15-intel
+          - goarch: arm64
+            runs_on: macos-15
+    runs-on: ${{ matrix.runs_on }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+
+      - name: Build macOS binaries
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          go build -ldflags="-s -w" -o sshkey-server ./cmd/sshkey-server
+          go build -ldflags="-s -w" -o sshkey-ctl ./cmd/sshkey-ctl
+          echo "MACOS_ZIP=sshkey-chat_${{ github.ref_name }}_darwin_${{ matrix.goarch }}.zip" >> "$GITHUB_ENV"
+
+      - name: Import Apple signing certificate
+        env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          python3 - <<'PY'
+          import base64, os
+          data = base64.b64decode(os.environ["APPLE_CERTIFICATE"])
+          with open("certificate.p12", "wb") as f:
+              f.write(data)
+          PY
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/sshkey-chat-signing.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import certificate.p12 -k "$KEYCHAIN_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+          rm -f certificate.p12
+
+          SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F '\"' '/Developer ID Application/ {print $2; exit}')"
+          if [ -z "$SIGNING_IDENTITY" ]; then
+            echo "No 'Developer ID Application' identity found in imported certificate."
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+            exit 1
+          fi
+          echo "SIGNING_IDENTITY=$SIGNING_IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Sign macOS binaries
+        run: |
+          codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" sshkey-server
+          codesign --verify --verbose=4 sshkey-server
+          codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" sshkey-ctl
+          codesign --verify --verbose=4 sshkey-ctl
+
+      - name: Build notarization archive
+        run: |
+          PKG_DIR="sshkey-chat_${{ github.ref_name }}_darwin_${{ matrix.goarch }}"
+          rm -rf "$PKG_DIR"
+          mkdir -p "$PKG_DIR"
+          cp sshkey-server sshkey-ctl README.md LICENSE CHANGELOG.md PROTOCOL.md "$PKG_DIR"/
+          ditto -c -k --keepParent "$PKG_DIR" "$MACOS_ZIP"
+          rm -rf "$PKG_DIR"
+
+      - name: Notarize macOS archive (API key)
+        env:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          python3 - <<'PY'
+          import base64, os
+          data = base64.b64decode(os.environ["APPLE_API_PRIVATE_KEY"])
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "AuthKey.p8"), "wb") as f:
+              f.write(data)
+          PY
+
+          test -s "$APPLE_API_KEY_PATH"
+
+          xcrun notarytool submit "$MACOS_ZIP" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
+          rm -f "$APPLE_API_KEY_PATH"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-${{ matrix.goarch }}
+          path: "*.zip"
+
+  publish:
+    needs: [release-linux, release-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: sha256sum *.tar.gz *.zip > checksums.txt
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            *.tar.gz
+            *.zip
+            checksums.txt
