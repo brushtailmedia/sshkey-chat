@@ -59,6 +59,8 @@ server-init.md
 sshkey-admin.md
 topic.md
 unread-epoch-leak-fix.md
+open-server-admission.md
+pending-keys-requested-username.md
 docs/security/*
 
 # OS
