@@ -130,24 +130,30 @@ func (s *Store) AddRoomMember(roomID, userID string, firstEpoch int64) error {
 	return err
 }
 
-// GetRoomMemberFirstEpoch returns the first_epoch the user gained
-// membership at in the given room.
+// GetRoomMemberJoinedAt returns the unix-seconds joined_at for the
+// user's membership in the given room — the room-message recipiency
+// boundary used to scope unread, mirroring groups' GetGroupUnreadCount
+// (the user can decrypt only messages at/after their join, and
+// joined_at is the time analogue; the old first_epoch column was never
+// written → always 0 → counted all pre-join history).
 //
 // Explicit error semantics — deliberately NOT GetUserRoom: that
 // helper swallows every error (incl. real I/O) and returns
 // (0,0,nil) for not-found, which, used to scope an unread count,
-// would degrade to `epoch >= 0` = count every message = the exact
+// would degrade to `ts >= 0` = count every message = the exact
 // pre-join leak this fix closes, silently and undetectably. This
-// returns sql.ErrNoRows for a non-member (caller maps to unread 0)
-// and propagates real query errors (caller must NOT count).
-// See unread-epoch-leak-fix.md.
-func (s *Store) GetRoomMemberFirstEpoch(roomID, userID string) (int64, error) {
-	var firstEpoch int64
+// returns raw sql.ErrNoRows for a non-member (caller maps to unread 0
+// via errors.Is) and propagates real query errors (caller must NOT
+// count). It is NOT GetUserGroupJoinedAt's (0,nil) swallow either —
+// rooms keep the raw-sql.ErrNoRows contract. See
+// unread-epoch-leak-fix.md.
+func (s *Store) GetRoomMemberJoinedAt(roomID, userID string) (int64, error) {
+	var joinedAt int64
 	err := s.roomsDB.QueryRow(
-		`SELECT first_epoch FROM room_members WHERE room_id = ? AND user_id = ?`,
+		`SELECT CAST(strftime('%s', joined_at) AS INTEGER) FROM room_members WHERE room_id = ? AND user_id = ?`,
 		roomID, userID,
-	).Scan(&firstEpoch)
-	return firstEpoch, err
+	).Scan(&joinedAt)
+	return joinedAt, err
 }
 
 // RemoveRoomMember removes a user from a room.

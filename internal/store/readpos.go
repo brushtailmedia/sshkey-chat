@@ -84,10 +84,15 @@ func (s *Store) GetRoomUnreadCount(room, user, deviceID string) (UnreadCount, er
 		return UnreadCount{}, err
 	}
 
-	// Scope to the user's first_epoch. Non-member → unread 0 by
-	// definition (they can see no messages). A real query error
-	// must propagate, never silently become an unscoped count.
-	firstEpoch, err := s.GetRoomMemberFirstEpoch(room, user)
+	// Scope to the user's joined_at — the room-message recipiency
+	// boundary, mirroring GetGroupUnreadCount. Rooms previously scoped
+	// by a never-written first_epoch column (always 0 → counted all
+	// pre-join history); see unread-epoch-leak-fix.md. Non-member →
+	// unread 0 by definition. A real query error must propagate, never
+	// silently become an unscoped `ts >= 0` count. Raw sql.ErrNoRows +
+	// errors.Is is the rooms contract (NOT GetUserGroupJoinedAt's
+	// (0,nil) swallow, NOT GetUserRoom's (0,0,nil) footgun).
+	joinedAt, err := s.GetRoomMemberJoinedAt(room, user)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return UnreadCount{LastRead: lastRead}, nil
@@ -105,23 +110,23 @@ func (s *Store) GetRoomUnreadCount(room, user, deviceID string) (UnreadCount, er
 		err = db.QueryRow(`
 			SELECT
 			  (SELECT COUNT(*) FROM messages
-			     WHERE deleted = 0 AND epoch >= ?),
+			     WHERE deleted = 0 AND ts >= ?),
 			  COALESCE((SELECT id FROM messages
-			     WHERE deleted = 0 AND epoch >= ?
+			     WHERE deleted = 0 AND ts >= ?
 			     ORDER BY rowid ASC LIMIT 1), '')`,
-			firstEpoch, firstEpoch,
+			joinedAt, joinedAt,
 		).Scan(&out.Count, &out.FirstUnreadID)
 	} else {
 		err = db.QueryRow(`
 			SELECT
 			  (SELECT COUNT(*) FROM messages
-			     WHERE deleted = 0 AND epoch >= ?
+			     WHERE deleted = 0 AND ts >= ?
 			       AND rowid > (SELECT rowid FROM messages WHERE id = ?)),
 			  COALESCE((SELECT id FROM messages
-			     WHERE deleted = 0 AND epoch >= ?
+			     WHERE deleted = 0 AND ts >= ?
 			       AND rowid > (SELECT rowid FROM messages WHERE id = ?)
 			     ORDER BY rowid ASC LIMIT 1), '')`,
-			firstEpoch, lastRead, firstEpoch, lastRead,
+			joinedAt, lastRead, joinedAt, lastRead,
 		).Scan(&out.Count, &out.FirstUnreadID)
 	}
 	return out, err

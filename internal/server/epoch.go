@@ -221,6 +221,33 @@ func (s *Server) sendEpochKeys(c *Client) {
 	}
 }
 
+// memberHoldsCurrentRoomKey reports whether userID has a stored wrapped
+// epoch key for roomID's current epoch. §3b connect-path key-readiness
+// guard (server-side analog of the client RoomEpochKey Layer-2a gate):
+// a freshly-added member whose join rotation hasn't keyed them yet holds
+// no key, so an unread badge for that room is for messages they cannot
+// decrypt — sendUnreadCounts suppresses it until the key lands, and
+// handleEpochRotate re-sends the real count the instant it does. See
+// unread-epoch-leak-fix.md §3b.
+func (s *Server) memberHoldsCurrentRoomKey(roomID, userID string) bool {
+	if s.store == nil {
+		return false
+	}
+	epoch := s.epochs.currentEpochNum(roomID)
+	if epoch == 0 {
+		if dbEpoch, err := s.store.GetCurrentEpoch(roomID); err == nil && dbEpoch > 0 {
+			epoch = dbEpoch
+		}
+	}
+	if epoch == 0 {
+		return false // fresh room, no epoch yet → nothing decryptable
+	}
+	if _, err := s.store.GetEpochKey(roomID, epoch, userID); err != nil {
+		return false
+	}
+	return true
+}
+
 // triggerPostConnectRoomRotations runs after the client message loop
 // has started. It handles two bootstrap cases:
 //   - initial: room has no epoch yet (fresh room)
@@ -416,6 +443,23 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 		// through the shared fanOutOne helper to pick up the
 		// per-client queue + consecutive-drop disconnect policy.
 		s.fanOutOne("epoch_key", perMsg, t.client)
+
+		// §3b MANDATORY pairing: t.client now holds the key for this
+		// epoch (StoreEpochKeysBatch above persisted it), so the room
+		// is decryptable for them. sendUnreadCounts suppressed this
+		// room's badge while they were keyless on connect; without
+		// re-sending here that stays a silent persistent 0 until
+		// reconnect. Recompute (now joined_at-scoped + decryptable)
+		// and send. See unread-epoch-leak-fix.md §3b.
+		if u, uErr := s.store.GetRoomUnreadCount(msg.Room, t.client.UserID, t.client.DeviceID); uErr == nil && u.Count > 0 {
+			t.client.Encoder.Encode(protocol.Unread{
+				Type:          "unread",
+				Room:          msg.Room,
+				Count:         u.Count,
+				LastRead:      u.LastRead,
+				FirstUnreadID: u.FirstUnreadID,
+			})
+		}
 	}
 }
 

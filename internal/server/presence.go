@@ -62,6 +62,15 @@ func (s *Server) sendUnreadCounts(c *Client) {
 		if err != nil || u.Count == 0 {
 			continue
 		}
+		// §3b key-readiness guard: a freshly-added member whose join
+		// rotation hasn't keyed them yet would get a non-zero badge for
+		// a room they cannot decrypt. Suppress until they hold the
+		// current room epoch key; handleEpochRotate re-sends the count
+		// the instant the key lands (MANDATORY pairing — without that
+		// re-send this would be a silent persistent 0).
+		if !s.memberHoldsCurrentRoomKey(roomID, c.UserID) {
+			continue
+		}
 		c.Encoder.Encode(protocol.Unread{
 			Type:          "unread",
 			Room:          roomID,

@@ -5,9 +5,12 @@ import "testing"
 // Layer 1 (server canonical) regression tests for the unread
 // pre-join leak fix. See unread-epoch-leak-fix.md.
 //
-// Phase 1: GetRoomUnreadCount is epoch-scoped (epoch >= first_epoch).
-// Phase 2: GetGroupUnreadCount is membership-scoped (ts >= joined_at)
-// since groups have no epoch model.
+// Both GetRoomUnreadCount and GetGroupUnreadCount are membership-
+// scoped by ts >= joined_at. Rooms previously scoped by a never-
+// written first_epoch column (always 0 → counted all pre-join
+// history); the joined_at parity fix closes that. Room and group
+// tests are deliberately symmetric; TestUnreadCount_RoomsEqualsGroups
+// Parity locks the symmetry.
 //
 // seedTestRoom is defined in room_retirement_test.go (same package).
 // Room/group IDs must be real nanoids (RoomDB/GroupDB validate via
@@ -54,71 +57,82 @@ func pinGroupJoinedAt(t *testing.T, s *Store, gid, user, joinedAt string) {
 	}
 }
 
-// --- Phase 1: room ---
-
-// New member joined at epoch 3 must NOT see the 20 pre-join
-// (epoch 1+2) messages — count is the 10 epoch-3 messages only.
-func TestGetRoomUnreadCount_NewMemberSkipsPreJoinEpochs(t *testing.T) {
-	s := openStore(t)
-	roomID := GenerateID("room_")
-	seedTestRoom(t, s, roomID, "general", "")
-	for i := 0; i < 10; i++ {
-		roomMsg(t, s, roomID, "e1_"+string(rune('a'+i)), 1, int64(100+i))
-	}
-	for i := 0; i < 10; i++ {
-		roomMsg(t, s, roomID, "e2_"+string(rune('a'+i)), 2, int64(200+i))
-	}
-	for i := 0; i < 10; i++ {
-		roomMsg(t, s, roomID, "e3_"+string(rune('a'+i)), 3, int64(300+i))
-	}
-	if err := s.AddRoomMember(roomID, "newbie", 3); err != nil {
-		t.Fatalf("add member: %v", err)
-	}
-
-	u, err := s.GetRoomUnreadCount(roomID, "newbie", "dev1")
-	if err != nil {
-		t.Fatalf("unread: %v", err)
-	}
-	if u.Count != 10 {
-		t.Errorf("Count = %d, want 10 (epoch-3 only, NOT 30)", u.Count)
-	}
-	if u.FirstUnreadID != "e3_a" {
-		t.Errorf("FirstUnreadID = %q, want %q (first epoch-3 by rowid)", u.FirstUnreadID, "e3_a")
+// pinRoomJoinedAt sets a deterministic joined_at on a room_members
+// row so ts boundaries are testable (AddRoomMember uses datetime('now')).
+func pinRoomJoinedAt(t *testing.T, s *Store, roomID, userID, joinedAt string) {
+	t.Helper()
+	if _, err := s.roomsDB.Exec(
+		`UPDATE room_members SET joined_at = ? WHERE room_id = ? AND user_id = ?`,
+		joinedAt, roomID, userID,
+	); err != nil {
+		t.Fatalf("pin room joined_at: %v", err)
 	}
 }
 
-// Original member (first_epoch 0) sees everything — no regression.
-func TestGetRoomUnreadCount_OriginalMemberCountsAll(t *testing.T) {
+// --- Room (joined_at-scoped — parity with groups) ---
+
+// New room member must NOT see messages sent before joined_at — the
+// pre-join leak this fix closes (was: first_epoch always 0).
+func TestGetRoomUnreadCount_NewMemberSkipsPreJoinMessages(t *testing.T) {
 	s := openStore(t)
 	roomID := GenerateID("room_")
 	seedTestRoom(t, s, roomID, "general", "")
-	for i := 0; i < 10; i++ {
-		roomMsg(t, s, roomID, "e0_"+string(rune('a'+i)), 0, int64(i))
-	}
-	for i := 0; i < 10; i++ {
-		roomMsg(t, s, roomID, "e1_"+string(rune('a'+i)), 1, int64(100+i))
-	}
-	if err := s.AddRoomMember(roomID, "founder", 0); err != nil {
+	if err := s.AddRoomMember(roomID, "me", 0); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
+	// joined_at pinned to 2022-01-01 00:00:00 UTC = unix 1640995200.
+	pinRoomJoinedAt(t, s, roomID, "me", "2022-01-01 00:00:00")
+	roomMsg(t, s, roomID, "pre_1", 1, 1640995100)  // before join
+	roomMsg(t, s, roomID, "pre_2", 1, 1640995199)  // before join
+	roomMsg(t, s, roomID, "post_1", 1, 1640995200) // == join (inclusive)
+	roomMsg(t, s, roomID, "post_2", 1, 1640995300) // after join
 
-	u, err := s.GetRoomUnreadCount(roomID, "founder", "dev1")
+	u, err := s.GetRoomUnreadCount(roomID, "me", "dev1")
 	if err != nil {
 		t.Fatalf("unread: %v", err)
 	}
-	if u.Count != 20 {
-		t.Errorf("Count = %d, want 20 (original member sees all)", u.Count)
+	if u.Count != 2 {
+		t.Errorf("Count = %d, want 2 (ts >= joined_at only, NOT 4)", u.Count)
+	}
+	if u.FirstUnreadID != "post_1" {
+		t.Errorf("FirstUnreadID = %q, want %q", u.FirstUnreadID, "post_1")
 	}
 }
 
-// Non-member → unread 0, no error (must NOT degrade to count-all).
+// Long-standing / genesis member (joined far in the past) sees all —
+// no regression, no genesis special-case (identical to groups).
+func TestGetRoomUnreadCount_LongStandingMemberNoRegression(t *testing.T) {
+	s := openStore(t)
+	roomID := GenerateID("room_")
+	seedTestRoom(t, s, roomID, "general", "")
+	if err := s.AddRoomMember(roomID, "me", 0); err != nil {
+		t.Fatalf("add member: %v", err)
+	}
+	pinRoomJoinedAt(t, s, roomID, "me", "2000-01-01 00:00:00")
+	roomMsg(t, s, roomID, "m1", 1, 1640995200)
+	roomMsg(t, s, roomID, "m2", 1, 1640995300)
+	roomMsg(t, s, roomID, "m3", 1, 1640995400)
+
+	u, err := s.GetRoomUnreadCount(roomID, "me", "dev1")
+	if err != nil {
+		t.Fatalf("unread: %v", err)
+	}
+	if u.Count != 3 {
+		t.Errorf("Count = %d, want 3 (long-standing member sees all)", u.Count)
+	}
+}
+
+// Non-member → unread 0, no error. Locks the GetUserRoom-footgun
+// guard: GetRoomMemberJoinedAt returns raw sql.ErrNoRows, the caller
+// maps it via errors.Is → 0; it must NOT degrade to `ts >= 0`
+// count-all (NOT GetUserGroupJoinedAt's (0,nil), NOT GetUserRoom's
+// (0,0,nil)).
 func TestGetRoomUnreadCount_NonMemberReturnsZero(t *testing.T) {
 	s := openStore(t)
 	roomID := GenerateID("room_")
 	seedTestRoom(t, s, roomID, "general", "")
-	for i := 0; i < 5; i++ {
-		roomMsg(t, s, roomID, "m_"+string(rune('a'+i)), 1, int64(i))
-	}
+	roomMsg(t, s, roomID, "m1", 1, 1640995200)
+	roomMsg(t, s, roomID, "m2", 1, 1640995300)
 
 	u, err := s.GetRoomUnreadCount(roomID, "stranger", "dev1")
 	if err != nil {
@@ -129,54 +143,67 @@ func TestGetRoomUnreadCount_NonMemberReturnsZero(t *testing.T) {
 	}
 }
 
-// Returning member: stale lastRead from a prior (epoch-1) membership
-// must be clamped by the epoch filter to the new first_epoch (4),
-// not reach into the intermediate epochs 2-3.
-func TestGetRoomUnreadCount_ReturningMemberStaleLastReadClamped(t *testing.T) {
+// Rejoin: stale lastRead from a prior membership must be clamped by
+// the fresh joined_at so while-absent messages are not counted
+// (sync leave → RemoveRoomMember; re-add → fresh joined_at default).
+func TestGetRoomUnreadCount_LeftRejoinedOnlyPostRejoin(t *testing.T) {
 	s := openStore(t)
 	roomID := GenerateID("room_")
 	seedTestRoom(t, s, roomID, "general", "")
-	roomMsg(t, s, roomID, "old_read", 1, 100) // read during first stint
-	for i := 0; i < 10; i++ {
-		roomMsg(t, s, roomID, "e2_"+string(rune('a'+i)), 2, int64(200+i))
-	}
-	for i := 0; i < 10; i++ {
-		roomMsg(t, s, roomID, "e3_"+string(rune('a'+i)), 3, int64(300+i))
-	}
-	for i := 0; i < 10; i++ {
-		roomMsg(t, s, roomID, "e4_"+string(rune('a'+i)), 4, int64(400+i))
-	}
-	if err := s.AddRoomMember(roomID, "rejoiner", 4); err != nil {
+	if err := s.AddRoomMember(roomID, "me", 0); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
-	if err := s.SetReadPosition("rejoiner", "dev1", roomID, "", "", "old_read"); err != nil {
+	pinRoomJoinedAt(t, s, roomID, "me", "2022-01-01 00:00:00")
+	roomMsg(t, s, roomID, "old_read", 1, 1640995300) // read before leaving
+	if err := s.SetReadPosition("me", "dev1", roomID, "", "", "old_read"); err != nil {
 		t.Fatalf("set read pos: %v", err)
 	}
 
-	u, err := s.GetRoomUnreadCount(roomID, "rejoiner", "dev1")
+	// Leave; while-absent messages must stay out of unread.
+	if err := s.RemoveRoomMember(roomID, "me"); err != nil {
+		t.Fatalf("remove member: %v", err)
+	}
+	roomMsg(t, s, roomID, "away_1", 1, 1643673600)
+	roomMsg(t, s, roomID, "away_2", 1, 1643673700)
+
+	// Re-add with a fresh joined_at, then new messages.
+	if err := s.AddRoomMember(roomID, "me", 0); err != nil {
+		t.Fatalf("re-add member: %v", err)
+	}
+	pinRoomJoinedAt(t, s, roomID, "me", "2022-03-01 00:00:00") // unix 1646092800
+	roomMsg(t, s, roomID, "post_1", 1, 1646092800)             // == rejoin (inclusive)
+	roomMsg(t, s, roomID, "post_2", 1, 1646092900)
+
+	u, err := s.GetRoomUnreadCount(roomID, "me", "dev1")
 	if err != nil {
 		t.Fatalf("unread: %v", err)
 	}
-	if u.Count != 10 {
-		t.Errorf("Count = %d, want 10 (epoch>=4 only; stale lastRead must NOT reach epochs 2-3)", u.Count)
+	if u.LastRead != "old_read" {
+		t.Errorf("LastRead = %q, want %q", u.LastRead, "old_read")
+	}
+	if u.Count != 2 {
+		t.Errorf("Count = %d, want 2 (post-rejoin only; while-absent must not count)", u.Count)
+	}
+	if u.FirstUnreadID != "post_1" {
+		t.Errorf("FirstUnreadID = %q, want %q", u.FirstUnreadID, "post_1")
 	}
 }
 
-// Locks the audit's key invariant: first_unread_id is ordered by
-// rowid (insertion/chronological order), NOT MIN(id) — message ids
-// are random nanoids, so MIN(id) would return an arbitrary row.
+// first_unread_id is ordered by rowid (chronological), NOT MIN(id):
+// message ids are random nanoids. Invariant preserved under joined_at
+// scoping (the rowid / FirstUnreadID logic is unchanged by the fix).
 func TestGetRoomUnreadCount_FirstUnreadIDIsRowidOrderedNotMinID(t *testing.T) {
 	s := openStore(t)
 	roomID := GenerateID("room_")
 	seedTestRoom(t, s, roomID, "general", "")
-	// All epoch 5 (all in-scope), inserted in this rowid order.
-	// Lexical MIN(id) would be "m_1"; rowid-first is "m_9".
-	roomMsg(t, s, roomID, "m_9", 5, 500) // rowid 1 — chronologically first
-	roomMsg(t, s, roomID, "m_1", 5, 501) // rowid 2 — lexically smallest
-	roomMsg(t, s, roomID, "m_5", 5, 502) // rowid 3
-	if err := s.AddRoomMember(roomID, "u", 5); err != nil {
+	if err := s.AddRoomMember(roomID, "u", 0); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
+	pinRoomJoinedAt(t, s, roomID, "u", "2000-01-01 00:00:00") // all in-scope
+	// Lexical MIN(id) would be "m_1"; rowid-first is "m_9".
+	roomMsg(t, s, roomID, "m_9", 1, 1640995200) // rowid 1 — chronologically first
+	roomMsg(t, s, roomID, "m_1", 1, 1640995201) // rowid 2 — lexically smallest
+	roomMsg(t, s, roomID, "m_5", 1, 1640995202) // rowid 3
 
 	u, err := s.GetRoomUnreadCount(roomID, "u", "dev1")
 	if err != nil {
@@ -187,6 +214,55 @@ func TestGetRoomUnreadCount_FirstUnreadIDIsRowidOrderedNotMinID(t *testing.T) {
 	}
 	if u.FirstUnreadID != "m_9" {
 		t.Errorf("FirstUnreadID = %q, want %q (rowid-first); MIN(id) would wrongly be %q", u.FirstUnreadID, "m_9", "m_1")
+	}
+}
+
+// Rooms ≡ groups parity (§5): identical joined_at + identical ts
+// sequence must yield identical UnreadCount from GetRoomUnreadCount
+// and GetGroupUnreadCount. Locks the symmetry the whole fix rests on.
+func TestUnreadCount_RoomsEqualsGroupsParity(t *testing.T) {
+	s := openStore(t)
+	roomID := GenerateID("room_")
+	groupID := GenerateID("group_")
+	seedTestRoom(t, s, roomID, "general", "")
+	if err := s.AddRoomMember(roomID, "me", 0); err != nil {
+		t.Fatalf("add room member: %v", err)
+	}
+	if err := s.CreateGroup(groupID, "me", []string{"me"}, "G"); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	pinRoomJoinedAt(t, s, roomID, "me", "2022-01-01 00:00:00")
+	pinGroupJoinedAt(t, s, groupID, "me", "2022-01-01 00:00:00")
+
+	seq := []struct {
+		id string
+		ts int64
+	}{
+		{"pre_1", 1640995100},
+		{"pre_2", 1640995199},
+		{"post_1", 1640995200}, // == join (inclusive)
+		{"post_2", 1640995300},
+		{"post_3", 1640995400},
+	}
+	for _, m := range seq {
+		roomMsg(t, s, roomID, m.id, 1, m.ts)
+		groupMsg(t, s, groupID, m.id, m.ts)
+	}
+
+	ru, err := s.GetRoomUnreadCount(roomID, "me", "dev1")
+	if err != nil {
+		t.Fatalf("room unread: %v", err)
+	}
+	gu, err := s.GetGroupUnreadCount(groupID, "me", "dev1")
+	if err != nil {
+		t.Fatalf("group unread: %v", err)
+	}
+	if ru.Count != gu.Count || ru.FirstUnreadID != gu.FirstUnreadID || ru.LastRead != gu.LastRead {
+		t.Errorf("room/group parity broken:\n  room  = {Count:%d FirstUnreadID:%q LastRead:%q}\n  group = {Count:%d FirstUnreadID:%q LastRead:%q}",
+			ru.Count, ru.FirstUnreadID, ru.LastRead, gu.Count, gu.FirstUnreadID, gu.LastRead)
+	}
+	if ru.Count != 3 || ru.FirstUnreadID != "post_1" {
+		t.Errorf("Count/FirstUnreadID = %d/%q, want 3/\"post_1\"", ru.Count, ru.FirstUnreadID)
 	}
 }
 
