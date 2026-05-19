@@ -1088,6 +1088,66 @@ func (s *Server) handleTyping(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	// Server-authoritative authorization. Typing is a membership-scoped
+	// signal, so the SENDER must belong to the context — this gate
+	// exactly mirrors message-send authz (handleSend room gate
+	// session.go:844 + retired :856; group gate :995; DM party check).
+	// Security is enforced HERE, server-side: the client `/typing`
+	// toggle is a UX affordance only and is never trusted — any client
+	// (first-party, third-party, or hostile) can speak the protocol, so
+	// authz cannot live in the client. Unauthorized typing is
+	// SILENT-DROPPED: typing is fire-and-forget (no corr_id / response
+	// channel) and an error frame would also be an existence oracle,
+	// breaking the byte-identical-privacy invariant the send path
+	// deliberately keeps. Fires SignalNonMemberContext (the established
+	// "well-formed frame referencing a context you're not a member of"
+	// signal — already used by upload_start; feeds Phase-17b threshold /
+	// auto-revoke). Ordered AFTER the rate limit (kept first, bounding
+	// DB-read DoS from this gate — room_update precedent) and BEFORE
+	// typing.Touch so a non-member neither populates the server typing
+	// tracker nor produces any fan-out.
+	nCtx := 0
+	if msg.Room != "" {
+		nCtx++
+	}
+	if msg.Group != "" {
+		nCtx++
+	}
+	if msg.DM != "" {
+		nCtx++
+	}
+	if nCtx != 1 {
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "typing", "empty/ambiguous typing context (silent-drop)", nil)
+		return
+	}
+	if s.store == nil {
+		return
+	}
+	switch {
+	case msg.Room != "":
+		if !s.store.IsRoomMemberByID(msg.Room, c.UserID) {
+			s.rejectAndLog(c, counters.SignalNonMemberContext, "typing", "typing for non-member room (silent-drop)", nil)
+			return
+		}
+		// Full send-path mirror: no typing into a retired/read-only room.
+		if s.store.IsRoomRetired(msg.Room) {
+			s.rejectAndLog(c, counters.SignalNonMemberContext, "typing", "typing in retired room (silent-drop)", nil)
+			return
+		}
+	case msg.Group != "":
+		isMember, err := s.store.IsGroupMember(msg.Group, c.UserID)
+		if err != nil || !isMember {
+			s.rejectAndLog(c, counters.SignalNonMemberContext, "typing", "typing for non-member group (silent-drop)", nil)
+			return
+		}
+	case msg.DM != "":
+		dm, err := s.store.GetDirectMessage(msg.DM)
+		if err != nil || dm == nil || (c.UserID != dm.UserA && c.UserID != dm.UserB) {
+			s.rejectAndLog(c, counters.SignalNonMemberContext, "typing", "typing for non-party DM (silent-drop)", nil)
+			return
+		}
+	}
+
 	// Track typing for server-side expiry (DMs use the DM ID as context)
 	typingCtx := msg.Room + msg.Group + msg.DM
 	s.typing.Touch(c.UserID, msg.Room, typingCtx)
@@ -1100,29 +1160,32 @@ func (s *Server) handleTyping(c *Client, raw json.RawMessage) {
 		User:  c.UserID,
 	}
 
-	if msg.Room != "" {
+	switch {
+	case msg.Room != "":
 		s.broadcastToRoomExcept(msg.Room, c.DeviceID, out)
-	} else if msg.Group != "" {
+	case msg.Group != "":
 		s.broadcastToGroupExcept(msg.Group, c.DeviceID, out)
-	} else if msg.DM != "" {
-		// For 1:1 DMs, send to the other party's sessions.
+	case msg.DM != "":
+		// Sender already verified a party to this DM above. Refetch
+		// (cheap, DM-typing only) keeps the authz gate strictly before
+		// typing.Touch without threading a typed var across blocks.
 		// Phase 17 Step 3: lock-release pattern.
-		if s.store != nil {
-			if dm, err := s.store.GetDirectMessage(msg.DM); err == nil && dm != nil {
-				s.mu.RLock()
-				var targets []*Client
-				for _, client := range s.clients {
-					if client.DeviceID == c.DeviceID {
-						continue
-					}
-					if client.UserID == dm.UserA || client.UserID == dm.UserB {
-						targets = append(targets, client)
-					}
-				}
-				s.mu.RUnlock()
-				s.fanOut("typing", out, targets)
+		dm, err := s.store.GetDirectMessage(msg.DM)
+		if err != nil || dm == nil {
+			return
+		}
+		s.mu.RLock()
+		var targets []*Client
+		for _, client := range s.clients {
+			if client.DeviceID == c.DeviceID {
+				continue
+			}
+			if client.UserID == dm.UserA || client.UserID == dm.UserB {
+				targets = append(targets, client)
 			}
 		}
+		s.mu.RUnlock()
+		s.fanOut("typing", out, targets)
 	}
 }
 

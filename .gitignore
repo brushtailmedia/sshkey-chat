@@ -62,6 +62,7 @@ unread-epoch-leak-fix.md
 open-server-admission.md
 open-server-admission-v2.md
 pending-keys-requested-username.md
+typing-relay-authz-hardening.md
 docs/security/*
 
 # OS
