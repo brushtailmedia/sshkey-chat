@@ -63,6 +63,7 @@ open-server-admission.md
 open-server-admission-v2.md
 pending-keys-requested-username.md
 typing-relay-authz-hardening.md
+delete-after-leave-authz.md
 docs/security/*
 
 # OS
