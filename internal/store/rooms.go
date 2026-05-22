@@ -193,9 +193,13 @@ func (s *Store) GetUserRoomIDs(userID string) []string {
 }
 
 // GetRoomMemberIDsByRoomID returns all user IDs in a room, looked up by room nanoid.
+//
+// Order is deterministic (joined_at, user_id). Phase V8 persists these IDs as
+// client-side UI state, so a stable order avoids member-list jitter across
+// reconnects and keeps cached snapshots byte-stable.
 func (s *Store) GetRoomMemberIDsByRoomID(roomID string) []string {
 	rows, err := s.roomsDB.Query(
-		`SELECT user_id FROM room_members WHERE room_id = ?`, roomID)
+		`SELECT user_id FROM room_members WHERE room_id = ? ORDER BY joined_at, user_id`, roomID)
 	if err != nil {
 		return nil
 	}

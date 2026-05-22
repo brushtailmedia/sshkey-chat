@@ -37,11 +37,17 @@ type Decoder struct {
 	scanner *bufio.Scanner
 }
 
+// MaxInboundLineBytes caps a single decoded NDJSON line. On the server
+// this bounds client→server frames for abuse protection — kept at 1 MiB.
+// (The term client uses a larger cap for server→client frames; see the
+// sshkey-term codec.)
+const MaxInboundLineBytes = 1024 * 1024 // 1 MiB
+
 // NewDecoder creates an NDJSON decoder that reads from r.
-// Lines are limited to 1MB to prevent abuse.
+// Lines are limited to MaxInboundLineBytes to prevent abuse.
 func NewDecoder(r io.Reader) *Decoder {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line
+	scanner.Buffer(make([]byte, 0, 64*1024), MaxInboundLineBytes)
 	return &Decoder{scanner: scanner}
 }
 

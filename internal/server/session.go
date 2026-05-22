@@ -342,7 +342,7 @@ func (s *Server) sendRoomList(c *Client) {
 			ID:      roomID,
 			Name:    displayName,
 			Topic:   topic,
-			Members: len(members),
+			Members: members,
 		})
 	}
 

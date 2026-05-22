@@ -969,10 +969,10 @@ type RoomList struct {
 }
 
 type RoomInfo struct {
-	ID      string `json:"id"`   // room nanoid
-	Name    string `json:"name"` // display name (human-visible)
-	Topic   string `json:"topic"`
-	Members int    `json:"members"`
+	ID      string   `json:"id"`   // room nanoid
+	Name    string   `json:"name"` // display name (human-visible)
+	Topic   string   `json:"topic"`
+	Members []string `json:"members"` // full member user IDs
 }
 
 // Room events

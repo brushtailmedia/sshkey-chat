@@ -337,6 +337,49 @@ func TestAddRoomMember(t *testing.T) {
 	}
 }
 
+// TestGetRoomMemberIDsByRoomID_DeterministicOrder verifies the V8
+// ordering invariant: members come back in a stable (joined_at, user_id)
+// order, so persisted client-side snapshots don't jitter across reconnects.
+func TestGetRoomMemberIDsByRoomID_DeterministicOrder(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+
+	st.SeedRooms(map[string]RoomSeed{"general": {Topic: "Chat"}})
+	roomID := st.RoomDisplayNameToID("general")
+
+	// Insert out of alphabetical order. joined_at has second granularity,
+	// so same-second inserts tie-break by user_id — the result must be
+	// sorted by user_id within the tie.
+	for _, uid := range []string{"usr_charlie", "usr_alice", "usr_bob"} {
+		if err := st.AddRoomMember(roomID, uid, 0); err != nil {
+			t.Fatalf("add %s: %v", uid, err)
+		}
+	}
+
+	first := st.GetRoomMemberIDsByRoomID(roomID)
+	want := []string{"usr_alice", "usr_bob", "usr_charlie"}
+	if len(first) != len(want) {
+		t.Fatalf("got %d members, want %d: %v", len(first), len(want), first)
+	}
+	for i := range want {
+		if first[i] != want[i] {
+			t.Fatalf("order[%d] = %q, want %q (full: %v)", i, first[i], want[i], first)
+		}
+	}
+
+	// Stability: a second call returns the identical order.
+	second := st.GetRoomMemberIDsByRoomID(roomID)
+	for i := range first {
+		if first[i] != second[i] {
+			t.Fatalf("non-deterministic order: call1=%v call2=%v", first, second)
+		}
+	}
+}
+
 func TestRemoveRoomMember(t *testing.T) {
 	dir := t.TempDir()
 	st, err := Open(dir)

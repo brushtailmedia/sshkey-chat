@@ -13,6 +13,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
@@ -62,6 +63,53 @@ func TestHandleRoomMembers_PrivacyResponsesIdentical(t *testing.T) {
 			t.Errorf("privacy leak: case %d response differs from case 1\n  case 1: %s\n  case %d: %s",
 				i+1, baseline, i+1, responses[i][0])
 		}
+	}
+}
+
+// TestSendRoomList_EmitsFullMemberIDsStableOrder locks the V8 room_list
+// contract: room_list carries full member user IDs, not just a count, and
+// repeated handshakes over the same DB state produce byte-stable output.
+func TestSendRoomList_EmitsFullMemberIDsStableOrder(t *testing.T) {
+	s := newTestServer(t)
+	generalID := s.store.RoomDisplayNameToID("general")
+	if generalID == "" {
+		t.Fatal("seed failed")
+	}
+
+	first := testClientFor("bob", "dev_bob_room_list_1")
+	s.sendRoomList(first.Client)
+	firstMsgs := first.messages()
+	if len(firstMsgs) != 1 {
+		t.Fatalf("first sendRoomList: expected 1 message, got %d", len(firstMsgs))
+	}
+
+	var list protocol.RoomList
+	if err := json.Unmarshal(firstMsgs[0], &list); err != nil {
+		t.Fatalf("unmarshal room_list: %v", err)
+	}
+	if list.Type != "room_list" {
+		t.Fatalf("Type = %q, want room_list", list.Type)
+	}
+	if len(list.Rooms) != 1 {
+		t.Fatalf("bob should receive exactly general, got %d rooms: %+v", len(list.Rooms), list.Rooms)
+	}
+	room := list.Rooms[0]
+	if room.ID != generalID {
+		t.Fatalf("room ID = %q, want %q", room.ID, generalID)
+	}
+	wantMembers := []string{"alice", "bob", "carol"}
+	if !reflect.DeepEqual(room.Members, wantMembers) {
+		t.Fatalf("room_list members = %v, want %v", room.Members, wantMembers)
+	}
+
+	second := testClientFor("bob", "dev_bob_room_list_2")
+	s.sendRoomList(second.Client)
+	secondMsgs := second.messages()
+	if len(secondMsgs) != 1 {
+		t.Fatalf("second sendRoomList: expected 1 message, got %d", len(secondMsgs))
+	}
+	if !bytes.Equal(firstMsgs[0], secondMsgs[0]) {
+		t.Fatalf("room_list output is not byte-stable\nfirst:  %s\nsecond: %s", firstMsgs[0], secondMsgs[0])
 	}
 }
 

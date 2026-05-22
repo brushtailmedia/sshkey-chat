@@ -64,6 +64,7 @@ open-server-admission-v2.md
 pending-keys-requested-username.md
 typing-relay-authz-hardening.md
 delete-after-leave-authz.md
+retired-room-upload-start-fix.md
 docs/security/*
 
 # OS

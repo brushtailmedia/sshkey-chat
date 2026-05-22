@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- **V8 room-list membership foundation (2026-05-22).** `room_list` now carries full room member user IDs (`RoomInfo.Members []string`) instead of only a count, with deterministic server ordering (`joined_at`, `user_id`) so clients can persist stable room-member snapshots. The server-side inbound frame cap remains bounded at 1 MiB; the terminal client raises only its server-to-client decode cap. Added regression coverage for deterministic store ordering and byte-stable `sendRoomList` output.
+
 - **`sshkey-ctl init` now writes a full annotated recommended `server.toml` by default (2026-05-12).** The previous behavior wrote only a minimal `[server]` block (`port` + `bind`), which hid active defaults and forced operators to cross-reference source/docs to discover available knobs. Init now emits the complete operator-facing template by default (embedded from `cmd/sshkey-ctl/default_server.toml`) with all major sections visible (`[server]`, `[server.auto_revoke]`, `[server.quotas.user]`, `[messages]`, `[files]`, `[rate_limits]`, `[backup]`, `[push]`, etc.). Starter-room bootstrap behavior is unchanged.
 
   New init flags:

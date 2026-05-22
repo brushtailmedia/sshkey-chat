@@ -84,7 +84,7 @@ After the device check, the server sends (in this exact order):
 
 1. `deleted_rooms` -- rooms the user has `/delete`d from their view on another device; catchup for offline devices. Sent BEFORE `room_list` so the client purges before populating the active list.
 2. `retired_rooms` -- rooms that were retired by an admin while this device was offline. Also sent BEFORE `room_list`.
-3. `room_list` -- rooms the user is currently a member of (nanoid IDs + display names; the `room` field in all subsequent messages carries the nanoid ID, not the display name)
+3. `room_list` -- active, non-retired rooms the user is currently a member of (nanoid IDs + display names + topics + full member user IDs; the `room` field in all subsequent messages carries the nanoid ID, not the display name)
 4. `deleted_groups` -- group DMs the user has `/delete`d on another device; catchup for offline devices. Sent BEFORE `group_list`.
 5. `group_list` -- group DMs the user is currently a member of
 6. `dm_list` -- 1:1 DMs (includes per-user `hidden_for_caller` visibility + `left_at_for_caller` history cutoff for silent multi-device `/delete` propagation)
@@ -859,7 +859,7 @@ Three separate list messages are delivered during the handshake, one per context
 ```json
 // Server -> Client (rooms the user is a member of)
 {"type":"room_list","rooms":[
-  {"id":"room_V1StGXR8_Z5jdHi6B","name":"general","topic":"General chat","members":12}
+  {"id":"room_V1StGXR8_Z5jdHi6B","name":"general","topic":"General chat","members":["usr_alice","usr_bob","usr_carol"]}
 ]}
 
 // Server -> Client (group DMs the user is a member of — Phase 14 adds admins field)
@@ -957,7 +957,7 @@ The existing "blind relay" framing (see Encryption section above) is precise abo
 - Reactions are encrypted uniformly across rooms / groups / DMs. The server sees only the routing envelope (who reacted to what message when), not the emoji.
 - Profile data is intentionally public metadata — this is a deliberate trade-off for display/rendering, not a gap.
 
-**Room member query (lazy):**
+**Room member query (explicit refresh / recovery):**
 
 ```json
 // Client -> Server (request room member list — must be a member of the room)
@@ -967,7 +967,7 @@ The existing "blind relay" framing (see Encryption section above) is precise abo
 {"type":"room_members_list","room":"room_V1StGXR8_Z5jdHi6B","members":["usr_abc","usr_def","usr_ghi"]}
 ```
 
-`room_members` is a lazy query — clients send it when they need the full member list for a room (e.g., when displaying room details), not on every room switch. The server rejects non-members with `unknown_room` (byte-identical to the response for a room that doesn't exist). Retired users are excluded from the response. Group DM and 1:1 DM members are known client-side from `group_list` / `dm_list` and don't need this request.
+Modern clients should use the full member ID snapshot in `room_list` for normal room info/member rendering. `room_members` remains an explicit refresh / recovery query, not the normal panel-open path and not something to send on every room switch. The server rejects non-members with `unknown_room` (byte-identical to the response for a room that doesn't exist). Retired users are excluded from the response. Group DM and 1:1 DM members are known client-side from `group_list` / `dm_list` and don't need this request.
 
 ### Room `/leave` and `/delete`
 
@@ -1022,7 +1022,7 @@ Retiring a room:
 {"type":"deleted_rooms","rooms":["room_V1StGXR8_Z5jdHi6B"]}
 ```
 
-Clients should treat retired rooms as read-only — disable message input and surface the retired state to the user. Only `/delete` remains as an exit path. The `retired_rooms` and `deleted_rooms` lists are delivered during the handshake **before** `room_list`, so clients can filter out retired/deleted rooms from the active set before rendering.
+Clients should treat retired rooms as read-only — disable message input and surface the retired state to the user. Only `/delete` remains as an exit path. The `retired_rooms` and `deleted_rooms` lists are delivered during the handshake **before** `room_list`, so clients can apply lifecycle state before rendering the active non-retired room snapshot.
 
 ### File Transfer
 
@@ -1775,7 +1775,7 @@ Things every client builder hits at least once:
 
 5. **Touching local state before the server echo.** When the user runs `/leave` or `/delete`, do NOT update the local DB or UI until the server sends back `room_left`, `group_left`, `dm_left`, `room_deleted`, or `group_deleted`. If the server rejects the request (policy denied, rate limited), the user's local state would be corrupted. The echo is the confirmation.
 
-6. **Assuming `room_list` contains all rooms you've ever been in.** It only contains rooms where the user is a CURRENT member. Rooms the user has left are absent from the list. Rooms the user has `/delete`d are absent. Retired rooms the user is still a member of ARE included (the retirement flag is delivered separately via `retired_rooms` catchup). If your client needs to show "left" rooms, that state must come from local storage.
+6. **Assuming `room_list` contains all rooms you've ever been in.** It only contains active, non-retired rooms where the user is a CURRENT member. Rooms the user has left are absent from the list. Rooms the user has `/delete`d are absent. Retired rooms are also absent from the active list; members learn about them through `retired_rooms` catchup. If your client needs to show left or retired local-history rows, that state must come from local storage plus the lifecycle catchup messages.
 
 7. **Not storing `synced_to` from `sync_complete`.** This timestamp is your reconnect bookmark. Without it, every reconnect either gets no sync (empty `last_synced_at`) or the wrong sync window. Store it in your local DB immediately on receipt.
 
