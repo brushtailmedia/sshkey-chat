@@ -460,7 +460,12 @@ func (s *Server) sendDeletedGroups(c *Client) {
 // went out catch up via this message. Phase 12 parallel to
 // sendDeletedGroups.
 //
-// No-op if the user has no deletion records.
+// Filters out rooms the user is currently a member of (defensive against
+// a stale deleted_rooms row surviving a re-add — mirrors sendLeftRooms).
+// The re-add path clears the row via ClearRoomDeletion, so this is
+// belt-and-braces; see stale-deleted-room-readd-fix.md.
+//
+// No-op if the user has no applicable deletion records.
 func (s *Server) sendDeletedRooms(c *Client) {
 	if s.store == nil {
 		return
@@ -471,12 +476,23 @@ func (s *Server) sendDeletedRooms(c *Client) {
 			"user", c.UserID, "error", err)
 		return
 	}
-	if len(rooms) == 0 {
+	// Go-side filter: deleted_rooms lives in data.db and room_members in
+	// rooms.db, so the query can't JOIN across them. Skip any room the
+	// user has since rejoined — otherwise the client would purge a room
+	// it is currently a member of. Same shape as sendLeftRooms.
+	var filtered []string
+	for _, roomID := range rooms {
+		if s.store.IsRoomMemberByID(roomID, c.UserID) {
+			continue // user has been re-added, skip the stale purge
+		}
+		filtered = append(filtered, roomID)
+	}
+	if len(filtered) == 0 {
 		return
 	}
 	c.Encoder.Encode(protocol.DeletedRoomsList{
 		Type:  "deleted_rooms",
-		Rooms: rooms,
+		Rooms: filtered,
 	})
 }
 

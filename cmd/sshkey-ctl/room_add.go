@@ -61,10 +61,17 @@ func addRoomMemberAndQueueSideEffects(st *store.Store, userID string, room store
 		return roomAddQueueResult{}, nil
 	}
 
-	// 6. Re-adding is an affirmative undo of any prior leave. Best-effort:
-	//    warn but continue (the catchup query also filters defensively).
+	// 6. Re-adding is an affirmative undo of any prior leave OR delete.
+	//    Clear both per-user sidecars so a stale row can't tell the user's
+	//    devices to mark-as-left or purge a room they've just rejoined.
+	//    Best-effort: warn but continue (the catchup send paths also filter
+	//    out current members defensively). See
+	//    stale-deleted-room-readd-fix.md.
 	if err := st.DeleteUserLeftRoomRows(userID, room.ID); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to clear prior leave history for %s in %s: %v\n", userID, room.DisplayName, err)
+	}
+	if err := st.ClearRoomDeletion(userID, room.ID); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to clear prior delete record for %s in %s: %v\n", userID, room.DisplayName, err)
 	}
 
 	// 7. Enqueue live side effects for the running server.

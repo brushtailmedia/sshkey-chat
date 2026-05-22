@@ -221,3 +221,36 @@ func TestAddRoomMemberAndQueueSideEffects_AlreadyQueuedDefensiveBranch(t *testin
 		t.Errorf("the pre-existing row's initiated_by should win, got %q", pending[0].InitiatedBy)
 	}
 }
+
+// Re-adding a previously-deleted user clears the stale deleted_rooms sidecar,
+// so the user's devices won't purge a room they've just rejoined. The clear
+// only fires on a genuine insert (the re-add path), mirroring the existing
+// DeleteUserLeftRoomRows cleanup. See stale-deleted-room-readd-fix.md.
+func TestAddRoomMemberAndQueueSideEffects_ClearsPriorDeletedRoom(t *testing.T) {
+	st := openHelperStore(t)
+	room := helperRoom(t, st, "general")
+
+	// Alice previously /delete'd this room: a deleted_rooms row exists and
+	// she is not currently a member.
+	if err := st.RecordRoomDeletion("usr_alice", room.ID); err != nil {
+		t.Fatalf("RecordRoomDeletion: %v", err)
+	}
+	if ids, _ := st.GetDeletedRoomsForUser("usr_alice"); len(ids) != 1 {
+		t.Fatalf("precondition: want 1 deleted-room row, got %v", ids)
+	}
+
+	// Operator re-adds her — a genuine insert, so step 6 cleanup runs.
+	result, err := addRoomMemberAndQueueSideEffects(st, "usr_alice", room, "os:1000")
+	if err != nil {
+		t.Fatalf("helper: %v", err)
+	}
+	if !result.Inserted {
+		t.Fatalf("want Inserted:true (fresh re-add), got %+v", result)
+	}
+
+	// The stale deleted_rooms row must be gone — otherwise sendDeletedRooms
+	// would tell her devices to purge the room she just rejoined.
+	if ids, _ := st.GetDeletedRoomsForUser("usr_alice"); len(ids) != 0 {
+		t.Errorf("re-add must clear the prior deleted_rooms row, still have %v", ids)
+	}
+}
