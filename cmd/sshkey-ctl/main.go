@@ -394,15 +394,25 @@ func cmdApprove(configDir, dataDir string, args []string) error {
 				fmt.Fprintf(os.Stderr, "Warning: room %q does not exist in rooms.db\n", r)
 				continue
 			}
-			st.AddRoomMember(roomRecord.ID, username, 0)
+			// Use the shared helper so the new user gets live join/epoch
+			// side effects (not just a silent direct insert). Warn-and-
+			// continue — approval has already committed the user row.
+			result, err := addRoomMemberAndQueueSideEffects(st, username, *roomRecord, fmt.Sprintf("os:%d", os.Getuid()))
+			if result.Inserted && err != nil && !result.AlreadyQueued {
+				fmt.Fprintf(os.Stderr, "Warning: %s was added to %s, but live join/epoch side effects were not queued: %v\n", username, r, err)
+			}
+			if !result.Inserted && err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to add %s to %s: %v\n", username, r, err)
+			}
 		}
 	}
 
 	// Phase 16 default rooms: auto-add the new user to every flagged
-	// room. AddRoomMember is idempotent so this is a no-op for any
-	// rooms the operator already passed via --rooms (rare but
-	// possible). The number added is reported in the success output
-	// so operators can verify the auto-join fired.
+	// room through the same helper used above. Any room the operator
+	// already passed via --rooms is a no-op because the helper sees the
+	// existing membership and does not queue duplicate side effects.
+	// The number added is reported in the success output so operators
+	// can verify the auto-join fired.
 	defaultRoomsAdded := addUserToDefaultRooms(st, username)
 
 	// Clear this key from pending state now that it is approved.
@@ -1069,33 +1079,24 @@ func cmdAddToRoom(configDir, dataDir string, args []string) error {
 		return fmt.Errorf("room %q does not exist", room)
 	}
 
-	// Check not already a member
-	if st.IsRoomMemberByID(roomRecord.ID, user) {
+	// Membership insert + leave-history cleanup + live side-effect queue, now
+	// race-proof and centralized in the shared helper (which is also the
+	// server-authoritative retired-room/retired-user gate inherited by every
+	// CLI add path). The membership insert result — not a pre-check — is the
+	// proof a membership is new, so a concurrent duplicate add can't fire a
+	// double join broadcast or extra epoch rotation.
+	result, err := addRoomMemberAndQueueSideEffects(st, user, *roomRecord, fmt.Sprintf("os:%d", os.Getuid()))
+	if !result.Inserted && err != nil {
+		// Retired-room rejection or a real insert error.
+		return err
+	}
+	if !result.Inserted {
+		// Direct-command UX: existing membership is an explicit error here
+		// (batch paths treat it as a silent no-op).
 		return fmt.Errorf("user %q is already in room %q", user, room)
 	}
-
-	if err := st.AddRoomMember(roomRecord.ID, user, 0); err != nil {
-		return fmt.Errorf("add member: %w", err)
-	}
-
-	// Phase 20: clear any prior leave-history rows for this (user, room).
-	// Rejoining is the affirmative undo of a prior leave — without this,
-	// stale rows would re-surface on the user's next catchup handshake.
-	// Best-effort: a cleanup failure is also defended against at the
-	// catchup-query level (GetUserLeftRoomsCatchup filters against
-	// room_members via the caller).
-	if err := st.DeleteUserLeftRoomRows(user, roomRecord.ID); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to clear prior leave history for %s in %s: %v\n", user, room, err)
-	}
-
-	// Enqueue live side effects for the running server: room_event join
-	// broadcast + epoch rotation trigger for active rooms. This closes
-	// the active-room join gap where a newly added member can be missing
-	// the current epoch key and hit invalid_epoch until some future
-	// rotation.
-	initiatedBy := fmt.Sprintf("os:%d", os.Getuid())
-	if err := st.RecordPendingAddToRoom(user, roomRecord.ID, initiatedBy); err != nil {
-		return fmt.Errorf("add-to-room: member added in rooms.db but failed to enqueue live join/epoch side effects (restart server or re-run add-to-room after removing user): %w", err)
+	if err != nil && !result.AlreadyQueued {
+		return fmt.Errorf("add-to-room: member added in rooms.db but failed to enqueue live join/epoch side effects; the user will catch up on reconnect via room_list, but forcing live side effects requires removing and re-adding the user: %w", err)
 	}
 
 	fmt.Printf("Added %s (%s) to room %q.\n", u.DisplayName, user, room)

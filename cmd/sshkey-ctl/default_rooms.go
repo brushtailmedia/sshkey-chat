@@ -23,14 +23,11 @@ package main
 // they're connecting fresh and receive their full room_list during
 // the handshake).
 //
-// Backfill broadcast story (worth flagging): existing connected
-// users who are added as members during a set-default-room call do
-// NOT receive a live broadcast about the new room. Their TUI picks
-// the new room up on next reconnect via the standard room_list
-// refresh. This matches the existing behavior of `add-to-room`
-// (deferred as "optional polish" in the Phase 16 plan). A future
-// polish phase can add a `room_added` protocol event that benefits
-// both add-to-room and set-default-room backfills simultaneously.
+// Backfill broadcast story: existing connected users added during a
+// set-default-room call now get live side effects through the shared
+// pending_add_to_room queue. Existing room members see the join broadcast
+// and epoch rotation, and newly-backfilled connected users receive the
+// live-only room_added_to event within the add-to-room poll interval.
 
 import (
 	"fmt"
@@ -72,37 +69,41 @@ func cmdSetDefaultRoom(dataDir string, args []string) error {
 		return fmt.Errorf("set is_default: %w", err)
 	}
 
-	// Backfill: walk every active (non-retired) user and add them to
-	// the room. AddRoomMember is idempotent (INSERT OR IGNORE) so
-	// users already in the room are no-ops. We don't bother computing
-	// the diff up front — INSERT OR IGNORE is cheaper than two
-	// queries per user.
+	// Backfill: walk every active (non-retired) user and add them through
+	// the shared helper. The helper uses RowsAffected() as the source of
+	// truth for new membership, so already-members are no-ops and only
+	// genuine inserts enqueue live side effects.
 	allUsers := st.GetAllUsersIncludingRetired()
 	addedCount := 0
 	skippedRetired := 0
+	initiatedBy := fmt.Sprintf("os:%d", os.Getuid())
 	for _, u := range allUsers {
 		if u.Retired {
 			skippedRetired++
 			continue
 		}
-		// Pre-check membership to count "already in room" vs "newly
-		// added" accurately for the operator output. Without this
-		// check, INSERT OR IGNORE doesn't tell us which case fired.
-		alreadyMember := st.IsRoomMemberByID(room.ID, u.ID)
-		if alreadyMember {
-			continue
+		// The shared helper is the source of truth for new-vs-existing
+		// membership (via RowsAffected), so no separate IsRoomMemberByID
+		// pre-check is needed: count only genuinely-new inserts; existing
+		// members are a silent no-op. The helper also queues the live
+		// join/epoch side effects that the old direct-insert path skipped.
+		result, err := addRoomMemberAndQueueSideEffects(st, u.ID, *room, initiatedBy)
+		if result.Inserted {
+			addedCount++
 		}
-		if err := st.AddRoomMember(room.ID, u.ID, 0); err != nil {
+		if result.Inserted && err != nil && !result.AlreadyQueued {
+			fmt.Fprintf(os.Stderr, "Warning: %s was added to %s, but live join/epoch side effects were not queued: %v\n", u.ID, roomName, err)
+		}
+		if !result.Inserted && err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to add %s to %s: %v\n", u.ID, roomName, err)
-			continue
 		}
-		addedCount++
 	}
 
 	fmt.Printf("Flagged %q as a default room.\n", roomName)
 	fmt.Printf("Backfill: added %d active user(s) as members (skipped %d retired).\n", addedCount, skippedRetired)
 	if addedCount > 0 {
-		fmt.Println("Note: connected users will see the new room in their sidebar on next reconnect.")
+		fmt.Println("Note: existing room members will see join broadcasts within ~5 seconds.")
+		fmt.Println("Newly-backfilled users who are connected will see the room in their sidebar within ~5 seconds.")
 	}
 	fmt.Println("New users approved after this point will auto-join.")
 	return nil
@@ -165,8 +166,8 @@ func cmdListDefaultRooms(dataDir string) error {
 
 // addUserToDefaultRooms is the auto-join hook called from cmdApprove
 // right after a new user row is inserted. Walks every flagged
-// non-retired room and adds the user as a member via AddRoomMember
-// (idempotent).
+// non-retired room and adds the user through the shared room-add helper
+// so default-room joins queue the same live side effects as add-to-room.
 //
 // Errors are logged to stderr but don't fail the caller — the user
 // row is already committed and the operator can manually re-run
@@ -180,12 +181,18 @@ func addUserToDefaultRooms(st *store.Store, userID string) int {
 		return 0
 	}
 	count := 0
+	initiatedBy := fmt.Sprintf("os:%d", os.Getuid())
 	for _, r := range defaults {
-		if err := st.AddRoomMember(r.ID, userID, 0); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to auto-add %s to default room %s: %v\n", userID, r.DisplayName, err)
-			continue
+		result, err := addRoomMemberAndQueueSideEffects(st, userID, r, initiatedBy)
+		if result.Inserted {
+			count++
 		}
-		count++
+		if result.Inserted && err != nil && !result.AlreadyQueued {
+			fmt.Fprintf(os.Stderr, "Warning: %s was added to default room %s, but live join/epoch side effects were not queued: %v\n", userID, r.DisplayName, err)
+		}
+		if !result.Inserted && err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to auto-add %s to default room %s: %v\n", userID, r.DisplayName, err)
+		}
 	}
 	return count
 }

@@ -576,6 +576,21 @@ func (s *Store) initDataDB() error {
 			queued_at     INTEGER NOT NULL
 		);
 
+		-- V3: dedupe any pre-existing (user_id, room_id) rows (keep the
+		-- newest) BEFORE creating the unique index, so the index can be
+		-- created on an already-populated table from an older build.
+		-- No-op on a clean/fresh table. The index then makes a duplicate
+		-- enqueue a benign ErrAlreadyQueued (see RecordPendingAddToRoom),
+		-- which the CLI helper maps to AlreadyQueued:true.
+		DELETE FROM pending_add_to_room
+		WHERE rowid NOT IN (
+			SELECT MAX(rowid) FROM pending_add_to_room
+			GROUP BY user_id, room_id
+		);
+
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_add_to_room_user_room
+			ON pending_add_to_room(user_id, room_id);
+
 		-- pending_remove_from_room is the queue for sshkey-ctl
 		-- remove-from-room. Phase 20 (bundled with the leave-catchup
 		-- restructure): when an admin runs the CLI, the CLI inserts

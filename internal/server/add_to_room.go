@@ -58,6 +58,26 @@ func (s *Server) processPendingAddToRoom() {
 			continue
 		}
 
+		// Stale-row guards (defense-in-depth, server-authoritative). A queued
+		// row can outlive its preconditions in the ~5s between enqueue and
+		// dequeue: the room may have been retired/deleted, or the user
+		// retired. Never broadcast a join, rotate, or notify for those —
+		// retirement is read-only, and a retired user must not be surfaced as
+		// a live room member. Both are in addition to the IsRoomMemberByID
+		// skip above.
+		room, err := s.store.GetRoomByID(p.RoomID)
+		if err != nil || room == nil || room.Retired {
+			s.logger.Warn("queued add-to-room references a missing or retired room — skipping side effects",
+				"user", p.UserID, "room", p.RoomID)
+			continue
+		}
+		u := s.store.GetUserByID(p.UserID)
+		if u == nil || u.Retired {
+			s.logger.Warn("queued add-to-room references a missing or retired user — skipping side effects",
+				"user", p.UserID, "room", p.RoomID)
+			continue
+		}
+
 		if s.audit != nil {
 			s.audit.Log(p.InitiatedBy, "add-to-room",
 				"user="+p.UserID+" room="+p.RoomID)
@@ -70,7 +90,32 @@ func (s *Server) processPendingAddToRoom() {
 				"room", p.RoomID, "event", "join", "user", p.UserID, "error", err)
 		}
 
-		s.broadcastToRoom(p.RoomID, protocol.RoomEvent{
+		// Live "you were added" notification to EVERY connected session of the
+		// newly-added user. Live-only — never replayed in sync_batch; offline
+		// correctness comes from room_list on next connect. Member ordering is
+		// deterministic (GetRoomMemberIDsByRoomID orders by joined_at,user_id).
+		members := s.store.GetRoomMemberIDsByRoomID(p.RoomID)
+		addedTo := protocol.RoomAddedTo{
+			Type:    "room_added_to",
+			Room:    p.RoomID,
+			Name:    room.DisplayName,
+			Topic:   room.Topic,
+			Members: members,
+			AddedBy: p.InitiatedBy,
+		}
+		s.mu.RLock()
+		var targets []*Client
+		for _, client := range s.clients {
+			if client.UserID == p.UserID {
+				targets = append(targets, client)
+			}
+		}
+		s.mu.RUnlock()
+		s.fanOut("room_added_to", addedTo, targets)
+
+		// Join broadcast to the REST of the room — exclude the newly-added
+		// user, who gets room_added_to instead of a self-join system message.
+		s.broadcastToRoomExceptUser(p.RoomID, p.UserID, protocol.RoomEvent{
 			Type:  "room_event",
 			Room:  p.RoomID,
 			Event: "join",

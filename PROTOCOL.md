@@ -969,6 +969,23 @@ The existing "blind relay" framing (see Encryption section above) is precise abo
 
 Modern clients should use the full member ID snapshot in `room_list` for normal room info/member rendering. `room_members` remains an explicit refresh / recovery query, not the normal panel-open path and not something to send on every room switch. The server rejects non-members with `unknown_room` (byte-identical to the response for a room that doesn't exist). Retired users are excluded from the response. Group DM and 1:1 DM members are known client-side from `group_list` / `dm_list` and don't need this request.
 
+**Room add notification (`room_added_to`, live-only):**
+
+When an operator adds a user to a room via `sshkey-ctl` (`add-to-room`, `approve --rooms`, or default-room auto-join/backfill), the membership is written to `room_members` immediately and a `pending_add_to_room` row is queued. A background processor (5s poll) drains the queue and, for each genuinely-new membership of an active room with a non-retired user, emits:
+
+```json
+// Server -> Client (sent ONLY to the newly-added user's connected sessions)
+{"type":"room_added_to","room":"room_V1StGXR8_Z5jdHi6B","name":"general","topic":"General chat","members":["usr_alice","usr_bob"],"added_by":"os:501"}
+```
+
+- **Live-only.** `room_added_to` is never replayed in `sync_batch`. An offline (or older, handler-less) client catches up via `room_list` on the next connect — the same fallback path, so missing the live event only costs immediacy, never correctness.
+- **Recipient scope.** Sent to *every* connected session of the newly-added user (multi-device); to no one else. Existing room members instead receive the `room_event{join}` broadcast, from which the newly-added user is excluded so they don't see a self-join system message before `room_added_to` creates the room context.
+- **`added_by`.** The acting operator — a user ID, or `"os:<uid>"` for a CLI-initiated add (clients render the latter as "server admin").
+- **`members`.** The full member ID snapshot, deterministically ordered (`joined_at, user_id`), so the client persists a stable room-member cache entry without a follow-up `room_members` fetch.
+- **Server-authoritative gates (defense-in-depth).** The queue processor skips a row whose room is missing/retired or whose user is missing/retired at processing time (a user can be retired in the enqueue→dequeue window) — so a retired user is never surfaced as a live room member, and retired rooms stay read-only. The membership insert uses `RowsAffected()` as the source of truth, so a concurrent duplicate add fires side effects exactly once; a unique index on `pending_add_to_room(user_id, room_id)` is the belt-and-braces guard.
+
+`room_added_to` is the room analogue of `group_added_to`. Rooms have no per-room admin model, so `topic` replaces the group event's `admins` field.
+
 ### Room `/leave` and `/delete`
 
 Two client-initiated room-exit paths, both gated by server policy flags in `[server]`:

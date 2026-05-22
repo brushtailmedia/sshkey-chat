@@ -3375,6 +3375,35 @@ func (s *Server) broadcastToRoomExcept(roomID, excludeDevice string, msg any) {
 	s.fanOut("message", msg, targets)
 }
 
+// broadcastToRoomExceptUser sends to all room members except EVERY session of
+// the given user — the user-keyed variant of broadcastToRoomExcept (which
+// excludes a single device). Used by the add-to-room queue processor so the
+// just-added user does not receive a join system-message about themselves;
+// their "you were added" affordance is room_added_to. Same Phase 17 Step 3
+// lock-release discipline: RLock → collect targets → release → fanOut.
+func (s *Server) broadcastToRoomExceptUser(roomID, excludeUser string, msg any) {
+	if s.store == nil {
+		return
+	}
+	memberSet := make(map[string]bool)
+	for _, uid := range s.store.GetRoomMemberIDsByRoomID(roomID) {
+		memberSet[uid] = true
+	}
+
+	s.mu.RLock()
+	var targets []*Client
+	for _, client := range s.clients {
+		if client.UserID == excludeUser {
+			continue
+		}
+		if memberSet[client.UserID] {
+			targets = append(targets, client)
+		}
+	}
+	s.mu.RUnlock()
+	s.fanOut("message", msg, targets)
+}
+
 // broadcastToGroupExcept sends to all group DM members except the given device.
 // Phase 17 Step 3: same lock-release pattern as broadcastToRoom.
 func (s *Server) broadcastToGroupExcept(groupID, excludeDevice string, msg any) {

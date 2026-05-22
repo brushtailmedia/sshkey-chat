@@ -123,11 +123,38 @@ func (s *Store) RoomMembersEmpty() bool {
 // `sshkey-ctl set-default-room`.
 
 // AddRoomMember adds a user to a room. Idempotent (INSERT OR IGNORE).
+//
+// Production paths must prefer AddRoomMemberIfMissing, which returns whether
+// the row was actually inserted via RowsAffected() — needed to avoid fake
+// side effects (fake join broadcasts, double epoch rotations) for concurrent
+// duplicate adds. This primitive is retained as a fixture builder for tests
+// where the inserted/existing distinction doesn't matter.
 func (s *Store) AddRoomMember(roomID, userID string, firstEpoch int64) error {
 	_, err := s.roomsDB.Exec(
 		`INSERT OR IGNORE INTO room_members (room_id, user_id, first_epoch) VALUES (?, ?, ?)`,
 		roomID, userID, firstEpoch)
 	return err
+}
+
+// AddRoomMemberIfMissing adds a user to a room and reports whether THIS call
+// inserted the row (vs the membership already existing) via RowsAffected().
+// Room-add production paths use this so they can gate live side effects (join
+// broadcast, epoch rotation, room_added_to) on a genuinely new membership and
+// never fire them for a concurrent duplicate add. Same INSERT OR IGNORE +
+// PRIMARY KEY (room_id, user_id) mechanics as AddRoomMember; mirrors the
+// RowsAffected() shape SetRoomRetired uses.
+func (s *Store) AddRoomMemberIfMissing(roomID, userID string, firstEpoch int64) (inserted bool, err error) {
+	res, err := s.roomsDB.Exec(
+		`INSERT OR IGNORE INTO room_members (room_id, user_id, first_epoch) VALUES (?, ?, ?)`,
+		roomID, userID, firstEpoch)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
 }
 
 // GetRoomMemberJoinedAt returns the unix-seconds joined_at for the

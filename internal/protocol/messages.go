@@ -425,6 +425,22 @@ type GroupAddedTo struct {
 	AddedBy string   `json:"added_by"` // user ID of the admin who added the recipient
 }
 
+// RoomAddedTo is the room analogue of GroupAddedTo: a live, non-replayed
+// notification that an operator added the recipient to a room. Sent only to
+// the newly-added user's connected sessions by processPendingAddToRoom.
+// Offline correctness comes from room_list on the next connect — this event is
+// never replayed in sync_batch. Topic replaces GroupAddedTo's admin list
+// (rooms have no per-room admin model). AddedBy is the acting operator: a user
+// ID, or "os:<uid>" for a CLI-initiated add.
+type RoomAddedTo struct {
+	Type    string   `json:"type"` // "room_added_to"
+	Room    string   `json:"room"`
+	Name    string   `json:"name,omitempty"`
+	Topic   string   `json:"topic,omitempty"`
+	Members []string `json:"members"`
+	AddedBy string   `json:"added_by"` // user ID or "os:<uid>"
+}
+
 // Leave room
 //
 // Unlike groups, room leave is gated by the [server] allow_self_leave_rooms

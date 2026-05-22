@@ -126,8 +126,18 @@ func TestSetDefaultRoom_HappyPath_BackfillsExistingUsers(t *testing.T) {
 		"general": {Topic: "General"},
 	}, users)
 
-	if err := cmdSetDefaultRoom(dataDir, []string{"general"}); err != nil {
-		t.Fatalf("set-default-room: %v", err)
+	var setErr error
+	out := captureStdout(t, func() {
+		setErr = cmdSetDefaultRoom(dataDir, []string{"general"})
+	})
+	if setErr != nil {
+		t.Fatalf("set-default-room: %v", setErr)
+	}
+	if !strings.Contains(out, "within ~5 seconds") {
+		t.Fatalf("set-default-room output should describe live queue timing, got:\n%s", out)
+	}
+	if strings.Contains(out, "next reconnect") {
+		t.Fatalf("set-default-room output still contains stale reconnect-only wording:\n%s", out)
 	}
 
 	st := openTestStore(t, dataDir)
@@ -140,6 +150,25 @@ func TestSetDefaultRoom_HappyPath_BackfillsExistingUsers(t *testing.T) {
 	}
 	if !st.IsRoomMemberByID(id, "usr_bob") {
 		t.Error("bob should be backfilled into general")
+	}
+	pending, err := st.ConsumePendingAddToRooms()
+	if err != nil {
+		t.Fatalf("consume pending add-to-room: %v", err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("backfill should enqueue 2 live side-effect rows, got %d", len(pending))
+	}
+	seen := map[string]bool{}
+	for _, row := range pending {
+		if row.RoomID != id {
+			t.Errorf("pending row room = %q, want %q", row.RoomID, id)
+		}
+		seen[row.UserID] = true
+	}
+	for _, userID := range []string{"usr_alice", "usr_bob"} {
+		if !seen[userID] {
+			t.Errorf("missing pending add-to-room row for %s", userID)
+		}
 	}
 
 	// And the room should be flagged.
@@ -365,5 +394,89 @@ func TestApprove_AutoJoinsDefaultRooms(t *testing.T) {
 	}
 	if st.IsRoomMemberByID(engID, bobID) {
 		t.Error("bob should NOT be auto-joined to engineering (not flagged)")
+	}
+}
+
+func TestApproveRooms_DuplicateNamesAndDefaultOverlapQueueOnce(t *testing.T) {
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{
+		"general": {},
+		"support": {},
+	})
+
+	// Flag general before any users exist, so this setup step creates no queue
+	// rows. The approve path below is the only producer under test.
+	if err := cmdSetDefaultRoom(dataDir, []string{"general"}); err != nil {
+		t.Fatalf("set default: %v", err)
+	}
+	st0 := openTestStore(t, dataDir)
+	if pending, err := st0.ConsumePendingAddToRooms(); err != nil {
+		st0.Close()
+		t.Fatalf("consume setup queue: %v", err)
+	} else if len(pending) != 0 {
+		st0.Close()
+		t.Fatalf("setup default-room call should not queue rows with no users, got %d", len(pending))
+	}
+	st0.Close()
+
+	bobKey, _ := genTestKey(t, "Bob")
+	configDir := setupConfig(t, nil, nil)
+	var approveErr error
+	out := captureStdout(t, func() {
+		approveErr = cmdApprove(configDir, dataDir, []string{
+			"--key", bobKey,
+			"--name", "Bob",
+			"--rooms", "general,general,support",
+		})
+	})
+	if approveErr != nil {
+		t.Fatalf("approve: %v", approveErr)
+	}
+	if !strings.Contains(out, "Rooms:") || !strings.Contains(out, "general,general,support") {
+		t.Fatalf("approve output should echo operator-provided --rooms, got:\n%s", out)
+	}
+	if strings.Contains(out, "Default rooms auto-joined") {
+		t.Fatalf("overlapping default room should not be double-counted in output, got:\n%s", out)
+	}
+
+	st := openTestStore(t, dataDir)
+	defer st.Close()
+	var bobID string
+	for _, u := range st.GetAllUsersIncludingRetired() {
+		if u.DisplayName == "Bob" {
+			bobID = u.ID
+			break
+		}
+	}
+	if bobID == "" {
+		t.Fatal("bob not found after approve")
+	}
+
+	generalID := st.RoomDisplayNameToID("general")
+	supportID := st.RoomDisplayNameToID("support")
+	for name, roomID := range map[string]string{"general": generalID, "support": supportID} {
+		if !st.IsRoomMemberByID(roomID, bobID) {
+			t.Errorf("bob should be a member of %s", name)
+		}
+	}
+
+	pending, err := st.ConsumePendingAddToRooms()
+	if err != nil {
+		t.Fatalf("consume pending add-to-room: %v", err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("duplicate --rooms plus default overlap should enqueue exactly 2 rows, got %d", len(pending))
+	}
+	counts := map[string]int{}
+	for _, row := range pending {
+		if row.UserID != bobID {
+			t.Errorf("pending user = %q, want %q", row.UserID, bobID)
+		}
+		counts[row.RoomID]++
+	}
+	if counts[generalID] != 1 {
+		t.Errorf("general should be queued once despite duplicate/default overlap, got %d", counts[generalID])
+	}
+	if counts[supportID] != 1 {
+		t.Errorf("support should be queued once, got %d", counts[supportID])
 	}
 }
