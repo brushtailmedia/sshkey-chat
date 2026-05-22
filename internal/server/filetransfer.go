@@ -367,6 +367,20 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 				"You are not a member of this room", 0)
 			return
 		}
+		// Reject uploads to retired (archived, read-only) rooms. Ordered
+		// AFTER the membership gate so non-members still get the byte-
+		// identical ErrUnknownRoom (retired state is not a probing vector);
+		// only members see the informative message. No counter — mirrors
+		// the retired-room write rejections (handleSend, session.go:856):
+		// an authorized member's upload to a read-only room is invalid but
+		// not abusive, unlike the non-member branch above. Placed before
+		// the quota check and pendingUpload allocation so a doomed upload
+		// consumes no server-side state. See retired-room-upload-start-fix.md.
+		if s.store.IsRoomRetired(msg.Room) {
+			s.respondUploadError(c, msg.CorrID, msg.UploadID, protocol.ErrRoomRetired,
+				"This room has been archived and is read-only", 0)
+			return
+		}
 	case msg.Group != "":
 		isMember, err := s.store.IsGroupMember(msg.Group, c.UserID)
 		if err != nil || !isMember {
