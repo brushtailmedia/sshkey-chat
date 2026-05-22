@@ -12,6 +12,7 @@ package store
 // split.
 
 import (
+	"database/sql"
 	"time"
 )
 
@@ -71,6 +72,28 @@ func (s *Store) GetUserLeftRoomsCatchup(userID string) ([]UserLeftRoom, error) {
 		out = append(out, u)
 	}
 	return out, rows.Err()
+}
+
+// HasUserLeftRoom reports whether the user has a recorded leave for this
+// room. Used by handleDeleteRoom's relationship gate (delete-after-leave):
+// a previously-left member may purge their retained copy even though they
+// are no longer a current member. A missing row is (false, nil) — NOT an
+// error; real query errors propagate (the caller must fail closed, never
+// silently treat a DB blip as "never left"). See
+// delete-after-leave-authz-v3.md.
+func (s *Store) HasUserLeftRoom(userID, roomID string) (bool, error) {
+	var one int
+	err := s.dataDB.QueryRow(
+		`SELECT 1 FROM user_left_rooms WHERE user_id = ? AND room_id = ? LIMIT 1`,
+		userID, roomID,
+	).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // DeleteUserLeftRoomRows removes all user_left_rooms rows for the

@@ -33,6 +33,33 @@ func (s *Store) RecordRoomDeletion(userID, roomID string) error {
 	return err
 }
 
+// RecordRoomDeletionIfMissing records a deleted_rooms row and reports
+// whether THIS call inserted it (vs. a row already existing). It is the
+// atomic variant of RecordRoomDeletion: INSERT OR IGNORE + RowsAffected is
+// the source of truth for "this is a fresh delete", with no check-then-
+// insert race between two of the user's devices deleting at once.
+//
+// handleDeleteRoom uses inserted=false as its already-deleted guard
+// ("can't delete twice" — repeats are scripted and trip an abuse counter).
+// FK-free, mirroring RecordRoomDeletion, so a delete intent can be recorded
+// for a room the server has since fully cleaned up. The original deleted_at
+// is preserved on a duplicate (INSERT OR IGNORE). See
+// delete-after-leave-authz-v3.md.
+func (s *Store) RecordRoomDeletionIfMissing(userID, roomID string) (inserted bool, err error) {
+	res, err := s.dataDB.Exec(
+		`INSERT OR IGNORE INTO deleted_rooms (user_id, room_id, deleted_at) VALUES (?, ?, ?)`,
+		userID, roomID, time.Now().Unix(),
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // GetDeletedRoomsForUser returns every room ID this user has previously
 // /delete'd. Used by sendDeletedRooms during the connect handshake to
 // catch up offline devices that missed the live room_deleted echo.
@@ -68,10 +95,10 @@ func (s *Store) ClearRoomDeletionsForUser(userID string) error {
 }
 
 // ClearRoomDeletion removes a single (user, room) deletion record.
-// Reserved for a future "rejoin a room" path — if an admin re-adds a
-// previously-deleted user to a room, the deletion row should be cleared
-// so subsequent syncs don't tell the user to purge the room they were
-// just re-invited to. Mirrors ClearGroupDeletion; currently unused.
+// Called by the room re-add chokepoint after a successful membership insert:
+// re-joining is an affirmative undo of the prior local purge, so subsequent
+// syncs must not tell the user to purge the room they were just re-invited
+// to. Mirrors ClearGroupDeletion.
 func (s *Store) ClearRoomDeletion(userID, roomID string) error {
 	_, err := s.dataDB.Exec(
 		`DELETE FROM deleted_rooms WHERE user_id = ? AND room_id = ?`,
@@ -199,7 +226,8 @@ func (s *Store) ConsumePendingRoomRetirements() ([]PendingRoomRetirement, error)
 // live independently of room lifetime — they're the catchup signal for
 // offline devices, and they MUST persist across the cleanup of the
 // room they reference. The opportunistic age-based prune below is the
-// only thing that ever removes deleted_rooms rows automatically.
+// only automatic age-out path; the explicit re-add path clears the affected
+// user's row via ClearRoomDeletion.
 //
 // Mirrors DeleteGroupConversation from group_deletion.go.
 func (s *Store) DeleteRoomRecord(roomID string) error {

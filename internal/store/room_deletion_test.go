@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -178,6 +179,105 @@ func TestClearRoomDeletionsForUser_RemovesAll(t *testing.T) {
 	ids, _ = s.GetDeletedRoomsForUser("usr_bob")
 	if len(ids) != 1 {
 		t.Errorf("bob's deletions should be untouched, got %v", ids)
+	}
+}
+
+// TestRecordRoomDeletionIfMissing covers the atomic already-deleted guard:
+// first call inserts (true), repeat does not (false), it's scoped to
+// (user, room), and a duplicate does not overwrite deleted_at. See
+// delete-after-leave-authz-v3.md.
+func TestRecordRoomDeletionIfMissing(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	// First call inserts.
+	inserted, err := s.RecordRoomDeletionIfMissing("usr_alice", "room_x")
+	if err != nil || !inserted {
+		t.Fatalf("first call want (true,nil), got (%v,%v)", inserted, err)
+	}
+	if ids, _ := s.GetDeletedRoomsForUser("usr_alice"); len(ids) != 1 || ids[0] != "room_x" {
+		t.Errorf("want [room_x], got %v", ids)
+	}
+
+	// Repeat call does NOT insert (the already-deleted signal).
+	inserted, err = s.RecordRoomDeletionIfMissing("usr_alice", "room_x")
+	if err != nil || inserted {
+		t.Fatalf("repeat call want (false,nil), got (%v,%v)", inserted, err)
+	}
+
+	// Scoped: a different (user, room) inserts fresh.
+	if inserted, _ := s.RecordRoomDeletionIfMissing("usr_bob", "room_x"); !inserted {
+		t.Error("different user should insert fresh")
+	}
+
+	// deleted_at preserved on the ignored duplicate (INSERT OR IGNORE), no
+	// sleep needed — seed a known timestamp then confirm it survives.
+	s.dataDB.Exec(
+		`INSERT OR REPLACE INTO deleted_rooms (user_id, room_id, deleted_at) VALUES (?, ?, ?)`,
+		"usr_carol", "room_z", int64(1000),
+	)
+	if inserted, _ := s.RecordRoomDeletionIfMissing("usr_carol", "room_z"); inserted {
+		t.Error("existing row should not re-insert")
+	}
+	var at int64
+	s.dataDB.QueryRow(
+		`SELECT deleted_at FROM deleted_rooms WHERE user_id = ? AND room_id = ?`,
+		"usr_carol", "room_z",
+	).Scan(&at)
+	if at != 1000 {
+		t.Errorf("deleted_at should be preserved at 1000, got %d", at)
+	}
+}
+
+// TestRecordRoomDeletionIfMissing_ConcurrentSingleInsert verifies the atomic
+// guard under concurrency: N of the user's devices deleting the same room at
+// once must produce exactly ONE inserted=true. deleted_rooms has PRIMARY KEY
+// (user_id, room_id), so INSERT OR IGNORE is atomic — at most one row can be
+// inserted. This is what makes the handleDeleteRoom re-delete guard race-free
+// between devices.
+//
+// SQLITE_BUSY is tolerated: under heavy write contention some contenders may
+// fail to acquire the write lock (the store's busy-handling is a separate,
+// store-wide concern, and handleDeleteRoom fails closed on such an error).
+// The invariant under test is the atomicity — exactly one winner — plus that
+// the row exists afterward regardless of how many contenders busied out.
+func TestRecordRoomDeletionIfMissing_ConcurrentSingleInsert(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	const n = 8
+	var wg sync.WaitGroup
+	results := make([]bool, n)
+	errs := make([]error, n)
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			results[i], errs[i] = s.RecordRoomDeletionIfMissing("usr_alice", "room_concurrent")
+		}(i)
+	}
+	wg.Wait()
+
+	inserts := 0
+	for i := 0; i < n; i++ {
+		if errs[i] == nil && results[i] {
+			inserts++
+		}
+	}
+	if inserts != 1 {
+		t.Errorf("exactly one concurrent insert should win, got %d", inserts)
+	}
+	// The row must exist afterward regardless of contention.
+	if ids, _ := s.GetDeletedRoomsForUser("usr_alice"); len(ids) != 1 {
+		t.Errorf("the row must exist after concurrent attempts, got %v", ids)
 	}
 }
 

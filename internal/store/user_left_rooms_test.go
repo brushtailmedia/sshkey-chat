@@ -106,3 +106,45 @@ func TestPruneOldUserLeftRooms_RespectsRetention(t *testing.T) {
 		t.Errorf("want 0 rows pruned, got %d", deleted)
 	}
 }
+
+// TestHasUserLeftRoom covers the delete-after-leave relationship gate:
+// false for no history, true after a recorded leave, scoped to (user, room),
+// and stable across duplicate leave rows. See delete-after-leave-authz-v3.md.
+func TestHasUserLeftRoom(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+
+	// No history → (false, nil), not an error.
+	if left, err := st.HasUserLeftRoom("usr_alice", "rm_a"); err != nil || left {
+		t.Fatalf("no history want (false,nil), got (%v,%v)", left, err)
+	}
+
+	if _, err := st.RecordUserLeftRoom("usr_alice", "rm_a", "", "usr_alice"); err != nil {
+		t.Fatalf("record leave: %v", err)
+	}
+
+	// After a recorded leave → (true, nil).
+	if left, err := st.HasUserLeftRoom("usr_alice", "rm_a"); err != nil || !left {
+		t.Fatalf("after leave want (true,nil), got (%v,%v)", left, err)
+	}
+
+	// Scoped to (user, room).
+	if left, _ := st.HasUserLeftRoom("usr_bob", "rm_a"); left {
+		t.Error("should be scoped to user")
+	}
+	if left, _ := st.HasUserLeftRoom("usr_alice", "rm_b"); left {
+		t.Error("should be scoped to room")
+	}
+
+	// Duplicate leave rows don't change the boolean.
+	if _, err := st.RecordUserLeftRoom("usr_alice", "rm_a", "removed", "admin"); err != nil {
+		t.Fatalf("second leave: %v", err)
+	}
+	if left, err := st.HasUserLeftRoom("usr_alice", "rm_a"); err != nil || !left {
+		t.Fatalf("duplicate rows still (true,nil), got (%v,%v)", left, err)
+	}
+}

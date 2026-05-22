@@ -64,20 +64,41 @@ func TestHandleDeleteRoom_ActiveRoom_HappyPath(t *testing.T) {
 		t.Error("bob should be removed from general after delete")
 	}
 
-	// Bob should have received exactly one room_deleted echo
+	// v3: a current-member delete reuses performRoomLeave, so bob's own
+	// sessions now receive BOTH room_left (the leave) and room_deleted (the
+	// purge). Find each rather than asserting a bare count.
 	msgs := bob.messages()
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 reply, got %d", len(msgs))
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 replies (room_left + room_deleted), got %d", len(msgs))
 	}
-	var deletedEvt protocol.RoomDeleted
-	if err := json.Unmarshal(msgs[0], &deletedEvt); err != nil {
-		t.Fatalf("parse: %v", err)
+	var sawLeft, sawDeleted bool
+	for _, m := range msgs {
+		var probe struct {
+			Type string `json:"type"`
+			Room string `json:"room"`
+		}
+		json.Unmarshal(m, &probe)
+		switch probe.Type {
+		case "room_left":
+			sawLeft = true
+		case "room_deleted":
+			sawDeleted = true
+			if probe.Room != generalID {
+				t.Errorf("room_deleted room = %q, want %q", probe.Room, generalID)
+			}
+		}
 	}
-	if deletedEvt.Type != "room_deleted" {
-		t.Errorf("event type = %q, want room_deleted", deletedEvt.Type)
+	if !sawLeft {
+		t.Error("bob should receive room_left (delete reuses performRoomLeave)")
 	}
-	if deletedEvt.Room != generalID {
-		t.Errorf("event room = %q, want %q", deletedEvt.Room, generalID)
+	if !sawDeleted {
+		t.Error("bob should receive room_deleted")
+	}
+
+	// v3: delete now writes the user_left_rooms history row (via the reused
+	// leave path); the old hand-rolled inline leave did not.
+	if left, _ := s.store.HasUserLeftRoom("bob", generalID); !left {
+		t.Error("delete should record user_left_rooms (reuses performRoomLeave)")
 	}
 
 	// The deleted_rooms sidecar should have a row for this user+room
@@ -113,15 +134,23 @@ func TestHandleDeleteRoom_RetiredRoom_HappyPath(t *testing.T) {
 		t.Error("bob should be removed from general after delete")
 	}
 
-	// Bob should receive room_deleted echo
+	// v3: delete reuses performRoomLeave → bob gets room_left + room_deleted.
 	msgs := bob.messages()
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 reply, got %d", len(msgs))
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 replies (room_left + room_deleted), got %d", len(msgs))
 	}
-	var deletedEvt protocol.RoomDeleted
-	json.Unmarshal(msgs[0], &deletedEvt)
-	if deletedEvt.Type != "room_deleted" {
-		t.Errorf("event type = %q, want room_deleted", deletedEvt.Type)
+	var sawDeleted bool
+	for _, m := range msgs {
+		var probe struct {
+			Type string `json:"type"`
+		}
+		json.Unmarshal(m, &probe)
+		if probe.Type == "room_deleted" {
+			sawDeleted = true
+		}
+	}
+	if !sawDeleted {
+		t.Error("bob should receive room_deleted")
 	}
 
 	// Sidecar must be populated

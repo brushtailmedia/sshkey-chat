@@ -501,10 +501,17 @@ func (s *Server) sendDeletedRooms(c *Client) {
 // (Phase 20). Sent BEFORE sendRoomList so the client has reason
 // codes in hand before the sidebar is populated.
 //
-// Filters out rooms the user is currently a member of (defensive
-// against DeleteUserLeftRoomRows cleanup races from re-adds).
+// Filters out two cases:
+//   - rooms the user is currently a member of (defensive against
+//     DeleteUserLeftRoomRows cleanup races from re-adds);
+//   - rooms the user has ALSO /delete'd — delete supersedes leave, so a
+//     room in both sidecars emits only the purge (deleted_rooms), never a
+//     read-only left entry. The handshake sends deleted_rooms BEFORE
+//     left_rooms (see the connect order), so without this skip an offline
+//     reconnect would purge the room then resurrect it read-only. See
+//     delete-after-leave-authz-v3.md.
 //
-// No-op if the user has no leave history.
+// No-op if the user has no applicable leave history.
 func (s *Server) sendLeftRooms(c *Client) {
 	if s.store == nil {
 		return
@@ -515,6 +522,20 @@ func (s *Server) sendLeftRooms(c *Client) {
 			"user", c.UserID, "error", err)
 		return
 	}
+	// Rooms the user has also deleted — delete supersedes leave, so these
+	// are suppressed here (only deleted_rooms fires for them). Fail closed on
+	// lookup errors: if we cannot prove the purge sidecar is absent, emitting
+	// left_rooms could resurrect a room the user deleted.
+	deletedSet := make(map[string]struct{})
+	deleted, derr := s.store.GetDeletedRoomsForUser(c.UserID)
+	if derr != nil {
+		s.logger.Error("failed to get deleted rooms for left-rooms filter",
+			"user", c.UserID, "error", derr)
+		return
+	}
+	for _, r := range deleted {
+		deletedSet[r] = struct{}{}
+	}
 	// Go-side filter: the SQL catchup query can't JOIN across DBs
 	// (user_left_rooms in data.db, room_members in rooms.db), so
 	// we filter rejoined rooms here. Under normal operation
@@ -522,6 +543,9 @@ func (s *Server) sendLeftRooms(c *Client) {
 	// is defensive.
 	var entries []protocol.LeftRoomEntry
 	for _, h := range history {
+		if _, deleted := deletedSet[h.RoomID]; deleted {
+			continue // delete supersedes leave — only deleted_rooms fires
+		}
 		if s.store.IsRoomMemberByID(h.RoomID, c.UserID) {
 			continue // user has been re-added, skip
 		}
@@ -2626,12 +2650,22 @@ func (s *Server) performRoomLeave(roomID, userID, reason, initiatedBy string) {
 	s.mu.RUnlock()
 	s.fanOut("room_left", left, targets)
 
-	// Mark room for epoch rotation. Same path handleRetirement uses for
-	// users: the next sender will trigger epoch_trigger and the new key
-	// will be distributed to the now-smaller member set, excluding the
-	// leaver. Forward secrecy: leaver cannot decrypt messages sent after
-	// this point.
-	s.epochs.getOrCreate(roomID, s.epochs.currentEpochNum(roomID))
+	// Mark room for epoch rotation — active rooms only. The next sender
+	// triggers epoch_trigger and the new key is distributed to the
+	// now-smaller member set, excluding the leaver. Forward secrecy:
+	// leaver cannot decrypt messages sent after this point.
+	//
+	// Retired rooms are read-only (no future messages), so rotating their
+	// epoch is pointless work and the existing keys must stay intact for
+	// history decryption (Q4). Skipping here keeps every leave caller —
+	// self-leave, admin-remove, user-retirement, and delete (which now
+	// reuses this path) — consistent for retired rooms. Note this does NOT
+	// weaken forward secrecy for the user-retirement path: that removes a
+	// retired USER from ACTIVE rooms, where IsRoomRetired is false, so
+	// rotation still fires. See delete-after-leave-authz-v3.md.
+	if !s.store.IsRoomRetired(roomID) {
+		s.epochs.getOrCreate(roomID, s.epochs.currentEpochNum(roomID))
+	}
 
 	s.logger.Info("room leave",
 		"user", userID,
@@ -2668,9 +2702,11 @@ func (s *Server) performRoomLeave(roomID, userID, reason, initiatedBy string) {
 // cleanup. Offline devices catching up later see the deletion record
 // and purge correctly.
 //
-// The handler is idempotent: re-running on a room the user has already
-// left just records the deletion intent (INSERT OR IGNORE) and
-// re-broadcasts the echo. Both are safe.
+// The handler is intentionally NOT idempotent for re-delete: once the
+// deleted_rooms sidecar row already exists, a repeat request is treated like
+// a non-member context probe (byte-identical ErrUnknownRoom + abuse signal).
+// A legitimate re-add clears deleted_rooms first, so a future real delete can
+// insert fresh again.
 func (s *Server) handleDeleteRoom(c *Client, raw json.RawMessage) {
 	var msg protocol.DeleteRoom
 	if err := json.Unmarshal(raw, &msg); err != nil {
@@ -2684,105 +2720,112 @@ func (s *Server) handleDeleteRoom(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Membership check first. Privacy: the response for "room does not
-	// exist" and "you are not a member of an existing room" MUST be
-	// byte-identical so a probing client cannot use delete_room to
-	// discover whether a given room ID exists. Matches the convention
-	// in handleSend, handleLeaveRoom, and the other membership-gated
-	// handlers.
-	//
-	// The policy gate below uses ErrForbidden which DOES reveal
-	// membership (distinct from unknown-room), but the user already
-	// knows they're a member, so the disclosure is a no-op.
-	if !s.store.IsRoomMemberByID(msg.Room, c.UserID) {
+	// Relationship gate. A delete is allowed for a CURRENT member OR a
+	// previously-LEFT member (delete-after-leave — purge your retained
+	// copy). Anyone else (never-member / random ID) gets the byte-identical
+	// ErrUnknownRoom so delete_room can't probe room existence, plus the
+	// SignalNonMemberContext abuse signal. The never-member and the
+	// already-deleted (below) rejects are byte-identical to unknown-room.
+	currentMember := s.store.IsRoomMemberByID(msg.Room, c.UserID)
+	if !currentMember {
+		left, err := s.store.HasUserLeftRoom(c.UserID, msg.Room)
+		if err != nil {
+			// Fail closed: a real DB error must not be silently read as
+			// "never left" (would wrongly reject a legitimate purge) or
+			// "left" (would allow an unauthorized one).
+			s.logger.Error("delete_room: HasUserLeftRoom failed",
+				"user", c.UserID, "room", msg.Room, "error", err)
+			s.respondError(c, "", protocol.CodeInternal, "storage error", 0)
+			return
+		}
+		if !left {
+			s.rejectAndLog(c, counters.SignalNonMemberContext, "delete_room",
+				"not a member of room="+msg.Room, nil)
+			s.respondError(c, "", protocol.ErrUnknownRoom, "You are not a member of this room", 0)
+			return
+		}
+	}
+
+	// Policy gate — current members only (their delete performs a real
+	// leave, so it must honor the operator's leave policy). Branches on
+	// retired state; hot-reloadable. A previously-left caller skips this:
+	// there is no leave to authorize, and allow_self_leave_rooms=false must
+	// not block a pure local-copy purge.
+	isRetired := s.store.IsRoomRetired(msg.Room)
+	if currentMember {
+		s.cfg.RLock()
+		var allowed bool
+		if isRetired {
+			allowed = s.cfg.Server.Server.AllowSelfLeaveRetiredRooms
+		} else {
+			allowed = s.cfg.Server.Server.AllowSelfLeaveRooms
+		}
+		s.cfg.RUnlock()
+		if !allowed {
+			s.respondError(c, "", protocol.ErrForbidden, "Forbidden — please contact an admin to delete this room", 0)
+			return
+		}
+	}
+
+	// Record the purge intent FIRST, atomically. RecordRoomDeletionIfMissing
+	// is INSERT OR IGNORE + RowsAffected — the source of truth for "fresh
+	// delete", with no check-then-insert race between two of the user's
+	// devices. It must run before the leave so the deleted_rooms sidecar
+	// survives any last-member teardown.
+	inserted, err := s.store.RecordRoomDeletionIfMissing(c.UserID, msg.Room)
+	if err != nil {
+		// Fail closed: if the purge intent can't be durably recorded, do
+		// NOT run the leave. Otherwise current-member delete would remove
+		// membership while offline devices never get the deleted_rooms
+		// catchup — leaving only left_rooms to resurrect the room read-only.
+		s.logger.Error("failed to record room deletion",
+			"user", c.UserID, "room", msg.Room, "error", err)
+		s.respondError(c, "", protocol.CodeInternal, "storage error", 0)
+		return
+	}
+	if !inserted {
+		// Already deleted. After a delete the room is purged from every
+		// device's sidebar, so no legitimate client re-sends delete_room — a
+		// repeat is scripted-only. Byte-identical ErrUnknownRoom (same as the
+		// never-member reply above) + the abuse signal so repeats trip
+		// Phase-17b auto-revoke ("can't delete twice"). Correct only because
+		// the re-add path clears deleted_rooms (stale-deleted-room-readd-fix),
+		// so a rejoined member carries no stale row and inserts fresh here.
+		s.rejectAndLog(c, counters.SignalNonMemberContext, "delete_room",
+			"already-deleted room="+msg.Room, nil)
 		s.respondError(c, "", protocol.ErrUnknownRoom, "You are not a member of this room", 0)
 		return
 	}
 
-	// Policy gate — branches on retired state. Active rooms use
-	// allow_self_leave_rooms, retired rooms use
-	// allow_self_leave_retired_rooms. Hot-reloadable via cfg RLock.
-	isRetired := s.store.IsRoomRetired(msg.Room)
-	s.cfg.RLock()
-	var allowed bool
-	if isRetired {
-		allowed = s.cfg.Server.Server.AllowSelfLeaveRetiredRooms
-	} else {
-		allowed = s.cfg.Server.Server.AllowSelfLeaveRooms
-	}
-	s.cfg.RUnlock()
-	if !allowed {
-		s.respondError(c, "", protocol.ErrForbidden, "Forbidden — please contact an admin to delete this room", 0)
-		return
-	}
+	// Leave — current members only. Reuse the shared performRoomLeave so a
+	// delete writes the same user_left_rooms history, room_event{leave}
+	// audit row, "xyz left" broadcast to others, room_left echo to the
+	// leaver's own devices, and (active-room) epoch rotation as /leave. An
+	// already-left caller skips this — the leave already ran.
+	if currentMember {
+		s.performRoomLeave(msg.Room, c.UserID, "", c.UserID)
 
-	// 1. Record the deletion intent FIRST. This is the catchup signal
-	//    for the user's offline devices and must survive any subsequent
-	//    leave/cleanup. INSERT OR IGNORE makes it safe to re-run on a
-	//    previously-deleted room.
-	if err := s.store.RecordRoomDeletion(c.UserID, msg.Room); err != nil {
-		s.logger.Error("failed to record room deletion",
-			"user", c.UserID, "room", msg.Room, "error", err)
-		// Continue anyway — the deletion intent is best-effort. The
-		// live room_deleted echo will still tell connected devices to
-		// purge; only the offline-catchup path is degraded.
-	}
-
-	// 2. Run the leave logic. RemoveRoomMember is idempotent at the
-	//    store layer (no error for a user who's already gone).
-	if err := s.store.RemoveRoomMember(msg.Room, c.UserID); err != nil {
-		s.logger.Error("failed to remove room member during delete",
-			"user", c.UserID, "room", msg.Room, "error", err)
-	}
-
-	// Broadcast the leave to remaining members. Same shape as
-	// performRoomLeave's broadcast, but with an empty reason (self-
-	// initiated delete, not admin/retirement). broadcastToRoom reads
-	// the current member set AFTER the removal above, so the caller
-	// is automatically excluded.
-	s.broadcastToRoom(msg.Room, protocol.RoomEvent{
-		Type:   "room_event",
-		Room:   msg.Room,
-		Event:  "leave",
-		User:   c.UserID,
-		Reason: "",
-	})
-
-	// 3. Last-member cleanup. If we just removed the only remaining
-	//    member, run the full cleanup cascade: drop the rooms row,
-	//    room_members rows, epoch_keys rows, and unlink the per-room
-	//    DB file. The cascade deliberately does NOT touch deleted_rooms
-	//    (see DeleteRoomRecord in store/room_deletion.go), so the row
-	//    we wrote in step 1 survives.
-	if remaining := s.store.GetRoomMemberIDsByRoomID(msg.Room); len(remaining) == 0 {
-		// Phase 17 Step 4.f: cascade file_contexts + eager physical-file
-		// GC BEFORE the store teardown so the file_id lookup still works.
-		s.cleanupFilesForContext(store.FileContextRoom, msg.Room)
-		if err := s.store.DeleteRoomRecord(msg.Room); err != nil {
-			s.logger.Error("room cleanup failed",
-				"room", msg.Room, "error", err)
-		} else {
-			s.logger.Info("room cleaned up (last member /delete'd)",
-				"room", msg.Room, "user", c.UserID)
+		// Last-member cleanup — delete-specific (performRoomLeave leaves an
+		// empty room standing for admin-managed rooms). If that emptied the
+		// room, run the cascade: rooms row, room_members, epoch_keys, and the
+		// per-room DB file. The cascade does NOT touch deleted_rooms, so the
+		// intent recorded above survives.
+		if remaining := s.store.GetRoomMemberIDsByRoomID(msg.Room); len(remaining) == 0 {
+			s.cleanupFilesForContext(store.FileContextRoom, msg.Room)
+			if err := s.store.DeleteRoomRecord(msg.Room); err != nil {
+				s.logger.Error("room cleanup failed",
+					"room", msg.Room, "error", err)
+			} else {
+				s.logger.Info("room cleaned up (last member /delete'd)",
+					"room", msg.Room, "user", c.UserID)
+			}
 		}
-	} else if !isRetired {
-		// 4. Mark the room for epoch rotation. Only for active rooms —
-		//    retired rooms don't rotate (Q4). If this was the last
-		//    member, we skipped the cleanup branch anyway because the
-		//    room is now gone.
-		s.epochs.getOrCreate(msg.Room, s.epochs.currentEpochNum(msg.Room))
 	}
 
-	// 5. Echo room_deleted to ALL of the user's currently-connected
-	//    sessions. This is the canonical multi-device propagation path:
-	//    every device of this user that is online RIGHT NOW will
-	//    receive this and purge local state. Devices that are offline
-	//    pick up the deletion via deleted_rooms on their next
-	//    handshake.
-	//
-	//    Distinct from room_left: room_left is the leave echo (keeps
-	//    local history), room_deleted is the delete echo (purges
-	//    local history).
+	// Echo room_deleted to ALL of the user's currently-connected sessions —
+	// the multi-device purge. Offline devices catch up via deleted_rooms on
+	// next handshake. Distinct from room_left (keep history); room_deleted
+	// purges. Both the current-member and already-left paths reach here.
 	deleted := protocol.RoomDeleted{
 		Type: "room_deleted",
 		Room: msg.Room,
@@ -2802,6 +2845,7 @@ func (s *Server) handleDeleteRoom(c *Client, raw json.RawMessage) {
 		"user", c.UserID,
 		"room", msg.Room,
 		"retired", isRetired,
+		"was_member", currentMember,
 	)
 }
 

@@ -372,11 +372,11 @@ func (s *Store) initDataDB() error {
 		-- deleted_rooms records each user's intent to remove a room from
 		-- their view, independent of the room's actual lifetime. The row
 		-- exists from the moment the user runs /delete and persists until
-		-- either (a) the user is retired, or (b) the row is older than
-		-- roomDeletionRetentionSeconds and the opportunistic prune in
-		-- DeleteRoomRecord reclaims it. Used by sync to catch up offline
-		-- devices that missed the live room_deleted echo. Parallel to
-		-- deleted_groups for group DMs.
+		-- either (a) the user is re-added to that room, (b) the user is retired,
+		-- or (c) the row is older than roomDeletionRetentionSeconds and the
+		-- opportunistic prune in DeleteRoomRecord reclaims it. Used by sync to
+		-- catch up offline devices that missed the live room_deleted echo.
+		-- Parallel to deleted_groups for group DMs.
 		CREATE TABLE IF NOT EXISTS deleted_rooms (
 			user_id    TEXT NOT NULL,
 			room_id    TEXT NOT NULL,
