@@ -16,4 +16,3 @@ internal/server/idle_watchdog_test.go:189 | phase22 | intentional single tick wa
 internal/server/idle_watchdog_test.go:232 | phase22 | watchdog timeout boundary
 internal/server/send_queue_test.go:117 | phase22 | queue/writer goroutine interleave window
 internal/server/send_queue_test.go:347 | phase22 | queue/writer goroutine interleave window
-internal/store/room_deletion_test.go:59 | phase22 | fs timestamp granularity boundary in deletion test

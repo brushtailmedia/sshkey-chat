@@ -48,26 +48,25 @@ func TestRecordRoomDeletion_Idempotent(t *testing.T) {
 	if err := s.RecordRoomDeletion("usr_alice", "room_x"); err != nil {
 		t.Fatalf("first record: %v", err)
 	}
-	// Read the first deleted_at
-	var firstAt int64
-	s.dataDB.QueryRow(
-		`SELECT deleted_at FROM deleted_rooms WHERE user_id = ? AND room_id = ?`,
-		"usr_alice", "room_x",
-	).Scan(&firstAt)
-
-	// Sleep so a second INSERT with Unix-second precision would have
-	// a different timestamp if it actually overwrote.
-	time.Sleep(1100 * time.Millisecond)
+	const firstAt int64 = 1000
+	if _, err := s.dataDB.Exec(
+		`UPDATE deleted_rooms SET deleted_at = ? WHERE user_id = ? AND room_id = ?`,
+		firstAt, "usr_alice", "room_x",
+	); err != nil {
+		t.Fatalf("seed first deleted_at: %v", err)
+	}
 
 	if err := s.RecordRoomDeletion("usr_alice", "room_x"); err != nil {
 		t.Fatalf("second record: %v", err)
 	}
 
 	var secondAt int64
-	s.dataDB.QueryRow(
+	if err := s.dataDB.QueryRow(
 		`SELECT deleted_at FROM deleted_rooms WHERE user_id = ? AND room_id = ?`,
 		"usr_alice", "room_x",
-	).Scan(&secondAt)
+	).Scan(&secondAt); err != nil {
+		t.Fatalf("read second deleted_at: %v", err)
+	}
 
 	if firstAt != secondAt {
 		t.Errorf("deleted_at should be preserved on idempotent insert: first=%d second=%d", firstAt, secondAt)

@@ -62,6 +62,7 @@ unread-epoch-leak-fix.md
 open-server-admission.md
 open-server-admission-v2.md
 pending-keys-requested-username.md
+unknown-key-storm-hardening.md
 typing-relay-authz-hardening.md
 typing-dm-lookup-polish.md
 delete-after-leave-authz.md
@@ -70,6 +71,7 @@ delete-after-leave-authz-v3.md
 retired-room-upload-start-fix.md
 stale-deleted-room-readd-fix.md
 docs/security/*
+docs/planning/*
 
 # OS
 .DS_Store
