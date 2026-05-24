@@ -1,7 +1,7 @@
 // Package backup implements the Phase 19 server backup + restore
 // primitives. The Run entry point produces a single tar+gzip archive
 // containing every artefact the Phase 19 scope calls for (SQLite DBs
-// via Online Backup API, attachment blobs, audit + pending-keys logs,
+// via Online Backup API, attachment blobs, the audit log,
 // host key, server.toml).
 //
 // Callers: both the scheduled backup goroutine (scheduler.go in
@@ -9,7 +9,7 @@
 // `sshkey-ctl backup` command (ships in Phase 19 Step 4). Backup runs
 // safely while the server is live — SQLite's Online Backup API
 // handles concurrent writers via MVCC retries, attachment blobs are
-// immutable after upload_complete, and audit/pending-keys logs are
+// immutable after upload_complete, and the audit log is
 // append-only.
 //
 // Structure:
@@ -19,7 +19,6 @@
 //	    data.db, rooms.db, users.db     (Online Backup API snapshots)
 //	    room-*.db, group-*.db, dm-*.db  (Online Backup API snapshots)
 //	    files/<fileID>                  (plain file copy)
-//	    pending-keys.log                (plain file copy)
 //	    audit.log                       (plain file copy)
 //	  config/
 //	    host_key                        (plain file copy, mode 0600 preserved)
@@ -48,8 +47,7 @@ import (
 // the backup package's concern).
 type Options struct {
 	// DataDir is the server's data directory — source of SQLite DBs,
-	// attachment blobs under data/files/, the audit log, and the
-	// pending-keys.log file.
+	// attachment blobs under data/files/, and the audit log.
 	DataDir string
 
 	// ConfigDir is the server's config directory — source of host_key
@@ -90,7 +88,7 @@ type Result struct {
 	CoreDBs     int           // data.db, rooms.db, users.db — expected 0-3
 	ContextDBs  int           // room-*.db + group-*.db + dm-*.db
 	Attachments int           // files under data/files/
-	AuxFiles    int           // audit.log + pending-keys.log + host_key + server.toml
+	AuxFiles    int           // audit.log + host_key + server.toml
 }
 
 // Run produces a backup tarball per the package-level layout. On
@@ -244,13 +242,12 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	// Per Phase 19 "Tarball contents" block. Each entry has a source
 	// path, a tarball path, and whether absence is fatal.
 	type auxFile struct {
-		src       string
-		tarPath   string
-		required  bool // if true and missing → error
+		src      string
+		tarPath  string
+		required bool // if true and missing → error
 	}
 	aux := []auxFile{
 		{filepath.Join(opts.DataDir, "audit.log"), "data/audit.log", false},
-		{filepath.Join(dataRoot, "pending-keys.log"), "data/pending-keys.log", false},
 	}
 	if opts.IncludeConfigFiles {
 		aux = append(aux,

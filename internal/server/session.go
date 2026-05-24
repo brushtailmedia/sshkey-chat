@@ -3505,17 +3505,20 @@ func (s *Server) handleListPendingKeys(c *Client) {
 
 	var keys []protocol.PendingKeyEntry
 	if s.store != nil {
-		rows, err := s.store.DataDB().Query(
-			`SELECT fingerprint, attempts, first_seen, last_seen
-			 FROM pending_keys ORDER BY last_seen DESC`)
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var k protocol.PendingKeyEntry
-				if rows.Scan(&k.Fingerprint, &k.Attempts, &k.FirstSeen, &k.LastSeen) == nil {
-					keys = append(keys, k)
-				}
-			}
+		pending, err := s.store.ListPendingKeys()
+		if err != nil {
+			s.logger.Error("list pending keys", "error", err)
+		}
+		for _, p := range pending {
+			// Protocol parity for pubkey/remote/requested_username is deferred
+			// (see pending-keys-requested-username.md); map down to the fields
+			// the TUI currently consumes so there is one DB SELECT shape.
+			keys = append(keys, protocol.PendingKeyEntry{
+				Fingerprint: p.Fingerprint,
+				Attempts:    p.Attempts,
+				FirstSeen:   p.FirstSeen,
+				LastSeen:    p.LastSeen,
+			})
 		}
 	}
 

@@ -24,11 +24,10 @@ Inspired by [shazow/ssh-chat](https://github.com/shazow/ssh-chat). Credit is in 
 Server machine
 ├── sshd (:22)              -- regular OS-level SSH (admin access, server management)
 ├── sshkey-server (:2222)  -- chat app, own SSH listener, own key store
-├── sshkey-ctl            -- local admin tool, reads/writes config + pending log
+├── sshkey-ctl            -- local admin tool, reads/writes config + pending keys
 ├── /etc/sshkey-chat/
 │   └── server.toml         -- server config (port, retention settings)
 └── /var/sshkey-chat/
-    ├── pending-keys.log    -- unrecognised keys that tried to connect
     ├── audit.log           -- append-only log of admin actions
     ├── host_key            -- server SSH host key (generated on first run if missing)
     ├── sshkey-server.pid   -- lockfile (PID + start time; cleaned on graceful shutdown)
@@ -85,7 +84,7 @@ SSH connect (:2222)
     │       └── disconnect
     │
     └── Key not recognised
-        ├── Log to pending-keys.log (fingerprint, timestamp, attempt count)
+        ├── Record in pending_keys (fingerprint, remote, attempts, first/last seen)
         ├── Notify connected admin clients: {"type":"admin_notify","event":"pending_key",...}
         ├── Server sends: "Your key has been received. Access is awaiting approval -- an admin has been notified. Please try again soon."
         └── disconnect
@@ -1175,7 +1174,7 @@ Server watches `server.toml` for changes (fsnotify) or reloads it on SIGHUP.
 
 ### sshkey-ctl
 
-Local admin tool that runs on the server. Reads/writes config files and pending key log. Not a protocol client -- no network, no auth.
+Local admin tool that runs on the server. Reads/writes config files and the pending_keys table. Not a protocol client -- no network, no auth.
 
 ```bash
 # View pending key requests
@@ -1184,7 +1183,7 @@ sshkey-ctl pending
 # Approve a user and assign rooms
 sshkey-ctl approve --fingerprint xx:yy:zz --name carol --rooms general,engineering
 
-# Clear pending keys (DB + log; allows retry)
+# Clear pending keys (allows retry)
 sshkey-ctl purge-pending --fp SHA256:abc...
 sshkey-ctl purge-pending --all --yes
 

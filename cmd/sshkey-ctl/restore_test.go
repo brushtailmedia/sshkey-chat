@@ -97,12 +97,9 @@ enabled = false
 		t.Fatalf("write blob2: %v", err)
 	}
 
-	// audit.log + pending-keys.log
+	// audit.log
 	if err := os.WriteFile(filepath.Join(dataDir, "audit.log"), []byte("audit line 1\naudit line 2\n"), 0644); err != nil {
 		t.Fatalf("write audit.log: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dataRoot, "pending-keys.log"), []byte("pending key blob\n"), 0644); err != nil {
-		t.Fatalf("write pending-keys.log: %v", err)
 	}
 
 	return configDir, dataDir
@@ -555,19 +552,19 @@ func TestCmdListBackups_RejectsArgs(t *testing.T) {
 
 func TestFormatAge(t *testing.T) {
 	cases := map[time.Duration]string{
-		0:                            "just now",
-		15 * time.Second:             "just now",
-		29 * time.Second:             "just now",
-		30 * time.Second:             "30s",
-		59 * time.Second:             "59s",
-		60 * time.Second:             "1m",
-		59 * time.Minute:             "59m",
-		60 * time.Minute:             "1h",
-		23 * time.Hour:               "23h",
-		24 * time.Hour:               "1d",
-		47 * time.Hour:               "1d",
-		48 * time.Hour:               "2d",
-		30 * 24 * time.Hour:          "30d",
+		0:                   "just now",
+		15 * time.Second:    "just now",
+		29 * time.Second:    "just now",
+		30 * time.Second:    "30s",
+		59 * time.Second:    "59s",
+		60 * time.Second:    "1m",
+		59 * time.Minute:    "59m",
+		60 * time.Minute:    "1h",
+		23 * time.Hour:      "23h",
+		24 * time.Hour:      "1d",
+		47 * time.Hour:      "1d",
+		48 * time.Hour:      "2d",
+		30 * 24 * time.Hour: "30d",
 	}
 	for d, want := range cases {
 		if got := formatAge(d); got != want {

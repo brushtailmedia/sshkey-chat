@@ -35,7 +35,6 @@ vendor/
 *.db-wal
 *.db-shm
 host_key
-pending-keys.log
 audit.log
 server.log
 server.log.*

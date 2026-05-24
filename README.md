@@ -98,7 +98,7 @@ sshkey-term --host localhost --key ~/.ssh/alice_ed25519
 {"level":"WARN","msg":"users.db is empty — incoming SSH connections will be rejected and their fingerprints logged to pending_keys; admit users with `sshkey-ctl approve --key \"ssh-ed25519 AAAA... name\"` (and optionally `sshkey-ctl promote <user_id>` to grant in-app admin)","data_dir":"/var/sshkey-chat"}
 ```
 
-SSH connections will be rejected with every key landing in `pending-keys.log` with no admin available to triage. Run step 5 to unblock.
+SSH connections will be rejected with every key recorded in the pending-keys queue (view it with `sshkey-ctl pending`) with no admin available to triage. Run step 5 to unblock.
 
 Manage the server:
 
@@ -109,7 +109,7 @@ docker exec sshkey-chat sshkey-ctl pending
 # Approve a user and add them to rooms
 docker exec sshkey-chat sshkey-ctl approve --key "ssh-ed25519 AAAA... Alice" --rooms general,support
 
-# Clear a single pending key (DB + log; user can retry on next connect)
+# Clear a single pending key (user can retry on next connect)
 docker exec sshkey-chat sshkey-ctl purge-pending --fp SHA256:abcdef...
 
 # Clear the entire pending queue (requires --yes to confirm)
@@ -288,7 +288,7 @@ sshkey-ctl pending                                             # view pending ke
 sshkey-ctl approve --key "ssh-ed25519 AAAA... name" --rooms general,support  # approve (name from key comment)
 sshkey-ctl approve --key "ssh-ed25519 AAAA..." --name NAME --rooms general,support  # approve (override name)
 sshkey-ctl approve --key "ssh-ed25519 AAAA... name" --rooms general --admin  # approve + set admin flag in one step
-sshkey-ctl purge-pending --fp SHA256:abc...                    # clear one pending key from DB + log (allows retry)
+sshkey-ctl purge-pending --fp SHA256:abc...                    # clear one pending key from the DB (allows retry)
 sshkey-ctl purge-pending --all --yes                           # clear ALL pending keys (--yes to skip confirmation)
 sshkey-ctl reject-pending --fp SHA256:abc... --reason "spam"   # clear AND block fingerprint (prevents retry)
 ```
@@ -588,7 +588,8 @@ CREATE TABLE pending_keys (
     fingerprint TEXT PRIMARY KEY, remote_addr TEXT,
     attempts INTEGER NOT NULL DEFAULT 1,
     first_seen TEXT NOT NULL DEFAULT (datetime('now')),
-    last_seen TEXT NOT NULL DEFAULT (datetime('now'))
+    last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    pubkey TEXT
 );
 CREATE TABLE profiles (
     user TEXT PRIMARY KEY, display_name TEXT, avatar_id TEXT, status_text TEXT

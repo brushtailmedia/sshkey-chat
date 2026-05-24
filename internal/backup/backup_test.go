@@ -68,15 +68,15 @@ func TestValidateLabel_Accepts(t *testing.T) {
 
 func TestValidateLabel_Rejects(t *testing.T) {
 	cases := map[string]string{
-		"has space":                  "space",
-		"has.dot":                    "dot",
-		"has/slash":                  "slash",
-		"../traversal":               "traversal",
-		strings.Repeat("a", 33):      "length 33",
-		"café":                        "unicode",
-		"emoji-🎉":                    "emoji",
-		"with\ttab":                  "tab",
-		"newline\nbad":               "newline",
+		"has space":             "space",
+		"has.dot":               "dot",
+		"has/slash":             "slash",
+		"../traversal":          "traversal",
+		strings.Repeat("a", 33): "length 33",
+		"café":                  "unicode",
+		"emoji-🎉":               "emoji",
+		"with\ttab":             "tab",
+		"newline\nbad":          "newline",
 	}
 	for label, desc := range cases {
 		t.Run(desc, func(t *testing.T) {
@@ -162,7 +162,7 @@ func mustWriteFile(t *testing.T, path string, content string, mode os.FileMode) 
 
 // (fx *fixture) seedAllArtefacts creates the full set of files Run
 // should pick up: 3 core DBs, 2 context DBs, 2 attachment blobs, and
-// all 4 aux files (audit.log, pending-keys.log, host_key, server.toml).
+// all 3 aux files (audit.log, host_key, server.toml).
 func (fx *fixture) seedAllArtefacts() {
 	t := fx.t
 	// Core DBs
@@ -177,7 +177,6 @@ func (fx *fixture) seedAllArtefacts() {
 	mustWriteFile(t, filepath.Join(fx.dataDir, "data", "files", "file_blob2"), "blob2 content", 0644)
 	// Aux files
 	mustWriteFile(t, filepath.Join(fx.dataDir, "audit.log"), "audit line 1\n", 0644)
-	mustWriteFile(t, filepath.Join(fx.dataDir, "data", "pending-keys.log"), "pending key 1\n", 0644)
 	mustWriteFile(t, filepath.Join(fx.configDir, "host_key"), "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----\n", 0600)
 	mustWriteFile(t, filepath.Join(fx.configDir, "server.toml"), "[server]\nport = 2222\n", 0644)
 }
@@ -246,8 +245,8 @@ func TestRun_HappyPath(t *testing.T) {
 	if res.Attachments != 2 {
 		t.Errorf("Attachments = %d, want 2", res.Attachments)
 	}
-	if res.AuxFiles != 4 {
-		t.Errorf("AuxFiles = %d (audit + pending + host_key + server.toml), want 4", res.AuxFiles)
+	if res.AuxFiles != 3 {
+		t.Errorf("AuxFiles = %d (audit + host_key + server.toml), want 3", res.AuxFiles)
 	}
 	if res.Bytes <= 0 {
 		t.Errorf("Bytes = %d, want > 0", res.Bytes)
@@ -265,7 +264,6 @@ func TestRun_HappyPath(t *testing.T) {
 		"data/files/file_blob1",
 		"data/files/file_blob2",
 		"data/audit.log",
-		"data/pending-keys.log",
 		"config/host_key",
 		"config/server.toml",
 	}
@@ -343,9 +341,9 @@ func TestRun_ExcludeConfigFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	// AuxFiles should now be just audit.log + pending-keys.log (no host_key, no server.toml)
-	if res.AuxFiles != 2 {
-		t.Errorf("AuxFiles = %d, want 2 (no config files)", res.AuxFiles)
+	// AuxFiles should now be just audit.log (no host_key, no server.toml)
+	if res.AuxFiles != 1 {
+		t.Errorf("AuxFiles = %d, want 1 (no config files)", res.AuxFiles)
 	}
 	got := readTarballEntries(t, res.Path)
 	for _, entry := range got {
@@ -422,9 +420,8 @@ func TestRun_MissingHostKeyIsFatal(t *testing.T) {
 func TestRun_MissingOptionalAuxFilesSkippedCleanly(t *testing.T) {
 	fx := newFixture(t)
 	fx.seedAllArtefacts()
-	// Remove both optional files — run should succeed.
+	// Remove the optional audit log — run should succeed.
 	os.Remove(filepath.Join(fx.dataDir, "audit.log"))
-	os.Remove(filepath.Join(fx.dataDir, "data", "pending-keys.log"))
 
 	opts := Options{
 		DataDir:            fx.dataDir,

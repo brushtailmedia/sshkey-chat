@@ -358,8 +358,8 @@ format = "json"
 #
 # Scheduled backups produce a single .tar.gz per tick containing every
 # SQLite DB (via Online Backup API — runs concurrently with the live
-# server, no downtime), all attachment blobs, the audit + pending-keys
-# logs, the SSH host key, and server.toml. See docs/ops/backup_restore.md
+# server, no downtime), all attachment blobs, the audit log, the SSH
+# host key, and server.toml. See docs/ops/backup_restore.md
 # for the full operator guide.
 #
 # Default-enabled because data loss on a chat server is catastrophic

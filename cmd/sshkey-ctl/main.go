@@ -167,8 +167,8 @@ Commands:
   pending                                 View pending key requests
   approve --key "ssh-ed25519 AAAA... name" [--rooms ROOMS] [--admin]  Approve a pending key (display name from key comment, optional admin flag)
   approve --key "ssh-ed25519 AAAA..." --name NAME [--rooms ROOMS] [--admin]  Approve a pending key (override display name)
-  purge-pending --fp FP                   Clear a single pending key from DB and log (allows retry)
-  purge-pending --all [--yes]             Clear ALL pending keys from DB and log (--yes to skip confirmation)
+  purge-pending --fp FP                   Clear a single pending key from the DB (allows retry)
+  purge-pending --all [--yes]             Clear ALL pending keys from the DB (--yes to skip confirmation)
   reject-pending --fp FP [--reason TEXT]  Clear a pending key AND add its fingerprint to the block list (prevents retry)
   list-users                              List all users
   show-user <id|display_name>             Full user details (key, rooms, devices)
@@ -234,20 +234,46 @@ Commands:
 }
 
 func cmdPending(dataDir string) error {
-	logPath := filepath.Join(dataDir, "data", "pending-keys.log")
-	data, err := os.ReadFile(logPath)
-	if err != nil {
+	// Read-only command: never materialize empty DB/WAL files. cmdPending is
+	// now DB-backed (the flat pending-keys.log projection was removed), and
+	// store.Open os.MkdirAll's data/ and creates data.db/rooms.db/users.db if
+	// absent. Guard on data.db existing first so `pending` on a fresh/empty
+	// install stays a pure read.
+	dbPath := filepath.Join(dataDir, "data", "data.db")
+	if _, err := os.Stat(dbPath); err != nil {
 		if os.IsNotExist(err) {
 			fmt.Println("No pending keys.")
 			return nil
 		}
 		return err
 	}
-	if len(data) == 0 {
+
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	keys, err := st.ListPendingKeys()
+	if err != nil {
+		return fmt.Errorf("list pending keys: %w", err)
+	}
+	if len(keys) == 0 {
 		fmt.Println("No pending keys.")
 		return nil
 	}
-	fmt.Print(string(data))
+
+	for _, k := range keys {
+		// The pubkey is the exact trimmed authorized-key string the server
+		// captured (ssh-ed25519 AAAA...); legacy rows recorded before the
+		// pubkey column may be empty.
+		keyField := "key unavailable"
+		if k.PubKey != "" {
+			keyField = fmt.Sprintf("key=%q", k.PubKey)
+		}
+		fmt.Printf("fingerprint=%s attempts=%d remote=%s first_seen=%s last_seen=%s %s\n",
+			k.Fingerprint, k.Attempts, k.RemoteAddr, k.FirstSeen, k.LastSeen, keyField)
+	}
 	return nil
 }
 
@@ -419,7 +445,7 @@ func cmdApprove(configDir, dataDir string, args []string) error {
 	// Non-fatal: approval has already been persisted. If cleanup fails we
 	// surface a warning so operators can still connect the user immediately.
 	fingerprint := ssh.FingerprintSHA256(parsed)
-	if err := clearPendingKeyState(dataDir, st, fingerprint); err != nil {
+	if err := clearPendingKeyState(st, fingerprint); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: approved user, but failed to clear pending state for %s: %v\n", fingerprint, err)
 	}
 
@@ -442,59 +468,19 @@ func cmdApprove(configDir, dataDir string, args []string) error {
 	return nil
 }
 
-// clearPendingKeyState removes a fingerprint from the authoritative pending_keys
-// table and best-effort prunes matching lines from pending-keys.log.
-func clearPendingKeyState(dataDir string, st *store.Store, fingerprint string) error {
-	if st != nil && st.DataDB() != nil {
-		if _, err := st.DataDB().Exec(`DELETE FROM pending_keys WHERE fingerprint = ?`, fingerprint); err != nil {
-			return err
-		}
-	}
-
-	logPath := filepath.Join(dataDir, "data", "pending-keys.log")
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-
-	var kept []string
-	removed := false
-	for _, line := range strings.Split(string(data), "\n") {
-		if line == "" {
-			continue
-		}
-		if strings.Contains(line, "fingerprint="+fingerprint) {
-			removed = true
-			continue
-		}
-		kept = append(kept, line)
-	}
-	if !removed {
+// clearPendingKeyState removes a fingerprint from the authoritative
+// pending_keys table. The flat pending-keys.log projection was removed (the DB
+// is the store), so this is a DB-only delete shared by approve, purge-pending,
+// and reject-pending.
+func clearPendingKeyState(st *store.Store, fingerprint string) error {
+	if st == nil || st.DataDB() == nil {
 		return nil
 	}
-
-	content := strings.Join(kept, "\n")
-	if content != "" {
-		content += "\n"
-	}
-	tmpPath := logPath + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(content), 0640); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, logPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	return nil
+	return st.DeletePendingKey(fingerprint)
 }
 
-// cmdPurgePending clears pending-key entries from BOTH the
-// authoritative `pending_keys` SQLite table AND the
-// `pending-keys.log` file (which is what the `pending` command
-// reads). Two modes:
+// cmdPurgePending clears pending-key entries from the authoritative
+// `pending_keys` table (the source the `pending` command reads). Two modes:
 //
 //   - --fp FINGERPRINT: clear a single pending key
 //   - --all [--yes]:    wholesale clear; --yes skips the
@@ -506,11 +492,11 @@ func clearPendingKeyState(dataDir string, st *store.Store, fingerprint string) e
 // use `reject-pending`.
 //
 // History note: replaced the previous `reject` command which only
-// pruned the log file, leaving the DB row intact. That mismatch
+// pruned a flat log file, leaving the DB row intact. That mismatch
 // caused stale `pending_keys` rows to accumulate even after an
 // admin "rejected" them. This implementation routes through the
 // existing `clearPendingKeyState` helper that the `approve` flow
-// already uses, so DB and log stay in lockstep.
+// already uses (a DB-only delete since the flat log was dropped).
 func cmdPurgePending(dataDir string, args []string) error {
 	var fingerprint string
 	all := false
@@ -543,57 +529,40 @@ func cmdPurgePending(dataDir string, args []string) error {
 	defer st.Close()
 
 	if fingerprint != "" {
-		if err := clearPendingKeyState(dataDir, st, fingerprint); err != nil {
+		if err := clearPendingKeyState(st, fingerprint); err != nil {
 			return fmt.Errorf("clear pending state for %s: %w", fingerprint, err)
 		}
 		auditLog := audit.New(dataDir)
 		auditLog.LogOS("purge-pending", "fingerprint="+fingerprint)
-		fmt.Printf("Purged pending key %s (DB + log)\n", fingerprint)
+		fmt.Printf("Purged pending key %s\n", fingerprint)
 		return nil
 	}
 
 	// --all path. Count first so the prompt and the audit log have
 	// a meaningful number; also so we can print "no pending keys"
 	// without doing destructive work.
-	var count int
-	if err := st.DataDB().QueryRow(`SELECT COUNT(*) FROM pending_keys`).Scan(&count); err != nil {
+	count, err := st.CountPendingKeys()
+	if err != nil {
 		return fmt.Errorf("count pending keys: %w", err)
 	}
-	logPath := filepath.Join(dataDir, "data", "pending-keys.log")
-	logExists := false
-	if info, err := os.Stat(logPath); err == nil && info.Size() > 0 {
-		logExists = true
-	}
-	if count == 0 && !logExists {
+	if count == 0 {
 		fmt.Println("No pending keys to purge.")
 		return nil
 	}
 
 	if !yes {
-		fmt.Printf("Would purge %d pending key(s) from the DB and clear pending-keys.log.\n", count)
+		fmt.Printf("Would purge %d pending key(s) from the DB.\n", count)
 		fmt.Println("Re-run with --yes to confirm.")
 		return nil
 	}
 
-	if _, err := st.DataDB().Exec(`DELETE FROM pending_keys`); err != nil {
-		return fmt.Errorf("delete from pending_keys: %w", err)
-	}
-	// Truncate the log: write an empty file atomically. Best-effort —
-	// log absence isn't an error.
-	if logExists {
-		tmpPath := logPath + ".tmp"
-		if err := os.WriteFile(tmpPath, []byte{}, 0640); err != nil {
-			return fmt.Errorf("write empty log: %w", err)
-		}
-		if err := os.Rename(tmpPath, logPath); err != nil {
-			_ = os.Remove(tmpPath)
-			return fmt.Errorf("rename log: %w", err)
-		}
+	if _, err := st.ClearPendingKeys(); err != nil {
+		return fmt.Errorf("clear pending keys: %w", err)
 	}
 
 	auditLog := audit.New(dataDir)
 	auditLog.LogOS("purge-pending-all", fmt.Sprintf("count=%d", count))
-	fmt.Printf("Purged %d pending key(s) (DB + log).\n", count)
+	fmt.Printf("Purged %d pending key(s).\n", count)
 	return nil
 }
 
@@ -653,14 +622,14 @@ func cmdRejectPending(dataDir string, args []string) error {
 	if st.IsFingerprintBlocked(fingerprint) {
 		// Already blocked — but we may still need to clear the
 		// pending-key entry. Run the clear path and report.
-		if err := clearPendingKeyState(dataDir, st, fingerprint); err != nil {
+		if err := clearPendingKeyState(st, fingerprint); err != nil {
 			return fmt.Errorf("clear pending state: %w", err)
 		}
 		fmt.Printf("Cleared pending key %s. Already on block list (no change).\n", fingerprint)
 		return nil
 	}
 
-	if err := clearPendingKeyState(dataDir, st, fingerprint); err != nil {
+	if err := clearPendingKeyState(st, fingerprint); err != nil {
 		return fmt.Errorf("clear pending state: %w", err)
 	}
 	blockedBy := fmt.Sprintf("os:%d", os.Getuid())
@@ -671,7 +640,7 @@ func cmdRejectPending(dataDir string, args []string) error {
 	auditLog := audit.New(dataDir)
 	auditLog.LogOS("reject-pending", "fingerprint="+fingerprint+" reason="+reason)
 
-	fmt.Printf("Rejected pending key %s (cleared from DB + log, added to block list).\n", fingerprint)
+	fmt.Printf("Rejected pending key %s (cleared from DB, added to block list).\n", fingerprint)
 	if reason != "" {
 		fmt.Printf("Reason: %s\n", reason)
 	}
@@ -1724,15 +1693,10 @@ func cmdStatus(configDir, dataDir string) error {
 		return fmt.Errorf("get rooms: %w", err)
 	}
 
-	// Pending keys
-	pendingCount := 0
-	logPath := filepath.Join(dataDir, "data", "pending-keys.log")
-	if data, err := os.ReadFile(logPath); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			if strings.TrimSpace(line) != "" {
-				pendingCount++
-			}
-		}
+	// Pending keys (DB-backed; the flat pending-keys.log was dropped).
+	pendingCount, err := st.CountPendingKeys()
+	if err != nil {
+		return fmt.Errorf("count pending keys: %w", err)
 	}
 
 	// Data size

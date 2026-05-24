@@ -744,6 +744,7 @@ func (s *Store) initDataDB() error {
 			attempts    INTEGER NOT NULL DEFAULT 1,
 			first_seen  TEXT NOT NULL DEFAULT (datetime('now')),
 			last_seen   TEXT NOT NULL DEFAULT (datetime('now')),
+			pubkey      TEXT,
 			PRIMARY KEY (fingerprint)
 		);
 
@@ -804,7 +805,12 @@ func (s *Store) initDataDB() error {
 	// Defensive additive migration for pre-hidden direct_messages schemas.
 	// Pre-launch policy says no production users yet, but this keeps local
 	// dev/test DBs bootable across branch changes.
-	return s.ensureDirectMessageSchema()
+	if err := s.ensureDirectMessageSchema(); err != nil {
+		return err
+	}
+	// Additive migration for the pending_keys.pubkey column (DB-authoritative
+	// pending view): older dev/test DBs created before the column self-heal.
+	return s.ensurePendingKeysSchema()
 }
 
 // initMessageDB creates the schema for room/conversation message databases.

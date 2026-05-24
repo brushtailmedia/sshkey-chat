@@ -15,7 +15,6 @@ backup-<YYYYMMDD-HHMMSS>[-<label>].tar.gz
     data.db, rooms.db, users.db          (SQLite Online Backup snapshots)
     room-*.db, group-*.db, dm-*.db       (SQLite Online Backup snapshots)
     files/<fileID>                       (attachment blobs — plain copy)
-    pending-keys.log                     (pending-signup queue)
     audit.log                            (server audit log)
   config/
     host_key                             (SSH server host key, mode 0600 preserved)

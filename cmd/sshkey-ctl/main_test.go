@@ -251,7 +251,7 @@ func TestApprove_NameFlagOverridesComment(t *testing.T) {
 	}
 }
 
-func TestApprove_ClearsPendingKeyFromDBAndLog(t *testing.T) {
+func TestApprove_ClearsPendingKeyFromDB(t *testing.T) {
 	key, fp := genTestKey(t, "Alice")
 	_, otherFP := genTestKey(t, "Other")
 	configDir := setupConfig(t, nil, nil)
@@ -269,18 +269,6 @@ func TestApprove_ClearsPendingKeyFromDBAndLog(t *testing.T) {
 		t.Fatalf("seed pending_keys: %v", err)
 	}
 	st.Close()
-
-	logDir := filepath.Join(dataDir, "data")
-	if err := os.MkdirAll(logDir, 0750); err != nil {
-		t.Fatalf("mkdir log dir: %v", err)
-	}
-	logContent := strings.Join([]string{
-		"fingerprint=" + fp + " remote=127.0.0.1:2222",
-		"fingerprint=" + otherFP + " remote=127.0.0.1:2223",
-	}, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(logDir, "pending-keys.log"), []byte(logContent), 0640); err != nil {
-		t.Fatalf("write pending log: %v", err)
-	}
 
 	if err := cmdApprove(configDir, dataDir, []string{"--key", key, "--name", "Alice"}); err != nil {
 		t.Fatalf("approve: %v", err)
@@ -304,17 +292,6 @@ func TestApprove_ClearsPendingKeyFromDBAndLog(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("other fingerprint should remain pending, got count=%d", count)
-	}
-
-	logData, err := os.ReadFile(filepath.Join(logDir, "pending-keys.log"))
-	if err != nil {
-		t.Fatalf("read pending log: %v", err)
-	}
-	if strings.Contains(string(logData), fp) {
-		t.Fatalf("approved fingerprint should be removed from pending log:\n%s", string(logData))
-	}
-	if !strings.Contains(string(logData), otherFP) {
-		t.Fatalf("other pending fingerprint should remain in log:\n%s", string(logData))
 	}
 }
 
@@ -702,16 +679,15 @@ func TestListRooms(t *testing.T) {
 
 // --- purge-pending and reject-pending tests ---
 //
-// Replaces the previous `reject` command which only pruned the log
+// Replaces the previous `reject` command which only pruned a flat log
 // (DB row stayed behind, allowing the same key to retry and re-queue).
-// purge-pending = clear DB + log, allow retry. reject-pending =
-// clear DB + log AND add to fingerprint blocklist, prevent retry.
+// purge-pending = clear the DB row, allow retry. reject-pending =
+// clear the DB row AND add to the fingerprint blocklist, prevent retry.
 // See cmdPurgePending / cmdRejectPending in main.go.
 
-// setupPendingDBAndLog seeds both `pending_keys` rows and
-// `pending-keys.log` lines with matching fingerprints. Used by the
-// purge/reject tests to assert both halves of the cleanup primitive.
-func setupPendingDBAndLog(t *testing.T, fingerprints ...string) string {
+// setupPendingDB seeds `pending_keys` rows for the purge/reject tests.
+// (The flat pending-keys.log projection was removed; the DB is the store.)
+func setupPendingDB(t *testing.T, fingerprints ...string) string {
 	t.Helper()
 	dir := setupDataDir(t, nil)
 	st, err := store.Open(dir)
@@ -728,17 +704,6 @@ func setupPendingDBAndLog(t *testing.T, fingerprints ...string) string {
 		}
 	}
 	st.Close()
-
-	logDir := filepath.Join(dir, "data")
-	os.MkdirAll(logDir, 0750)
-	var lines []string
-	for i, fp := range fingerprints {
-		lines = append(lines, fmt.Sprintf("fingerprint=%s remote=127.0.0.1:%d", fp, 3000+i))
-	}
-	content := strings.Join(lines, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(logDir, "pending-keys.log"), []byte(content), 0640); err != nil {
-		t.Fatalf("write log: %v", err)
-	}
 	return dir
 }
 
@@ -756,28 +721,123 @@ func countPendingDB(t *testing.T, dataDir string) int {
 	return count
 }
 
-func TestPurgePending_FpClearsDBAndLog(t *testing.T) {
-	dir := setupPendingDBAndLog(t, "SHA256:aaa", "SHA256:bbb")
+func captureStdoutErr(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+
+	origStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stdout: %v", err)
+	}
+	os.Stdout = w
+
+	type readResult struct {
+		out string
+		err error
+	}
+	done := make(chan readResult, 1)
+	go func() {
+		out, err := io.ReadAll(r)
+		done <- readResult{out: string(out), err: err}
+	}()
+
+	callErr := fn()
+
+	_ = w.Close()
+	os.Stdout = origStdout
+
+	result := <-done
+	_ = r.Close()
+	if result.err != nil {
+		t.Fatalf("read stdout: %v", result.err)
+	}
+	return result.out, callErr
+}
+
+func TestPending_NoExistingDataDBDoesNotCreateStore(t *testing.T) {
+	dir := t.TempDir()
+
+	out, err := captureStdoutErr(t, func() error {
+		return cmdPending(dir)
+	})
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	if strings.TrimSpace(out) != "No pending keys." {
+		t.Fatalf("output = %q, want No pending keys.", out)
+	}
+	for _, p := range []string{
+		filepath.Join(dir, "data", "data.db"),
+		filepath.Join(dir, "data", "rooms.db"),
+		filepath.Join(dir, "data", "users.db"),
+	} {
+		if _, err := os.Stat(p); err == nil {
+			t.Fatalf("cmdPending should not create DB file %s", p)
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat %s: %v", p, err)
+		}
+	}
+}
+
+func TestPending_PrintsFreshDBRowsAndKeyFallback(t *testing.T) {
+	dir := setupDataDir(t, nil)
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	const key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestPendingKey"
+	if _, err := st.DataDB().Exec(`
+		INSERT INTO pending_keys (fingerprint, remote_addr, attempts, first_seen, last_seen, pubkey)
+		VALUES
+			('SHA256:older', '127.0.0.1:3001', 1, '2026-05-24 10:00:00', '2026-05-24 10:01:00', ?),
+			('SHA256:newer', '127.0.0.1:3002', 3, '2026-05-24 10:02:00', '2026-05-24 10:05:00', NULL)
+	`, key); err != nil {
+		st.Close()
+		t.Fatalf("seed pending_keys: %v", err)
+	}
+	st.Close()
+
+	out, err := captureStdoutErr(t, func() error {
+		return cmdPending(dir)
+	})
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 pending lines, got %d: %q", len(lines), out)
+	}
+	if !strings.Contains(lines[0], "fingerprint=SHA256:newer") ||
+		!strings.Contains(lines[0], "attempts=3") ||
+		!strings.Contains(lines[0], "remote=127.0.0.1:3002") ||
+		!strings.Contains(lines[0], "key unavailable") {
+		t.Fatalf("newest/null-key line did not match locked shape: %q", lines[0])
+	}
+	wantKey := fmt.Sprintf("key=%q", key)
+	if !strings.Contains(lines[1], "fingerprint=SHA256:older") ||
+		!strings.Contains(lines[1], "attempts=1") ||
+		!strings.Contains(lines[1], "remote=127.0.0.1:3001") ||
+		!strings.Contains(lines[1], wantKey) {
+		t.Fatalf("older/pubkey line did not match locked shape: %q", lines[1])
+	}
+}
+
+func TestPurgePending_FpClearsDB(t *testing.T) {
+	dir := setupPendingDB(t, "SHA256:aaa", "SHA256:bbb")
 
 	if err := cmdPurgePending(dir, []string{"--fp", "SHA256:aaa"}); err != nil {
 		t.Fatalf("purge-pending: %v", err)
 	}
 
-	// Both DB row and log line for SHA256:aaa should be gone; bbb stays.
+	// The DB row for SHA256:aaa should be gone; bbb stays.
 	if got := countPendingDB(t, dir); got != 1 {
 		t.Errorf("DB row count = %d, want 1 (bbb only)", got)
-	}
-	data, _ := os.ReadFile(filepath.Join(dir, "data", "pending-keys.log"))
-	if strings.Contains(string(data), "SHA256:aaa") {
-		t.Errorf("SHA256:aaa should be cleared from log, got:\n%s", string(data))
-	}
-	if !strings.Contains(string(data), "SHA256:bbb") {
-		t.Errorf("SHA256:bbb should remain in log, got:\n%s", string(data))
 	}
 }
 
 func TestPurgePending_FpUnknownIsNoop(t *testing.T) {
-	dir := setupPendingDBAndLog(t, "SHA256:aaa")
+	dir := setupPendingDB(t, "SHA256:aaa")
 
 	// Purging an unknown fingerprint shouldn't error or affect existing entries.
 	if err := cmdPurgePending(dir, []string{"--fp", "SHA256:zzz"}); err != nil {
@@ -789,7 +849,7 @@ func TestPurgePending_FpUnknownIsNoop(t *testing.T) {
 }
 
 func TestPurgePending_AllRequiresYes(t *testing.T) {
-	dir := setupPendingDBAndLog(t, "SHA256:aaa", "SHA256:bbb")
+	dir := setupPendingDB(t, "SHA256:aaa", "SHA256:bbb")
 
 	// Without --yes, should be a dry run: prints the count, doesn't delete.
 	if err := cmdPurgePending(dir, []string{"--all"}); err != nil {
@@ -801,7 +861,7 @@ func TestPurgePending_AllRequiresYes(t *testing.T) {
 }
 
 func TestPurgePending_AllYesClearsEverything(t *testing.T) {
-	dir := setupPendingDBAndLog(t, "SHA256:aaa", "SHA256:bbb", "SHA256:ccc")
+	dir := setupPendingDB(t, "SHA256:aaa", "SHA256:bbb", "SHA256:ccc")
 
 	if err := cmdPurgePending(dir, []string{"--all", "--yes"}); err != nil {
 		t.Fatalf("purge-pending --all --yes: %v", err)
@@ -809,14 +869,10 @@ func TestPurgePending_AllYesClearsEverything(t *testing.T) {
 	if got := countPendingDB(t, dir); got != 0 {
 		t.Errorf("DB row count = %d, want 0 (wholesale clear)", got)
 	}
-	data, _ := os.ReadFile(filepath.Join(dir, "data", "pending-keys.log"))
-	if len(strings.TrimSpace(string(data))) != 0 {
-		t.Errorf("log should be empty after --all --yes, got:\n%s", string(data))
-	}
 }
 
 func TestPurgePending_RejectsConflictingFlags(t *testing.T) {
-	dir := setupPendingDBAndLog(t, "SHA256:aaa")
+	dir := setupPendingDB(t, "SHA256:aaa")
 	err := cmdPurgePending(dir, []string{"--fp", "SHA256:aaa", "--all"})
 	if err == nil {
 		t.Fatal("--fp + --all should error")
@@ -833,7 +889,7 @@ func TestPurgePending_MissingFlag(t *testing.T) {
 }
 
 func TestRejectPending_ClearsAndBlocks(t *testing.T) {
-	dir := setupPendingDBAndLog(t, "SHA256:aaa", "SHA256:bbb")
+	dir := setupPendingDB(t, "SHA256:aaa", "SHA256:bbb")
 
 	if err := cmdRejectPending(dir, []string{"--fp", "SHA256:aaa", "--reason", "spam"}); err != nil {
 		t.Fatalf("reject-pending: %v", err)
@@ -842,11 +898,6 @@ func TestRejectPending_ClearsAndBlocks(t *testing.T) {
 	// DB row gone for SHA256:aaa
 	if got := countPendingDB(t, dir); got != 1 {
 		t.Errorf("DB row count = %d, want 1 (bbb only)", got)
-	}
-	// Log line for SHA256:aaa gone
-	data, _ := os.ReadFile(filepath.Join(dir, "data", "pending-keys.log"))
-	if strings.Contains(string(data), "SHA256:aaa") {
-		t.Errorf("SHA256:aaa should be cleared from log, got:\n%s", string(data))
 	}
 	// Blocklist contains SHA256:aaa
 	st, _ := store.Open(dir)
@@ -860,7 +911,7 @@ func TestRejectPending_ClearsAndBlocks(t *testing.T) {
 }
 
 func TestRejectPending_AlreadyBlockedIsIdempotent(t *testing.T) {
-	dir := setupPendingDBAndLog(t, "SHA256:aaa")
+	dir := setupPendingDB(t, "SHA256:aaa")
 
 	st, _ := store.Open(dir)
 	if err := st.BlockFingerprint("SHA256:aaa", "earlier", "test"); err != nil {

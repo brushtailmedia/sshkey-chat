@@ -738,64 +738,29 @@ func (s *Server) authenticateKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh
 	return nil, fmt.Errorf("key not authorized")
 }
 
-// logPendingKey stores a pending key in the DB, logs to file, and notifies admins.
-// Only notifies the admin on the first attempt — repeat attempts just update the counter.
+// logPendingKey records an unknown-key contact in the authoritative
+// pending_keys table (read by `sshkey-ctl pending`) and notifies admins on the
+// first attempt. Repeat attempts just bump the counter recorded by
+// RecordPendingKey. There is no flat-log projection — the DB is the store.
 func (s *Server) logPendingKey(fingerprint, remote, pubKey string) {
-	isFirstAttempt := true
+	if s.store == nil {
+		return
+	}
 
-	if s.store != nil {
-		// Check if this key has been seen before
-		var existing int
-		s.store.DataDB().QueryRow(
-			`SELECT attempts FROM pending_keys WHERE fingerprint = ?`,
-			fingerprint).Scan(&existing)
-		if existing > 0 {
-			isFirstAttempt = false
-		}
+	firstSeen, isFirstAttempt, err := s.store.RecordPendingKey(fingerprint, remote, pubKey)
+	if err != nil {
+		s.logger.Error("failed to record pending key", "fingerprint", fingerprint, "error", err)
+		return
+	}
 
-		// Upsert — increment attempt counter
-		s.store.DataDB().Exec(`
-			INSERT INTO pending_keys (fingerprint, remote_addr)
-			VALUES (?, ?)
-			ON CONFLICT (fingerprint) DO UPDATE SET
-				attempts = attempts + 1,
-				last_seen = datetime('now'),
-				remote_addr = excluded.remote_addr`,
-			fingerprint, remote)
-
-		// Only notify admin on first attempt
-		if isFirstAttempt {
-			var firstSeen string
-			s.store.DataDB().QueryRow(
-				`SELECT first_seen FROM pending_keys WHERE fingerprint = ?`,
-				fingerprint).Scan(&firstSeen)
-
-			s.notifyAdmins(protocol.AdminNotify{
-				Type:        "admin_notify",
-				Event:       "pending_key",
-				Fingerprint: fingerprint,
-				Attempts:    1,
-				FirstSeen:   firstSeen,
-			})
-
-			// Append to flat log file only on first attempt.
-			// Keep this path aligned with sshkey-ctl pending:
-			// <dataDir>/data/pending-keys.log.
-			baseDir := s.dataDir
-			if baseDir == "" {
-				// Defensive fallback for tests that construct Server
-				// without a dataDir.
-				baseDir = filepath.Dir(s.cfg.Dir)
-			}
-			logPath := filepath.Join(baseDir, "data", "pending-keys.log")
-			f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
-			if err != nil {
-				s.logger.Error("failed to open pending-keys.log", "error", err)
-				return
-			}
-			defer f.Close()
-			fmt.Fprintf(f, "fingerprint=%s remote=%s key=%q\n", fingerprint, remote, pubKey)
-		}
+	if isFirstAttempt {
+		s.notifyAdmins(protocol.AdminNotify{
+			Type:        "admin_notify",
+			Event:       "pending_key",
+			Fingerprint: fingerprint,
+			Attempts:    1,
+			FirstSeen:   firstSeen,
+		})
 	}
 }
 
