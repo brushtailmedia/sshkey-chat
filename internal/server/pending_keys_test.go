@@ -34,10 +34,10 @@ func TestHandleListPendingKeys_AdminHappyPath(t *testing.T) {
 	alice := testClientFor("alice", "dev_alice_pending_admin")
 
 	_, err := s.store.DataDB().Exec(`
-		INSERT INTO pending_keys (fingerprint, attempts, first_seen, last_seen, remote_addr)
+		INSERT INTO pending_keys (fingerprint, attempts, first_seen, last_seen, remote_addr, pubkey, requested_username)
 		VALUES
-			('SHA256:first', 1, '2026-04-23 09:00:00', '2026-04-23 09:05:00', '10.0.0.1'),
-			('SHA256:second', 2, '2026-04-23 10:00:00', '2026-04-23 10:06:00', '10.0.0.2')
+			('SHA256:first', 1, '2026-04-23 09:00:00', '2026-04-23 09:05:00', '10.0.0.1', 'ssh-ed25519 AAAAFIRST', 'Alice'),
+			('SHA256:second', 2, '2026-04-23 10:00:00', '2026-04-23 10:06:00', '10.0.0.2', NULL, NULL)
 	`)
 	if err != nil {
 		t.Fatalf("seed pending_keys: %v", err)
@@ -67,5 +67,18 @@ func TestHandleListPendingKeys_AdminHappyPath(t *testing.T) {
 	}
 	if list.Keys[1].Fingerprint != "SHA256:first" {
 		t.Fatalf("second fingerprint = %q, want SHA256:first", list.Keys[1].Fingerprint)
+	}
+
+	// In-app parity: pubkey + requested_username round-trip (omitempty → "" for
+	// the NULL row).
+	if list.Keys[1].RequestedUsername != "Alice" {
+		t.Errorf("SHA256:first requested_username = %q, want Alice", list.Keys[1].RequestedUsername)
+	}
+	if list.Keys[1].PubKey != "ssh-ed25519 AAAAFIRST" {
+		t.Errorf("SHA256:first pubkey = %q, want ssh-ed25519 AAAAFIRST", list.Keys[1].PubKey)
+	}
+	if list.Keys[0].RequestedUsername != "" || list.Keys[0].PubKey != "" {
+		t.Errorf("SHA256:second (NULL row) should surface empty pubkey/name, got pubkey=%q name=%q",
+			list.Keys[0].PubKey, list.Keys[0].RequestedUsername)
 	}
 }

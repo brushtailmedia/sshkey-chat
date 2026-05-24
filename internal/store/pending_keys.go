@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -18,6 +19,12 @@ type PendingKey struct {
 	// server captured at first contact. May be empty on legacy rows recorded
 	// before the pubkey column existed.
 	PubKey string
+	// RequestedUsername is the sanitized display-name hint derived from the SSH
+	// username (conn.User()) at the unknown-key handshake. Empty when the client
+	// sent none or it failed SanitizeRequestedNameHint; latest *non-empty* wins
+	// across reconnects (DP4). Untrusted — re-gated by ValidateDisplayName
+	// before it can become a real display name.
+	RequestedUsername string
 }
 
 // ensurePendingKeysSchema adds columns introduced after initial launch so that
@@ -28,6 +35,11 @@ func (s *Store) ensurePendingKeysSchema() error {
 	if !columnExists(s.dataDB, "pending_keys", "pubkey") {
 		if _, err := s.dataDB.Exec(`ALTER TABLE pending_keys ADD COLUMN pubkey TEXT`); err != nil {
 			return fmt.Errorf("migrate pending_keys.pubkey: %w", err)
+		}
+	}
+	if !columnExists(s.dataDB, "pending_keys", "requested_username") {
+		if _, err := s.dataDB.Exec(`ALTER TABLE pending_keys ADD COLUMN requested_username TEXT`); err != nil {
+			return fmt.Errorf("migrate pending_keys.requested_username: %w", err)
 		}
 	}
 	return nil
@@ -63,19 +75,23 @@ func columnExists(db *sql.DB, table, col string) bool {
 // to 1 on insert and increments on conflict, so isFirstAttempt is simply
 // (attempts == 1) — no separate pre-SELECT. pubkey is written on first insert
 // and backfilled only when the stored value is NULL (set-once for real rows;
-// heals pre-existing NULL dev/test rows on the next attempt).
-func (s *Store) RecordPendingKey(fingerprint, remoteAddr, pubkey string) (firstSeen string, isFirstAttempt bool, err error) {
+// heals pre-existing NULL dev/test rows on the next attempt). requestedUser is
+// the sanitized display-name hint, stored via NULLIF so an empty hint becomes
+// NULL; the UPDATE keeps the latest *non-empty* hint (DP4) so an empty/rejected
+// reconnect never clobbers a previously captured name.
+func (s *Store) RecordPendingKey(fingerprint, remoteAddr, pubkey, requestedUser string) (firstSeen string, isFirstAttempt bool, err error) {
 	var attempts int
 	err = s.dataDB.QueryRow(`
-		INSERT INTO pending_keys (fingerprint, remote_addr, pubkey)
-		VALUES (?, ?, ?)
+		INSERT INTO pending_keys (fingerprint, remote_addr, pubkey, requested_username)
+		VALUES (?, ?, ?, NULLIF(?, ''))
 		ON CONFLICT (fingerprint) DO UPDATE SET
-			attempts    = attempts + 1,
-			last_seen   = datetime('now'),
-			remote_addr = excluded.remote_addr,
-			pubkey      = COALESCE(pending_keys.pubkey, excluded.pubkey)
+			attempts           = attempts + 1,
+			last_seen          = datetime('now'),
+			remote_addr        = excluded.remote_addr,
+			pubkey             = COALESCE(pending_keys.pubkey, excluded.pubkey),
+			requested_username = COALESCE(excluded.requested_username, pending_keys.requested_username)
 		RETURNING attempts, first_seen`,
-		fingerprint, remoteAddr, pubkey,
+		fingerprint, remoteAddr, pubkey, requestedUser,
 	).Scan(&attempts, &firstSeen)
 	if err != nil {
 		return "", false, fmt.Errorf("record pending key: %w", err)
@@ -88,7 +104,8 @@ func (s *Store) RecordPendingKey(fingerprint, remoteAddr, pubkey string) (firstS
 func (s *Store) ListPendingKeys() ([]PendingKey, error) {
 	rows, err := s.dataDB.Query(`
 		SELECT fingerprint, COALESCE(remote_addr, ''), attempts,
-		       first_seen, last_seen, COALESCE(pubkey, '')
+		       first_seen, last_seen, COALESCE(pubkey, ''),
+		       COALESCE(requested_username, '')
 		FROM pending_keys
 		ORDER BY last_seen DESC`)
 	if err != nil {
@@ -100,7 +117,7 @@ func (s *Store) ListPendingKeys() ([]PendingKey, error) {
 	for rows.Next() {
 		var pk PendingKey
 		if err := rows.Scan(&pk.Fingerprint, &pk.RemoteAddr, &pk.Attempts,
-			&pk.FirstSeen, &pk.LastSeen, &pk.PubKey); err != nil {
+			&pk.FirstSeen, &pk.LastSeen, &pk.PubKey, &pk.RequestedUsername); err != nil {
 			return nil, err
 		}
 		out = append(out, pk)
@@ -109,6 +126,26 @@ func (s *Store) ListPendingKeys() ([]PendingKey, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// GetPendingKeyByFingerprint returns the pending-key row for a fingerprint and
+// whether it exists. Used by `approve` (DP5) to prefill the requested_username
+// hint as a display-name candidate.
+func (s *Store) GetPendingKeyByFingerprint(fingerprint string) (PendingKey, bool, error) {
+	var pk PendingKey
+	err := s.dataDB.QueryRow(`
+		SELECT fingerprint, COALESCE(remote_addr, ''), attempts, first_seen,
+		       last_seen, COALESCE(pubkey, ''), COALESCE(requested_username, '')
+		FROM pending_keys WHERE fingerprint = ?`, fingerprint,
+	).Scan(&pk.Fingerprint, &pk.RemoteAddr, &pk.Attempts, &pk.FirstSeen,
+		&pk.LastSeen, &pk.PubKey, &pk.RequestedUsername)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PendingKey{}, false, nil
+	}
+	if err != nil {
+		return PendingKey{}, false, err
+	}
+	return pk, true, nil
 }
 
 // DeletePendingKey removes a single pending-key row. It is not an error if the

@@ -4,7 +4,7 @@ import "testing"
 
 const testAuthKeyA = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
-func TestPendingKeys_FreshSchemaHasPubkey(t *testing.T) {
+func TestPendingKeys_FreshSchemaHasExpectedColumns(t *testing.T) {
 	st, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -13,6 +13,9 @@ func TestPendingKeys_FreshSchemaHasPubkey(t *testing.T) {
 
 	if !columnExists(st.dataDB, "pending_keys", "pubkey") {
 		t.Fatal("fresh pending_keys schema is missing the pubkey column")
+	}
+	if !columnExists(st.dataDB, "pending_keys", "requested_username") {
+		t.Fatal("fresh pending_keys schema is missing the requested_username column")
 	}
 }
 
@@ -23,7 +26,8 @@ func TestEnsurePendingKeysSchema_MigratesAndIdempotent(t *testing.T) {
 	}
 	defer st.Close()
 
-	// Simulate a legacy DB created before the pubkey column existed.
+	// Simulate a legacy DB created before the pubkey/requested_username columns
+	// existed.
 	if _, err := st.dataDB.Exec(`DROP TABLE pending_keys`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
@@ -39,12 +43,18 @@ func TestEnsurePendingKeysSchema_MigratesAndIdempotent(t *testing.T) {
 	if columnExists(st.dataDB, "pending_keys", "pubkey") {
 		t.Fatal("legacy table should not have pubkey yet")
 	}
+	if columnExists(st.dataDB, "pending_keys", "requested_username") {
+		t.Fatal("legacy table should not have requested_username yet")
+	}
 
 	if err := st.ensurePendingKeysSchema(); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	if !columnExists(st.dataDB, "pending_keys", "pubkey") {
 		t.Fatal("pubkey column should exist after migrate")
+	}
+	if !columnExists(st.dataDB, "pending_keys", "requested_username") {
+		t.Fatal("requested_username column should exist after migrate")
 	}
 	// Idempotent: a second call on an already-migrated DB is a no-op.
 	if err := st.ensurePendingKeysSchema(); err != nil {
@@ -63,7 +73,7 @@ func TestRecordPendingKey_RETURNING(t *testing.T) {
 	defer st.Close()
 
 	fp := "SHA256:abc"
-	firstSeen, isFirst, err := st.RecordPendingKey(fp, "1.2.3.4:5", testAuthKeyA)
+	firstSeen, isFirst, err := st.RecordPendingKey(fp, "1.2.3.4:5", testAuthKeyA, "")
 	if err != nil {
 		t.Fatalf("record (first): %v", err)
 	}
@@ -76,7 +86,7 @@ func TestRecordPendingKey_RETURNING(t *testing.T) {
 
 	// Repeat: same fingerprint, new remote. Not a first attempt; first_seen
 	// is stable; attempts bumps; remote updates.
-	firstSeen2, isFirst2, err := st.RecordPendingKey(fp, "9.9.9.9:9", testAuthKeyA)
+	firstSeen2, isFirst2, err := st.RecordPendingKey(fp, "9.9.9.9:9", testAuthKeyA, "")
 	if err != nil {
 		t.Fatalf("record (repeat): %v", err)
 	}
@@ -114,10 +124,10 @@ func TestRecordPendingKey_PubkeySetOnceAndBackfill(t *testing.T) {
 
 	// Set-once: a present pubkey is not overwritten by a later different one.
 	fp := "SHA256:setonce"
-	if _, _, err := st.RecordPendingKey(fp, "1.1.1.1:1", testAuthKeyA); err != nil {
+	if _, _, err := st.RecordPendingKey(fp, "1.1.1.1:1", testAuthKeyA, ""); err != nil {
 		t.Fatalf("record A: %v", err)
 	}
-	if _, _, err := st.RecordPendingKey(fp, "1.1.1.1:1", "ssh-ed25519 DIFFERENTKEY"); err != nil {
+	if _, _, err := st.RecordPendingKey(fp, "1.1.1.1:1", "ssh-ed25519 DIFFERENTKEY", ""); err != nil {
 		t.Fatalf("record B: %v", err)
 	}
 	got := findPending(t, st, fp)
@@ -131,7 +141,7 @@ func TestRecordPendingKey_PubkeySetOnceAndBackfill(t *testing.T) {
 		"SHA256:legacy", "2.2.2.2:2"); err != nil {
 		t.Fatalf("seed legacy NULL row: %v", err)
 	}
-	if _, _, err := st.RecordPendingKey("SHA256:legacy", "3.3.3.3:3", testAuthKeyA); err != nil {
+	if _, _, err := st.RecordPendingKey("SHA256:legacy", "3.3.3.3:3", testAuthKeyA, ""); err != nil {
 		t.Fatalf("record backfill: %v", err)
 	}
 	healed := findPending(t, st, "SHA256:legacy")
@@ -171,8 +181,8 @@ func TestPendingKeys_DeleteClearCount(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.RecordPendingKey("SHA256:a", "1:1", testAuthKeyA)
-	st.RecordPendingKey("SHA256:b", "2:2", testAuthKeyA)
+	st.RecordPendingKey("SHA256:a", "1:1", testAuthKeyA, "")
+	st.RecordPendingKey("SHA256:b", "2:2", testAuthKeyA, "")
 
 	if n, _ := st.CountPendingKeys(); n != 2 {
 		t.Fatalf("count = %d, want 2", n)
@@ -213,4 +223,74 @@ func findPending(t *testing.T, st *Store, fingerprint string) PendingKey {
 	}
 	t.Fatalf("fingerprint %q not found in pending list", fingerprint)
 	return PendingKey{}
+}
+
+func TestRecordPendingKey_RequestedUsername(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+
+	fp := "SHA256:hintfp"
+
+	// First contact with a hint → stored.
+	if _, _, err := st.RecordPendingKey(fp, "1:1", testAuthKeyA, "Alice"); err != nil {
+		t.Fatalf("record (hint): %v", err)
+	}
+	if got := findPending(t, st, fp).RequestedUsername; got != "Alice" {
+		t.Fatalf("requested_username = %q, want Alice", got)
+	}
+
+	// DP4 latest-NON-EMPTY wins: a genuine new name overwrites.
+	if _, _, err := st.RecordPendingKey(fp, "1:1", testAuthKeyA, "Alice Smith"); err != nil {
+		t.Fatalf("record (rename): %v", err)
+	}
+	if got := findPending(t, st, fp).RequestedUsername; got != "Alice Smith" {
+		t.Fatalf("after rename = %q, want Alice Smith", got)
+	}
+
+	// An empty reconnect (e.g. term sends an empty conn.User()) must NOT clobber
+	// the captured hint — the whole point of Option C.
+	if _, _, err := st.RecordPendingKey(fp, "2:2", testAuthKeyA, ""); err != nil {
+		t.Fatalf("record (empty): %v", err)
+	}
+	if got := findPending(t, st, fp).RequestedUsername; got != "Alice Smith" {
+		t.Fatalf("empty reconnect clobbered hint = %q, want Alice Smith preserved", got)
+	}
+
+	// Empty FIRST contact stores NULL → surfaces as "".
+	if _, _, err := st.RecordPendingKey("SHA256:nohint", "3:3", testAuthKeyA, ""); err != nil {
+		t.Fatalf("record (no hint): %v", err)
+	}
+	if got := findPending(t, st, "SHA256:nohint").RequestedUsername; got != "" {
+		t.Errorf("no-hint row RequestedUsername = %q, want empty", got)
+	}
+}
+
+func TestGetPendingKeyByFingerprint(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+
+	// Absent → ok=false, no error.
+	if _, ok, err := st.GetPendingKeyByFingerprint("SHA256:absent"); err != nil || ok {
+		t.Fatalf("absent fingerprint: ok=%v err=%v, want ok=false err=nil", ok, err)
+	}
+
+	if _, _, err := st.RecordPendingKey("SHA256:present", "1:1", testAuthKeyA, "Bob"); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	pk, ok, err := st.GetPendingKeyByFingerprint("SHA256:present")
+	if err != nil || !ok {
+		t.Fatalf("present fingerprint: ok=%v err=%v, want ok=true err=nil", ok, err)
+	}
+	if pk.RequestedUsername != "Bob" {
+		t.Errorf("RequestedUsername = %q, want Bob", pk.RequestedUsername)
+	}
+	if pk.PubKey != testAuthKeyA {
+		t.Errorf("PubKey = %q, want %q", pk.PubKey, testAuthKeyA)
+	}
 }

@@ -745,6 +745,7 @@ func (s *Store) initDataDB() error {
 			first_seen  TEXT NOT NULL DEFAULT (datetime('now')),
 			last_seen   TEXT NOT NULL DEFAULT (datetime('now')),
 			pubkey      TEXT,
+			requested_username TEXT,
 			PRIMARY KEY (fingerprint)
 		);
 

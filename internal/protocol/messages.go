@@ -1217,6 +1217,10 @@ type AdminNotify struct {
 	Fingerprint string `json:"fingerprint"`
 	Attempts    int    `json:"attempts"`
 	FirstSeen   string `json:"first_seen"` // ISO 8601
+	// RequestedUsername is the sanitized SSH-username hint so the live
+	// first-attempt notification is self-contained (omitempty; back-compat
+	// with older term clients). Untrusted — already sanitized for safe display.
+	RequestedUsername string `json:"requested_username,omitempty"`
 }
 
 // AdminNotifyQuota is the admin_notify shape for per-user daily upload
@@ -1256,6 +1260,13 @@ type PendingKeyEntry struct {
 	Attempts    int    `json:"attempts"`
 	FirstSeen   string `json:"first_seen"`
 	LastSeen    string `json:"last_seen"`
+	// PubKey is the trimmed authorized-key string; RequestedUsername is the
+	// sanitized SSH-username hint (see pending-keys-requested-username.md).
+	// Both omitempty for back-compat with term clients predating in-app
+	// /pending parity. RequestedUsername is an untrusted hint — the operator
+	// still validates it at approve.
+	PubKey            string `json:"pubkey,omitempty"`
+	RequestedUsername string `json:"requested_username,omitempty"`
 }
 
 type PendingKeysList struct {

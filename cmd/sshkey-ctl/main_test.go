@@ -823,6 +823,77 @@ func TestPending_PrintsFreshDBRowsAndKeyFallback(t *testing.T) {
 	}
 }
 
+func TestPending_ShowsRequestedUsername(t *testing.T) {
+	dir := setupDataDir(t, nil)
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	const key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestPendingKey"
+	// One row WITH a hint (spaces — proves quoting), one withOUT (NULL).
+	if _, err := st.DataDB().Exec(`
+		INSERT INTO pending_keys (fingerprint, remote_addr, attempts, first_seen, last_seen, pubkey, requested_username)
+		VALUES
+			('SHA256:named', '127.0.0.1:4001', 1, '2026-05-24 10:00:00', '2026-05-24 10:00:00', ?, 'Alice Smith'),
+			('SHA256:anon',  '127.0.0.1:4002', 1, '2026-05-24 10:01:00', '2026-05-24 10:01:00', ?, NULL)
+	`, key, key); err != nil {
+		st.Close()
+		t.Fatalf("seed pending_keys: %v", err)
+	}
+	st.Close()
+
+	out, err := captureStdoutErr(t, func() error {
+		return cmdPending(dir)
+	})
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	// Quoted (spaces/Unicode safe), always present, empty="" for the NULL row.
+	if !strings.Contains(out, `requested_username="Alice Smith"`) {
+		t.Errorf("output missing quoted hint:\n%s", out)
+	}
+	if !strings.Contains(out, `requested_username=""`) {
+		t.Errorf("output missing empty hint for NULL row:\n%s", out)
+	}
+}
+
+func TestApprove_PrefillsFromRequestedUsername(t *testing.T) {
+	key, fp := genTestKey(t, "") // no comment → no name from --name or comment
+	configDir := setupConfig(t, nil, nil)
+	dataDir := setupDataDir(t, nil)
+
+	// Seed a pending row carrying the requested-username hint.
+	st, err := store.Open(dataDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if _, _, err := st.RecordPendingKey(fp, "127.0.0.1:2222", key, "PrefilledName"); err != nil {
+		st.Close()
+		t.Fatalf("seed pending: %v", err)
+	}
+	st.Close()
+
+	// --key only: precedence falls through --name → comment → pending hint (DP5).
+	if err := cmdApprove(configDir, dataDir, []string{"--key", key}); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	st, err = store.Open(dataDir)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer st.Close()
+	found := false
+	for _, u := range st.GetAllUsers() {
+		if u.DisplayName == "PrefilledName" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("approve did not prefill display name from the pending requested_username hint")
+	}
+}
+
 func TestPurgePending_FpClearsDB(t *testing.T) {
 	dir := setupPendingDB(t, "SHA256:aaa", "SHA256:bbb")
 

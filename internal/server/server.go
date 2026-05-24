@@ -733,7 +733,17 @@ func (s *Server) authenticateKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh
 		"fingerprint", fingerprint,
 		"remote", conn.RemoteAddr().String(),
 	)
-	s.logPendingKey(fingerprint, conn.RemoteAddr().String(), pubKeyStr)
+	// Capture the SSH-supplied username as an untrusted display-name hint.
+	// conn.User() is hint-only — never an auth/identity/routing input (§0.1-A).
+	rawUser := conn.User()
+	hint := config.SanitizeRequestedNameHint(rawUser)
+	if hint == "" && rawUser != "" {
+		// Rejected an unsafe/oversized hint. Log length only — NEVER the raw
+		// value (logging it would re-inject the exact vector just stripped).
+		s.logger.Debug("rejected unsafe requested_username",
+			"fingerprint", fingerprint, "len", len(rawUser))
+	}
+	s.logPendingKey(fingerprint, conn.RemoteAddr().String(), pubKeyStr, hint)
 
 	return nil, fmt.Errorf("key not authorized")
 }
@@ -742,12 +752,12 @@ func (s *Server) authenticateKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh
 // pending_keys table (read by `sshkey-ctl pending`) and notifies admins on the
 // first attempt. Repeat attempts just bump the counter recorded by
 // RecordPendingKey. There is no flat-log projection — the DB is the store.
-func (s *Server) logPendingKey(fingerprint, remote, pubKey string) {
+func (s *Server) logPendingKey(fingerprint, remote, pubKey, requestedUser string) {
 	if s.store == nil {
 		return
 	}
 
-	firstSeen, isFirstAttempt, err := s.store.RecordPendingKey(fingerprint, remote, pubKey)
+	firstSeen, isFirstAttempt, err := s.store.RecordPendingKey(fingerprint, remote, pubKey, requestedUser)
 	if err != nil {
 		s.logger.Error("failed to record pending key", "fingerprint", fingerprint, "error", err)
 		return
@@ -755,11 +765,12 @@ func (s *Server) logPendingKey(fingerprint, remote, pubKey string) {
 
 	if isFirstAttempt {
 		s.notifyAdmins(protocol.AdminNotify{
-			Type:        "admin_notify",
-			Event:       "pending_key",
-			Fingerprint: fingerprint,
-			Attempts:    1,
-			FirstSeen:   firstSeen,
+			Type:              "admin_notify",
+			Event:             "pending_key",
+			Fingerprint:       fingerprint,
+			Attempts:          1,
+			FirstSeen:         firstSeen,
+			RequestedUsername: requestedUser,
 		})
 	}
 }

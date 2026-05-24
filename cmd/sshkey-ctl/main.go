@@ -271,8 +271,8 @@ func cmdPending(dataDir string) error {
 		if k.PubKey != "" {
 			keyField = fmt.Sprintf("key=%q", k.PubKey)
 		}
-		fmt.Printf("fingerprint=%s attempts=%d remote=%s first_seen=%s last_seen=%s %s\n",
-			k.Fingerprint, k.Attempts, k.RemoteAddr, k.FirstSeen, k.LastSeen, keyField)
+		fmt.Printf("fingerprint=%s attempts=%d remote=%s first_seen=%s last_seen=%s requested_username=%q %s\n",
+			k.Fingerprint, k.Attempts, k.RemoteAddr, k.FirstSeen, k.LastSeen, k.RequestedUsername, keyField)
 	}
 	return nil
 }
@@ -330,16 +330,15 @@ func cmdApprove(configDir, dataDir string, args []string) error {
 		return fmt.Errorf("invalid key: %v", err)
 	}
 
-	// Extract display name from key comment if --name not provided
+	// Display-name source precedence (DP5): --name → key comment → pending
+	// requested_username hint → error. The hint lookup needs the store and the
+	// fingerprint, so it (and the missing-name error) run AFTER store.Open.
 	parts := strings.SplitN(strings.TrimSpace(key), " ", 3)
 	if len(parts) < 2 {
 		return fmt.Errorf("malformed key: expected at least \"type base64\"")
 	}
 	if len(parts) == 3 && displayName == "" {
 		displayName = strings.TrimSpace(parts[2])
-	}
-	if displayName == "" {
-		return fmt.Errorf("display name required: provide --name NAME or embed it in the key comment")
 	}
 
 	// Strip comment from key for storage
@@ -350,18 +349,42 @@ func cmdApprove(configDir, dataDir string, args []string) error {
 		return fmt.Errorf("only Ed25519 keys are supported, got %s", parsed.Type())
 	}
 
-	// Validate display name (trim, length, printable characters)
-	displayName, err = config.ValidateDisplayName(displayName)
-	if err != nil {
-		return err
-	}
-
 	// Open store
 	st, err := store.Open(dataDir)
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
 	defer st.Close()
+
+	// Fingerprint is the pending_keys PK and the key shown in the approval
+	// output below.
+	fingerprint := ssh.FingerprintSHA256(parsed)
+
+	// DP5: if no name came from --name or the key comment, fall back to the
+	// requested_username hint captured at the unknown-key handshake. The hint
+	// is untrusted transport input — inserted here as just another candidate,
+	// it still flows through ValidateDisplayName + the uniqueness scan below
+	// (§0.1-B); it never bypasses the policy gate.
+	if displayName == "" {
+		pk, ok, lookupErr := st.GetPendingKeyByFingerprint(fingerprint)
+		if lookupErr != nil {
+			// A genuine DB error (not "no row" — that returns ok=false, nil).
+			// Surface it instead of masking it as "display name required".
+			return fmt.Errorf("lookup pending key: %w", lookupErr)
+		}
+		if ok {
+			displayName = pk.RequestedUsername
+		}
+	}
+	if displayName == "" {
+		return fmt.Errorf("display name required: provide --name NAME or embed it in the key comment")
+	}
+
+	// Validate display name (trim, length, printable characters)
+	displayName, err = config.ValidateDisplayName(displayName)
+	if err != nil {
+		return err
+	}
 
 	// Check for duplicate SSH key (same key already assigned to another user)
 	if existingID := st.GetUserByKey(keyLine); existingID != "" {
@@ -444,7 +467,7 @@ func cmdApprove(configDir, dataDir string, args []string) error {
 	// Clear this key from pending state now that it is approved.
 	// Non-fatal: approval has already been persisted. If cleanup fails we
 	// surface a warning so operators can still connect the user immediately.
-	fingerprint := ssh.FingerprintSHA256(parsed)
+	// (fingerprint was computed above for the DP5 hint lookup.)
 	if err := clearPendingKeyState(st, fingerprint); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: approved user, but failed to clear pending state for %s: %v\n", fingerprint, err)
 	}

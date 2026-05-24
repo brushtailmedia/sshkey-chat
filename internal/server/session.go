@@ -3510,14 +3510,16 @@ func (s *Server) handleListPendingKeys(c *Client) {
 			s.logger.Error("list pending keys", "error", err)
 		}
 		for _, p := range pending {
-			// Protocol parity for pubkey/remote/requested_username is deferred
-			// (see pending-keys-requested-username.md); map down to the fields
-			// the TUI currently consumes so there is one DB SELECT shape.
+			// In-app /pending parity: surface the pubkey + requested-username
+			// hint so the admin TUI panel matches `sshkey-ctl pending`. Both are
+			// omitempty on the wire (back-compat with older term clients).
 			keys = append(keys, protocol.PendingKeyEntry{
-				Fingerprint: p.Fingerprint,
-				Attempts:    p.Attempts,
-				FirstSeen:   p.FirstSeen,
-				LastSeen:    p.LastSeen,
+				Fingerprint:       p.Fingerprint,
+				Attempts:          p.Attempts,
+				FirstSeen:         p.FirstSeen,
+				LastSeen:          p.LastSeen,
+				PubKey:            p.PubKey,
+				RequestedUsername: p.RequestedUsername,
 			})
 		}
 	}

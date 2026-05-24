@@ -589,7 +589,8 @@ CREATE TABLE pending_keys (
     attempts INTEGER NOT NULL DEFAULT 1,
     first_seen TEXT NOT NULL DEFAULT (datetime('now')),
     last_seen TEXT NOT NULL DEFAULT (datetime('now')),
-    pubkey TEXT
+    pubkey TEXT,
+    requested_username TEXT
 );
 CREATE TABLE profiles (
     user TEXT PRIMARY KEY, display_name TEXT, avatar_id TEXT, status_text TEXT
