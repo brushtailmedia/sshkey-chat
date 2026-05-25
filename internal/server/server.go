@@ -255,12 +255,12 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		// key will be rejected and its fingerprint queued in
 		// pending_keys for operator triage. This warning gives a
 		// fresh install a visible log signal pointing at the next
-		// step (`sshkey-ctl approve`), so operators don't see "server
-		// started" followed by silence while pending_keys quietly
-		// accumulates. Admin status is a separate concern — needed
-		// only for in-app moderation, applied via `sshkey-ctl promote`.
+		// step (`sshkey-ctl pending` then `sshkey-ctl approve`), so
+		// operators don't see "server started" followed by silence while
+		// pending_keys quietly accumulates. First-admin bootstrap should use
+		// `approve --admin`, which grants admin in the same transaction.
 		if st.UsersDBEmpty() {
-			logger.Warn("users.db is empty — incoming SSH connections will be rejected and their fingerprints logged to pending_keys; admit users with `sshkey-ctl approve --key \"ssh-ed25519 AAAA... name\"` (and optionally `sshkey-ctl promote <user_id>` to grant in-app admin)",
+			logger.Warn("users.db is empty — incoming SSH connections will be rejected and queued in pending_keys; run `sshkey-ctl pending`, then approve the listed key with `sshkey-ctl approve --key \"ssh-ed25519 AAAA...\" --rooms general --admin` (display name is prefilled from the pending hint when present; use --name to override)",
 				"data_dir", dir,
 			)
 		}

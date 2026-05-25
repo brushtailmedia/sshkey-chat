@@ -1156,7 +1156,7 @@ sshkey-term --host <server> --key ~/.ssh/admin_ed25519   # rejected; key logged 
 
 # On the server box
 sshkey-ctl pending
-sshkey-ctl approve --key "ssh-ed25519 AAAA... admin" --rooms general --admin
+sshkey-ctl approve --key "ssh-ed25519 AAAA..." --rooms general --admin
 ```
 
 The admin's private key never touches the server — only the public key, transferred via the SSH handshake's pending-keys channel. Subsequent users go through the same flow without `--admin`. `promote` / `demote` flip admin status of existing users at any time.
@@ -1168,7 +1168,7 @@ The admin's private key never touches the server — only the public key, transf
   `docker compose up -d`
   (admin tries to connect from their machine, key lands in pending)
   `docker exec sshkey-chat sshkey-ctl pending`
-  `docker exec sshkey-chat sshkey-ctl approve --key "ssh-ed25519 AAAA... admin" --rooms general --admin`
+  `docker exec sshkey-chat sshkey-ctl approve --key "ssh-ed25519 AAAA..." --rooms general --admin`
 
 Server watches `server.toml` for changes (fsnotify) or reloads it on SIGHUP.
 
@@ -1180,8 +1180,11 @@ Local admin tool that runs on the server. Reads/writes config files and the pend
 # View pending key requests
 sshkey-ctl pending
 
-# Approve a user and assign rooms
-sshkey-ctl approve --fingerprint xx:yy:zz --name carol --rooms general,engineering
+# Approve a user and assign rooms.
+# Copy the key from `sshkey-ctl pending`; the display name is prefilled from
+# pending_keys.requested_username when the client supplied one, or use --name
+# to override.
+sshkey-ctl approve --key "ssh-ed25519 AAAA..." --rooms general,engineering
 
 # Clear pending keys (allows retry)
 sshkey-ctl purge-pending --fp SHA256:abc...
@@ -1918,7 +1921,9 @@ Two-layer identity system: **usernames** (immutable internal IDs) and **display 
 - `set_profile`: server checks display name against all usernames + display names (case-insensitive)
 - `sshkey-ctl approve`: checks proposed username against existing + retired usernames + display names
 - Config reload: rejects retired username reuse and un-retirement attempts
-- Wizard: user picks preferred display name, embedded in key comment for admin
+- First-party terminal client: user picks a requested display name; it is sent
+  as the SSH username hint for pending-key approval and also kept in the
+  managed `.pub` comment as a fallback
 
 ---
 

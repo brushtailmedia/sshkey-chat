@@ -164,9 +164,9 @@ Commands:
                                           Guided first-run setup (writes server.toml
                                           if missing; initializes SQLite store;
                                           default is full recommended template)
-  pending                                 View pending key requests
-  approve --key "ssh-ed25519 AAAA... name" [--rooms ROOMS] [--admin]  Approve a pending key (display name from key comment, optional admin flag)
-  approve --key "ssh-ed25519 AAAA..." --name NAME [--rooms ROOMS] [--admin]  Approve a pending key (override display name)
+  pending                                 View pending key requests incl. requested name + key
+  approve --key "ssh-ed25519 AAAA..." [--rooms ROOMS] [--admin]  Approve a pending key (name prefilled from pending hint when present)
+  approve --key "ssh-ed25519 AAAA..." --name NAME [--rooms ROOMS] [--admin]  Approve a pending key with explicit/override display name
   purge-pending --fp FP                   Clear a single pending key from the DB (allows retry)
   purge-pending --all [--yes]             Clear ALL pending keys from the DB (--yes to skip confirmation)
   reject-pending --fp FP [--reason TEXT]  Clear a pending key AND add its fingerprint to the block list (prevents retry)
@@ -320,8 +320,9 @@ func cmdApprove(configDir, dataDir string, args []string) error {
 	}
 
 	if key == "" {
-		return fmt.Errorf("usage: approve --key \"ssh-ed25519 AAAA... name\" [--rooms ROOMS] [--admin]\n" +
-			"   or: approve --key \"ssh-ed25519 AAAA...\" --name NAME [--rooms ROOMS] [--admin]")
+		return fmt.Errorf("usage: approve --key \"ssh-ed25519 AAAA...\" [--rooms ROOMS] [--admin]\n" +
+			"   or: approve --key \"ssh-ed25519 AAAA...\" --name NAME [--rooms ROOMS] [--admin]\n" +
+			"   or: approve --key \"ssh-ed25519 AAAA... name\" [--rooms ROOMS] [--admin]")
 	}
 
 	// Parse the key
@@ -377,7 +378,7 @@ func cmdApprove(configDir, dataDir string, args []string) error {
 		}
 	}
 	if displayName == "" {
-		return fmt.Errorf("display name required: provide --name NAME or embed it in the key comment")
+		return fmt.Errorf("display name required: pending key has no requested name; provide --name NAME or embed it in the key comment")
 	}
 
 	// Validate display name (trim, length, printable characters)

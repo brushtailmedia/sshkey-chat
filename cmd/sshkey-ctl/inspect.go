@@ -189,7 +189,7 @@ func cmdListAdmins(dataDir string) error {
 
 	if len(admins) == 0 {
 		fmt.Println("No admin users.")
-		fmt.Println("On a fresh deployment: have the admin attempt one SSH connect with their own key, then run `sshkey-ctl approve --key \"ssh-ed25519 AAAA... name\" --admin` against the data directory.")
+		fmt.Println("On a fresh deployment: have the admin attempt one SSH connect with their own key, run `sshkey-ctl pending`, then approve the listed key with `sshkey-ctl approve --key \"ssh-ed25519 AAAA...\" --admin` against the data directory.")
 		fmt.Println("On an existing deployment, use `sshkey-ctl promote <user>` to grant admin.")
 		return nil
 	}

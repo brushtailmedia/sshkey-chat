@@ -82,10 +82,11 @@ ssh-keygen -t ed25519 -f ~/.ssh/alice_ed25519 -C "Alice"
 sshkey-term --host localhost --key ~/.ssh/alice_ed25519
 
 # 5. On the server box: review the pending queue and approve as the first admin.
-#    --admin promotes in the same transaction (equivalent to approve + promote).
+#    Copy the key from `pending`; the display name is prefilled from the pending hint
+#    when present, and --admin grants admin in the same transaction.
 docker exec sshkey-chat sshkey-ctl pending
 docker exec sshkey-chat sshkey-ctl approve \
-    --key "ssh-ed25519 AAAA...keyfromstep4... Alice" \
+    --key "ssh-ed25519 AAAA...keyfrompending..." \
     --rooms general --admin
 
 # 6. Reconnect — admin is now provisioned.
@@ -95,7 +96,7 @@ sshkey-term --host localhost --key ~/.ssh/alice_ed25519
 **First-boot check:** if you skip step 5, the server still starts — but `docker logs sshkey-chat` will show:
 
 ```
-{"level":"WARN","msg":"users.db is empty — incoming SSH connections will be rejected and their fingerprints logged to pending_keys; admit users with `sshkey-ctl approve --key \"ssh-ed25519 AAAA... name\"` (and optionally `sshkey-ctl promote <user_id>` to grant in-app admin)","data_dir":"/var/sshkey-chat"}
+{"level":"WARN","msg":"users.db is empty — incoming SSH connections will be rejected and queued in pending_keys; run `sshkey-ctl pending`, then approve the listed key with `sshkey-ctl approve --key \"ssh-ed25519 AAAA...\" --rooms general --admin` (display name is prefilled from the pending hint when present; use --name to override)","data_dir":"/var/sshkey-chat"}
 ```
 
 SSH connections will be rejected with every key recorded in the pending-keys queue (view it with `sshkey-ctl pending`) with no admin available to triage. Run step 5 to unblock.
@@ -106,8 +107,8 @@ Manage the server:
 # View pending key requests
 docker exec sshkey-chat sshkey-ctl pending
 
-# Approve a user and add them to rooms
-docker exec sshkey-chat sshkey-ctl approve --key "ssh-ed25519 AAAA... Alice" --rooms general,support
+# Approve a user and add them to rooms (copy the key from `pending`; --name overrides)
+docker exec sshkey-chat sshkey-ctl approve --key "ssh-ed25519 AAAA..." --rooms general,support
 
 # Clear a single pending key (user can retry on next connect)
 docker exec sshkey-chat sshkey-ctl purge-pending --fp SHA256:abcdef...
@@ -229,7 +230,7 @@ sshkey-term --host <server> --key ~/.ssh/admin_ed25519
 # 3. On the server box: review pending and approve the first user with
 #    --admin, which sets the admin flag in the same transaction.
 sshkey-ctl pending
-sshkey-ctl approve --key "ssh-ed25519 AAAA... admin" --rooms general --admin
+sshkey-ctl approve --key "ssh-ed25519 AAAA..." --rooms general --admin
 ```
 
 The admin's private key never touches the server — only the public key, transferred via the SSH handshake's pending-keys channel. Subsequent users go through the same flow without `--admin`; promote/demote can flip admin status of existing users at any time.
@@ -284,10 +285,10 @@ sudo journalctl -u sshkey-server -f   # follow logs
 **Pending keys:**
 
 ```bash
-sshkey-ctl pending                                             # view pending key requests
-sshkey-ctl approve --key "ssh-ed25519 AAAA... name" --rooms general,support  # approve (name from key comment)
-sshkey-ctl approve --key "ssh-ed25519 AAAA..." --name NAME --rooms general,support  # approve (override name)
-sshkey-ctl approve --key "ssh-ed25519 AAAA... name" --rooms general --admin  # approve + set admin flag in one step
+sshkey-ctl pending                                             # view pending requests incl. requested_username + key
+sshkey-ctl approve --key "ssh-ed25519 AAAA..." --rooms general,support  # approve (name prefilled from pending hint when present)
+sshkey-ctl approve --key "ssh-ed25519 AAAA..." --name NAME --rooms general,support  # approve with explicit/override name
+sshkey-ctl approve --key "ssh-ed25519 AAAA..." --rooms general --admin  # approve + set admin flag in one step
 sshkey-ctl purge-pending --fp SHA256:abc...                    # clear one pending key from the DB (allows retry)
 sshkey-ctl purge-pending --all --yes                           # clear ALL pending keys (--yes to skip confirmation)
 sshkey-ctl reject-pending --fp SHA256:abc... --reason "spam"   # clear AND block fingerprint (prevents retry)

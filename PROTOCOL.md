@@ -14,8 +14,8 @@ Connect via SSH to the server on port 2222 (configurable). Only Ed25519 keys are
 
 The server does not allow anonymous access. Before a user can connect and chat, their SSH public key must be approved by a server operator via `sshkey-ctl approve`. The approval flow:
 
-1. **Unknown key connects.** The SSH handshake succeeds (the key type is valid Ed25519) but the server does not recognize the key. The server records the key fingerprint in a `pending_keys` table and immediately disconnects with an error: `{"type":"error","code":"client_required","message":"..."}`. The client should display the user's public key and fingerprint so they can share it with the server operator for approval.
-2. **Operator approves.** The server operator runs `sshkey-ctl approve --key "ssh-ed25519 AAAA..." --rooms general,support` on the server box. This creates the user in `users.db` and assigns them to the specified rooms.
+1. **Unknown key connects.** The SSH user-auth attempt fails before any app protocol session opens because the server does not recognize the key. The server records the key fingerprint and public key in the `pending_keys` table, then rejects the SSH auth with the generic "key not authorized" failure. **Requested display name (optional):** a connecting client MAY send the user's desired display name as the SSH username (`conn.User()`). The server sanitizes it (raw length capped at 64 bytes; control, zero-width, and `+` characters reject the whole value) and records the result as `pending_keys.requested_username`, so the operator sees a name to approve. It is an advisory **hint only** — never an auth/identity input, a rejected or absent value simply yields no hint, and approval stays operator-gated. As a fallback (or when no name is sent), the client can still display the user's public key and fingerprint to share with the operator out of band.
+2. **Operator approves.** The server operator runs `sshkey-ctl pending`, copies the listed key, then runs `sshkey-ctl approve --key "ssh-ed25519 AAAA..." --rooms general,support` on the server box. When a pending requested-name hint exists, `approve` uses it as the display-name candidate; `--name NAME` remains the explicit override. This creates the user in `users.db` and assigns them to the specified rooms.
 3. **User reconnects.** The next SSH connection with the approved key proceeds to the normal handshake (`server_hello` → `client_hello` → `welcome`).
 
 **Retired accounts** are also rejected at the SSH handshake level — the key is recognized but the account is marked as retired, and the server disconnects with "account retired."
@@ -23,7 +23,7 @@ The server does not allow anonymous access. Before a user can connect and chat, 
 **Admin notifications.** When an unknown key attempts to connect, the server broadcasts an `admin_notify` event to all connected admin clients:
 
 ```json
-{"type":"admin_notify","event":"pending_key","fingerprint":"SHA256:xx...","attempts":3,"first_seen":"2026-04-03T14:22:00Z"}
+{"type":"admin_notify","event":"pending_key","fingerprint":"SHA256:xx...","attempts":3,"first_seen":"2026-04-03T14:22:00Z","requested_username":"Alice"}
 ```
 
 This lets admins know someone is waiting for approval without polling.
@@ -1377,7 +1377,7 @@ This is critical for the support story: users find admins via the admin badge in
 ### Admin Notifications
 
 ```json
-{"type":"admin_notify","event":"pending_key","fingerprint":"SHA256:xx...","attempts":3,"first_seen":"2026-04-03T14:22:00Z"}
+{"type":"admin_notify","event":"pending_key","fingerprint":"SHA256:xx...","attempts":3,"first_seen":"2026-04-03T14:22:00Z","requested_username":"Alice"}
 ```
 
 Delivered only to connected admin clients.
@@ -1423,11 +1423,11 @@ originally Phase 25.
 
 // Server -> Client
 {"type":"pending_keys_list","keys":[
-  {"fingerprint":"SHA256:xx...","attempts":3,"first_seen":"2026-04-03T14:22:00Z","last_seen":"2026-04-04T10:15:00Z"}
+  {"fingerprint":"SHA256:xx...","attempts":3,"first_seen":"2026-04-03T14:22:00Z","last_seen":"2026-04-04T10:15:00Z","pubkey":"ssh-ed25519 AAAA... alice","requested_username":"Alice"}
 ]}
 ```
 
-Admin clients send `list_pending_keys` and present the result to the operator. Approve/reject is done via `sshkey-ctl`.
+Admin clients send `list_pending_keys` and present the result to the operator. Approve/reject is done via `sshkey-ctl`. Each entry carries the full `pubkey` (the authorized-keys line, so an admin client can copy it straight into `sshkey-ctl approve`) and the advisory `requested_username` (the sanitized SSH-username hint from connect; `requested_username` is omitted when none was captured, and `pubkey` may be empty for keys recorded before the server stored it).
 
 ### Errors
 
@@ -1465,7 +1465,7 @@ Admin clients send `list_pending_keys` and present the result to the operator. A
 | `invalid_profile` | Display name validation failed (too short, too long, invalid characters) |
 | `username_taken` | Display name already in use by another user (server-enforced uniqueness, case-insensitive) |
 | `internal` | Server-side failure (DB error, etc.) — client should retry or reconnect |
-| `client_required` | Connection from an unknown key or non-protocol SSH session — shows install/approval instructions |
+| `client_required` | Authenticated SSH session did not complete the sshkey client handshake (for example no `client_hello` in time). Unknown/unapproved keys fail at SSH auth before app-protocol errors can be sent. |
 
 **Byte-identical privacy responses.** The three `unknown_*` codes carry byte-identical wire responses across their ambiguous failure modes — "room does not exist" and "not a member of an existing room" return exactly the same bytes, so a probing client cannot enumerate existence via error diffs. The same invariant applies to groups and DMs.
 
@@ -1566,7 +1566,7 @@ Clients should handle disconnects gracefully and reconnect automatically.
 ```
 SSH connect (Ed25519 key)
     │
-    ├── Key not approved ──────────→ "client_required" error, disconnect
+    ├── Key not approved ──────────→ SSH auth fails; pending_keys row written
     ├── Account retired ───────────→ rejected at SSH level, disconnect
     │
     ▼
