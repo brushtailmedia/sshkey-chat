@@ -1,0 +1,141 @@
+{
+  "version": 1,
+  "comment": "Display-name policy conformance vectors. Owned by sshkey-chat (authoritative); vendored verbatim into first-party clients. Each client asserts its ValidateDisplayName matches valid/invalid here, plus the trimmed return for valid cases. Asserts accept/reject ONLY, never error text. Length is bytes-after-trim, NOT rune count. See displayname-validator-conformance.md.",
+  "cases": [
+    {
+      "name": "Alice",
+      "valid": true
+    },
+    {
+      "name": "  Alice  ",
+      "valid": true,
+      "want": "Alice",
+      "why": "trimmed return"
+    },
+    {
+      "name": "Alice Chen",
+      "valid": true,
+      "why": "internal spaces ok"
+    },
+    {
+      "name": "Jos\u00e9",
+      "valid": true,
+      "why": "accented (5 bytes)"
+    },
+    {
+      "name": "\u7530\u4e2d\u592a\u90ce",
+      "valid": true,
+      "why": "CJK (12 bytes, within cap)"
+    },
+    {
+      "name": "Al",
+      "valid": true,
+      "why": "min length (2 bytes)"
+    },
+    {
+      "name": "abcdefghijklmnopqrstuvwxyz123456",
+      "valid": true,
+      "why": "exactly 32 bytes (upper boundary)"
+    },
+    {
+      "name": "",
+      "valid": false,
+      "why": "empty"
+    },
+    {
+      "name": "   ",
+      "valid": false,
+      "why": "whitespace-only -> trims to empty"
+    },
+    {
+      "name": "A",
+      "valid": false,
+      "why": "too short (1 byte, < 2)"
+    },
+    {
+      "name": "abcdefghijklmnopqrstuvwxyz1234567",
+      "valid": false,
+      "why": "too long (33 bytes, > 32)"
+    },
+    {
+      "name": "\u7530\u7530\u7530\u7530\u7530\u7530\u7530\u7530\u7530\u7530\u7530",
+      "valid": false,
+      "why": "byte-length bound - 11 CJK runes = 33 bytes; pins server byte len() vs a naive rune count (the Rust-divergence trap)"
+    },
+    {
+      "name": "alice+bob",
+      "valid": false,
+      "why": "DP9 '+' ban (interior)"
+    },
+    {
+      "name": "+alice",
+      "valid": false,
+      "why": "DP9 '+' ban (leading)"
+    },
+    {
+      "name": "alice+inv_x",
+      "valid": false,
+      "why": "DP9 '+' ban (invite-code shape)"
+    },
+    {
+      "name": "alice+",
+      "valid": false,
+      "why": "DP9 '+' ban (trailing)"
+    },
+    {
+      "name": "+x",
+      "valid": false,
+      "why": "DP9 '+' ban (short leading)"
+    },
+    {
+      "name": "a\u0000b",
+      "valid": false,
+      "why": "NUL control (!IsPrint)"
+    },
+    {
+      "name": "hello\nworld",
+      "valid": false,
+      "why": "newline control (!IsPrint)"
+    },
+    {
+      "name": "hi\tthere",
+      "valid": false,
+      "why": "tab control (!IsPrint)"
+    },
+    {
+      "name": "test\u200bname",
+      "valid": false,
+      "why": "zero-width space"
+    },
+    {
+      "name": "test\u200dname",
+      "valid": false,
+      "why": "zero-width joiner"
+    },
+    {
+      "name": "test\u200ename",
+      "valid": false,
+      "why": "left-to-right mark"
+    },
+    {
+      "name": "test\ufeffname",
+      "valid": false,
+      "why": "BOM / zero-width no-break space"
+    },
+    {
+      "name": "test\u202ename",
+      "valid": false,
+      "why": "bidi override (RLO)"
+    },
+    {
+      "name": "test\u2060name",
+      "valid": false,
+      "why": "word joiner (invisible formatter)"
+    },
+    {
+      "name": "test\u2066name",
+      "valid": false,
+      "why": "left-to-right isolate (bidi isolate)"
+    }
+  ]
+}

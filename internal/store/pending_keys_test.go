@@ -1,6 +1,10 @@
 package store
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+	"time"
+)
 
 const testAuthKeyA = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
@@ -292,5 +296,138 @@ func TestGetPendingKeyByFingerprint(t *testing.T) {
 	}
 	if pk.PubKey != testAuthKeyA {
 		t.Errorf("PubKey = %q, want %q", pk.PubKey, testAuthKeyA)
+	}
+}
+
+// sqliteTime formats a time as the SQLite datetime('now') TEXT shape the
+// pending_keys schema uses, so seeded first_seen/last_seen sort/compare
+// correctly against the in-query cutoff.
+func sqliteTime(t time.Time) string {
+	return t.UTC().Format("2006-01-02 15:04:05")
+}
+
+// seedPendingRow inserts a pending_keys row with explicit first_seen/last_seen
+// so prune/cap behavior can be exercised deterministically.
+func seedPendingRow(t *testing.T, st *Store, fp, firstSeen, lastSeen string) {
+	t.Helper()
+	if _, err := st.dataDB.Exec(
+		`INSERT INTO pending_keys (fingerprint, remote_addr, pubkey, first_seen, last_seen)
+		 VALUES (?, '1.2.3.4:5', ?, ?, ?)`,
+		fp, testAuthKeyA, firstSeen, lastSeen); err != nil {
+		t.Fatalf("seed %s: %v", fp, err)
+	}
+}
+
+func pendingFingerprints(t *testing.T, st *Store) map[string]bool {
+	t.Helper()
+	rows, err := st.ListPendingKeys()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	out := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		out[r.Fingerprint] = true
+	}
+	return out
+}
+
+// TestPruneOldPendingKeys_AgesByFirstSeen proves the TTL keys off first_seen,
+// not last_seen: a reconnecting key (old first_seen, fresh last_seen) STILL
+// ages out, while a genuinely fresh contact survives. Also implicitly checks
+// the cutoff is a SQLite datetime TEXT comparison, not Unix seconds.
+func TestPruneOldPendingKeys_AgesByFirstSeen(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+
+	now := time.Now()
+	old := sqliteTime(now.AddDate(0, 0, -30))  // 30 days ago
+	fresh := sqliteTime(now)                   // just now
+	future := sqliteTime(now.AddDate(0, 0, 1)) // tomorrow (definitely fresh)
+
+	seedPendingRow(t, st, "SHA256:old", old, old)
+	// Reconnecting key: OLD first contact, RECENT activity — must still age out.
+	seedPendingRow(t, st, "SHA256:reconnect", old, future)
+	seedPendingRow(t, st, "SHA256:fresh", fresh, fresh)
+
+	removed, err := st.PruneOldPendingKeys(7 * 24 * 3600) // 7-day window
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if removed != 2 {
+		t.Errorf("removed = %d, want 2 (old + reconnecting)", removed)
+	}
+	got := pendingFingerprints(t, st)
+	if len(got) != 1 || !got["SHA256:fresh"] {
+		t.Errorf("survivors = %v, want only SHA256:fresh", got)
+	}
+}
+
+// TestEnforcePendingKeyCap_EvictsOldestByLastSeen checks the hard cap evicts
+// the least-recently-active rows and is a no-op under the cap.
+func TestEnforcePendingKeyCap_EvictsOldestByLastSeen(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+
+	base := time.Now().UTC()
+	for i := 1; i <= 5; i++ {
+		ts := sqliteTime(base.Add(time.Duration(i) * time.Minute)) // r1 oldest active … r5 newest
+		seedPendingRow(t, st, fmt.Sprintf("SHA256:r%d", i), ts, ts)
+	}
+
+	removed, err := st.EnforcePendingKeyCap(3)
+	if err != nil {
+		t.Fatalf("cap: %v", err)
+	}
+	if removed != 2 {
+		t.Errorf("removed = %d, want 2", removed)
+	}
+	if n, _ := st.CountPendingKeys(); n != 3 {
+		t.Errorf("count after cap = %d, want 3", n)
+	}
+	got := pendingFingerprints(t, st)
+	if got["SHA256:r1"] || got["SHA256:r2"] {
+		t.Errorf("oldest-by-last_seen rows should be evicted, got %v", got)
+	}
+	if !got["SHA256:r3"] || !got["SHA256:r4"] || !got["SHA256:r5"] {
+		t.Errorf("newest rows should survive, got %v", got)
+	}
+
+	// Under the cap → no-op.
+	if removed, err := st.EnforcePendingKeyCap(10); err != nil || removed != 0 {
+		t.Errorf("under-cap: removed=%d err=%v, want 0/nil", removed, err)
+	}
+}
+
+// TestEnforcePendingKeyCap_TieBreakByRowid proves same-second timestamps evict
+// in deterministic insertion (rowid) order — the storm case where many rows
+// share a second-resolution datetime('now').
+func TestEnforcePendingKeyCap_TieBreakByRowid(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+
+	same := sqliteTime(time.Now()) // identical last_seen/first_seen for all four
+	for i := 1; i <= 4; i++ {
+		seedPendingRow(t, st, fmt.Sprintf("SHA256:t%d", i), same, same)
+	}
+
+	// Cap at 2 → the two lowest-rowid (earliest-inserted) rows go first.
+	if _, err := st.EnforcePendingKeyCap(2); err != nil {
+		t.Fatalf("cap: %v", err)
+	}
+	got := pendingFingerprints(t, st)
+	if got["SHA256:t1"] || got["SHA256:t2"] {
+		t.Errorf("earliest-inserted rows should be evicted on tie, got %v", got)
+	}
+	if !got["SHA256:t3"] || !got["SHA256:t4"] {
+		t.Errorf("later-inserted rows should survive on tie, got %v", got)
 	}
 }

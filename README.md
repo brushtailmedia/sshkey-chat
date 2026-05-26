@@ -654,7 +654,7 @@ CREATE INDEX idx_reactions_message ON reactions(message_id);
 
 The server watches `server.toml` via fsnotify and reloads on SIGHUP.
 
-**Hot-reloadable (no restart):** rate limits, retention, file limits, device limits, sync settings, push credentials, self-leave policy flags (`allow_self_leave_rooms`, `allow_self_leave_retired_rooms`).
+**Hot-reloadable (no restart):** rate limits, retention, file limits, device limits, sync settings, push credentials, self-leave policy flags (`allow_self_leave_rooms`, `allow_self_leave_retired_rooms`), unknown-key storm bounds (`[server.pending_keys]` — TTL, row cap, notify rate-limit).
 
 **Requires restart:** port, bind address.
 

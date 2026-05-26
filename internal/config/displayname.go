@@ -18,10 +18,10 @@ func ValidateDisplayName(name string) (string, error) {
 		return "", fmt.Errorf("display name cannot be empty")
 	}
 	if len(name) < 2 {
-		return "", fmt.Errorf("display name must be at least 2 characters")
+		return "", fmt.Errorf("display name must be at least 2 bytes")
 	}
 	if len(name) > 32 {
-		return "", fmt.Errorf("display name must be 32 characters or fewer")
+		return "", fmt.Errorf("display name must be 32 bytes or fewer")
 	}
 
 	for _, r := range name {

@@ -26,7 +26,7 @@ The server does not allow anonymous access. Before a user can connect and chat, 
 {"type":"admin_notify","event":"pending_key","fingerprint":"SHA256:xx...","attempts":3,"first_seen":"2026-04-03T14:22:00Z","requested_username":"Alice"}
 ```
 
-This lets admins know someone is waiting for approval without polling.
+This lets admins know someone is waiting for approval without polling. The `pending_key` notification is **best-effort and rate-limited** — under a storm of fresh unknown keys the server throttles these pushes (and bounds the `pending_keys` table with a TTL + row cap), so a client must NOT treat the notification stream as a complete record. The authoritative operator view is `list_pending_keys` / `pending_keys_list` (see below) and the `sshkey-ctl pending` CLI; every contact is recorded there regardless of whether its notification was throttled.
 
 SSH channels per connection — **three `session` channels**, opened in a fixed order before `client_hello`:
 
@@ -827,7 +827,7 @@ The server filters pins by the user's `first_epoch` -- new members only see pins
 Profiles include the user's full public key and fingerprint. Use these for key wrapping and key pinning.
 
 **Display name rules:**
-- Min 2, max 32 characters
+- Min 2, max 32 **bytes** (UTF-8 length, measured after trimming — not rune/character count, so e.g. a name of 11 CJK characters is 33 bytes and is rejected)
 - No leading/trailing whitespace (server trims)
 - Server-enforced uniqueness (case-insensitive) — returns `username_taken` if the name collides with another user
 - Invalid names return `invalid_profile`
@@ -1498,7 +1498,7 @@ The server validates every incoming message. Common rejection reasons a client b
 - **Message body size:** 16KB max. Exceeding returns `message_too_large`.
 - **File upload size:** 100MB max (configurable). Exceeding returns `upload_too_large`.
 - **Group DM member count:** 150 max. Exceeding returns `too_many_members`.
-- **Display name:** 2-32 characters, no leading/trailing whitespace, unique (case-insensitive). Invalid returns `invalid_profile`; taken returns `username_taken`.
+- **Display name:** 2-32 UTF-8 **bytes** after trimming (byte length, not rune count), no leading/trailing whitespace, unique (case-insensitive). Invalid returns `invalid_profile`; taken returns `username_taken`.
 - **Ed25519 keys only:** RSA, ECDSA, and other key types are rejected at the SSH handshake level.
 - **Malformed messages:** Missing required fields, invalid JSON, or wrong field types return `invalid_message`.
 - **Epoch validation:** Messages encrypted with an epoch older than the grace window (current - 1) are rejected with `invalid_epoch`.

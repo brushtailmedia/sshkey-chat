@@ -186,6 +186,19 @@ type Server struct {
 	// restart often coincides with deployment changes worth
 	// snapshotting). Phase 19 Step 5.
 	backupSkipState backupSkipState
+
+	// pendingNotify rate-limits first-attempt pending-key admin notifications
+	// (unknown-key-storm-hardening gap D). Dedicated bucket — NOT the shared
+	// auth limiter (which clamps burst to >=5). Reads rate/burst from config
+	// per call so [server.pending_keys] hot-reload applies immediately.
+	pendingNotify *pendingNotifyLimiter
+
+	// pendingPruneMu + lastPendingPrune single-flight the opportunistic
+	// pending_keys TTL prune (gap B): concurrent SSH auth callbacks trigger at
+	// most one full age-based prune per prune_interval_seconds. The hard row
+	// cap (gap A) is enforced immediately after each pending-key record.
+	pendingPruneMu   sync.Mutex
+	lastPendingPrune time.Time
 }
 
 // backupSkipState is the per-Server state used by the skip_if_idle
@@ -217,6 +230,7 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		logger:               logger,
 		epochs:               newEpochManager(),
 		limiter:              newRateLimiter(),
+		pendingNotify:        &pendingNotifyLimiter{},
 		counters:             counters.New(),
 		clients:              make(map[string]*Client),
 		dataDir:              dir,
@@ -274,6 +288,14 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 		// disabled in config. Same family as cleanOrphanFiles —
 		// bounded maintenance, runs once at startup.
 		s.pruneOldQuotaRows()
+
+		// Storm-bound the pending_keys table at startup: TTL-prune stale
+		// never-approved contacts + enforce the hard row cap. Clears stale
+		// rows even on quiet servers where no new unknown key arrives to
+		// trigger the opportunistic prune. Log-and-continue (same family as
+		// pruneOldQuotaRows above). unknown-key-storm-hardening §4.2.
+		s.prunePendingKeys()
+		s.markPendingPruneRan()
 
 		// Phase 19 Step 2: write the server-process lockfile. Refuses
 		// to start if another server instance is running against this
@@ -763,7 +785,11 @@ func (s *Server) logPendingKey(fingerprint, remote, pubKey, requestedUser string
 		return
 	}
 
-	if isFirstAttempt {
+	// Gap D: rate-limit first-attempt pending-key notifications through a
+	// dedicated limiter so a distributed fresh-key storm can't flood admins.
+	// allowPendingNotify is consulted (and consumes a token) only on a first
+	// attempt; repeat attempts never notify regardless.
+	if isFirstAttempt && s.allowPendingNotify() {
 		s.notifyAdmins(protocol.AdminNotify{
 			Type:              "admin_notify",
 			Event:             "pending_key",
@@ -773,6 +799,15 @@ func (s *Server) logPendingKey(fingerprint, remote, pubKey, requestedUser string
 			RequestedUsername: requestedUser,
 		})
 	}
+
+	// Gap A: enforce the hard row cap immediately after recording the current
+	// key, so pending_keys never sits at max_rows+1 between interval prunes.
+	s.enforcePendingKeyCap(s.pendingKeysCfg().MaxRows)
+
+	// Gap B: opportunistically TTL-prune old rows. Single-flight +
+	// interval-gated, so a storm doesn't add a full age-based prune per
+	// attempt. unknown-key-storm-hardening §4.2.
+	s.maybePrunePendingKeys()
 }
 
 // notifyAdmins sends a message to all connected admin clients.

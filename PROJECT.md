@@ -1265,7 +1265,7 @@ User and room data lives in SQLite databases (`users.db`, `rooms.db`). Changes v
 All state-changing commands (retire-user, promote, demote, rename-user, update-topic, rename-room, revoke-device, remove-from-room) propagate live to connected clients via the Phase 16 `pending_*` queue + polling processor pattern. The CLI writes to the DB and enqueues a broadcast row; the running server's processor drains the queue and fires the appropriate protocol event within ~5 seconds.
 
 **Hot-reloadable (server.toml, no restart):**
-- `[retention]`, `[files]`, `[rate_limits]`, `[messages]`, `[sync]`, `[devices]`, `[logging]`
+- `[retention]`, `[files]`, `[rate_limits]`, `[messages]`, `[sync]`, `[devices]`, `[logging]`, `[server.auto_revoke]`, `[server.quotas]`, `[server.pending_keys]` (unknown-key storm bounds — TTL, row cap, notify rate-limit)
 
 **Requires restart:**
 - `server.toml`: `port`, `bind` (can't rebind a listening socket)

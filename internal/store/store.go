@@ -799,6 +799,15 @@ func (s *Store) initDataDB() error {
 			ON file_contexts(file_id);
 		CREATE INDEX IF NOT EXISTS idx_file_contexts_cleanup
 			ON file_contexts(context_type, context_id);
+
+		-- pending_keys storm-bounding access paths (unknown-key-storm-hardening):
+		-- the TTL prune ages out by first_seen (DELETE WHERE first_seen < cutoff);
+		-- the list (newest-first) and hard-cap eviction (oldest-first) order by
+		-- last_seen. Cheap at the 1000-row cap, but the clean shape for both.
+		CREATE INDEX IF NOT EXISTS idx_pending_keys_first_seen
+			ON pending_keys(first_seen);
+		CREATE INDEX IF NOT EXISTS idx_pending_keys_last_seen
+			ON pending_keys(last_seen, first_seen);
 	`)
 	if err != nil {
 		return err

@@ -87,6 +87,7 @@ func (s *Server) reloadServerConfig() {
 	// Only update hot-reloadable fields (admin status is in users.db, not server.toml)
 	s.cfg.Server.Server.AutoRevoke = newCfg.Server.AutoRevoke
 	s.cfg.Server.Server.Quotas = newCfg.Server.Quotas
+	s.cfg.Server.Server.PendingKeys = newCfg.Server.PendingKeys
 	s.cfg.Server.Retention = newCfg.Retention
 	s.cfg.Server.Files = newCfg.Files
 	s.cfg.Server.RateLimits = newCfg.RateLimits

@@ -103,6 +103,48 @@ type ServerSection struct {
 	// pattern. See internal/config/quotas.go for the schema +
 	// validation. Nested as [server.quotas] in server.toml.
 	Quotas QuotasSection `toml:"quotas"`
+
+	// PendingKeys bounds the cost of an unknown-key storm — a TTL + hard row
+	// cap on the pending_keys table plus a rate-limit on first-attempt
+	// pending-key admin notifications. Default-on with generous values; all
+	// knobs must be positive (0 is invalid, not a disable switch). Nested as
+	// [server.pending_keys]. See docs/planning unknown-key-storm-hardening.
+	PendingKeys PendingKeysSection `toml:"pending_keys"`
+}
+
+// PendingKeysSection bounds an unknown-key storm's cost on pending_keys
+// (server-authoritative, pre-admission). MaxAgeHours ages out a never-approved
+// contact by first_seen; MaxRows is the hard storage ceiling (oldest-by-
+// last_seen evicted); PruneIntervalSeconds throttles the opportunistic prune;
+// NotifyPerMinute/NotifyBurst rate-limit first-attempt pending-key admin
+// notifications via a dedicated limiter (separate from the auth limiter).
+type PendingKeysSection struct {
+	MaxAgeHours          int `toml:"max_age_hours"`
+	MaxRows              int `toml:"max_rows"`
+	PruneIntervalSeconds int `toml:"prune_interval_seconds"`
+	NotifyPerMinute      int `toml:"notify_per_minute"`
+	NotifyBurst          int `toml:"notify_burst"`
+}
+
+// Validate requires every knob positive and notify_burst within
+// [1, notify_per_minute]. Called from ServerConfig.Validate.
+func (p PendingKeysSection) Validate() error {
+	if p.MaxAgeHours <= 0 {
+		return fmt.Errorf("[server.pending_keys] max_age_hours must be positive, got %d", p.MaxAgeHours)
+	}
+	if p.MaxRows <= 0 {
+		return fmt.Errorf("[server.pending_keys] max_rows must be positive, got %d", p.MaxRows)
+	}
+	if p.PruneIntervalSeconds <= 0 {
+		return fmt.Errorf("[server.pending_keys] prune_interval_seconds must be positive, got %d", p.PruneIntervalSeconds)
+	}
+	if p.NotifyPerMinute <= 0 {
+		return fmt.Errorf("[server.pending_keys] notify_per_minute must be positive, got %d", p.NotifyPerMinute)
+	}
+	if p.NotifyBurst < 1 || p.NotifyBurst > p.NotifyPerMinute {
+		return fmt.Errorf("[server.pending_keys] notify_burst must satisfy 1 <= notify_burst <= notify_per_minute, got burst=%d per_minute=%d", p.NotifyBurst, p.NotifyPerMinute)
+	}
+	return nil
 }
 
 type MessagesSection struct {
@@ -320,6 +362,13 @@ func DefaultServerConfig() ServerConfig {
 					RetentionDays:         30,
 				},
 			},
+			PendingKeys: PendingKeysSection{
+				MaxAgeHours:          168, // 7 days for a slow/manual operator to approve
+				MaxRows:              1000,
+				PruneIntervalSeconds: 60,
+				NotifyPerMinute:      5,
+				NotifyBurst:          1,
+			},
 		},
 		Messages: MessagesSection{
 			MaxBodySize: "16KB",
@@ -456,6 +505,10 @@ func (c ServerConfig) Validate() (warnings []string, err error) {
 	// validation and disables the feature. Invalid fields under
 	// Enabled=true → hard error.
 	if _, err := c.Server.Quotas.User.ParseAndValidate(); err != nil {
+		return nil, err
+	}
+
+	if err := c.Server.PendingKeys.Validate(); err != nil {
 		return nil, err
 	}
 

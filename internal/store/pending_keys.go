@@ -173,3 +173,59 @@ func (s *Store) CountPendingKeys() (int, error) {
 	err := s.dataDB.QueryRow(`SELECT COUNT(*) FROM pending_keys`).Scan(&n)
 	return n, err
 }
+
+// PruneOldPendingKeys deletes pending-key rows whose first_seen is older than
+// maxAgeSeconds, returning how many were removed. It ages out by first_seen
+// (first contact), NOT last_seen, so a key that keeps reconnecting (each
+// reconnect bumps last_seen via the UPSERT) cannot keep its row alive past the
+// TTL. The cutoff is computed in SQLite's own UTC datetime space and compared
+// as a TEXT datetime string, matching the datetime('now')-formatted first_seen
+// column — do NOT compare these TEXT timestamps against Unix seconds (the
+// pending_keys schema stores TEXT, unlike e.g. deleted_rooms.deleted_at which
+// is an INTEGER unix time). Storm-hardening companion to EnforcePendingKeyCap.
+func (s *Store) PruneOldPendingKeys(maxAgeSeconds int64) (int, error) {
+	res, err := s.dataDB.Exec(
+		`DELETE FROM pending_keys WHERE first_seen < datetime('now', ?)`,
+		fmt.Sprintf("-%d seconds", maxAgeSeconds),
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// EnforcePendingKeyCap evicts the oldest rows when pending_keys exceeds
+// maxRows, returning how many were removed. "Oldest" is least-recently-active:
+// ORDER BY last_seen ASC, first_seen ASC, rowid ASC, fingerprint ASC — rowid is
+// the insertion-order tie-breaker for the many storm rows that share a
+// second-resolution datetime('now') timestamp. Uses the portable
+// `rowid IN (SELECT ... LIMIT ?)` deletion shape rather than
+// `DELETE ... ORDER BY ... LIMIT` (which depends on the optional
+// SQLITE_ENABLE_UPDATE_DELETE_LIMIT build flag). The hard cap bounds storage
+// independent of the TTL — a distributed storm can fill the table inside the
+// TTL window. Callers should enforce the cap AFTER recording the current key,
+// so a fresh first-contact never leaves the table at maxRows+1.
+func (s *Store) EnforcePendingKeyCap(maxRows int) (int, error) {
+	count, err := s.CountPendingKeys()
+	if err != nil {
+		return 0, err
+	}
+	excess := count - maxRows
+	if excess <= 0 {
+		return 0, nil
+	}
+	res, err := s.dataDB.Exec(
+		`DELETE FROM pending_keys WHERE rowid IN (
+			SELECT rowid FROM pending_keys
+			ORDER BY last_seen ASC, first_seen ASC, rowid ASC, fingerprint ASC
+			LIMIT ?
+		)`,
+		excess,
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}

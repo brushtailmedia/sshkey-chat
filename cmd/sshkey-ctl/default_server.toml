@@ -177,6 +177,48 @@ flag_consecutive_days = 2
 retention_days = 30
 
 # ----------------------------------------------------------------------
+# [server.pending_keys] — unknown-key storm bounding
+# ----------------------------------------------------------------------
+#
+# Bounds the cost of an unauthenticated "unknown-key storm" — an attacker
+# opening many SSH connections with fresh random Ed25519 keys, each a NEW
+# fingerprint that sails past the per-fingerprint block list and lands a new
+# pending_keys row + a first-attempt admin_notify. The per-IP failed-auth limit
+# ([rate_limits] failed_auth_per_minute) already bounds a single source; these
+# knobs bound the DISTRIBUTED case and total growth. The unknown key is
+# rejected either way (no session without `sshkey-ctl approve`) — this bounds
+# only the recording cost, never admission. All values must be positive; 0 is
+# invalid (not a disable switch). Hot-reloadable.
+[server.pending_keys]
+
+# TTL: a never-approved pending key ages out this long after FIRST contact
+# (first_seen), regardless of reconnects — a key that keeps reconnecting cannot
+# keep its row alive past the window. 7 days gives a slow/manual operator a
+# week to approve a real contact before it's pruned.
+max_age_hours = 168
+
+# Hard ceiling on total pending_keys rows. When exceeded, the least-recently-
+# active rows (oldest last_seen) are evicted. Bounds storage even inside the TTL
+# window (a distributed storm can accumulate a working set faster than the TTL
+# ages it out). Generous for a small/private server, bounded enough to keep
+# `sshkey-ctl pending` and the DB sane under abuse.
+max_rows = 1000
+
+# Minimum seconds between opportunistic TTL-prune runs. The hard row cap is
+# enforced immediately after each pending-key record; this interval only gates
+# the heavier age-based scan so a storm doesn't add a full table scan per
+# connection. A TTL prune also runs once at startup.
+prune_interval_seconds = 60
+
+# Rate-limit for first-attempt pending-key admin_notify pushes (a dedicated
+# limiter, separate from auth rate-limiting): notify_burst immediate
+# notifications, then ~notify_per_minute sustained. The per-key row is recorded
+# regardless — only the push is throttled, so a fresh-key storm can't flood
+# connected admins. Must satisfy 1 <= notify_burst <= notify_per_minute.
+notify_per_minute = 5
+notify_burst = 1
+
+# ----------------------------------------------------------------------
 # [messages]
 # ----------------------------------------------------------------------
 
