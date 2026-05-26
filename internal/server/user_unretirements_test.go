@@ -29,7 +29,7 @@ func TestProcessPendingUserUnretirements_HappyPath(t *testing.T) {
 		t.Fatalf("retire: %v", err)
 	}
 	// Then unretire — first the CLI flips the flag, then enqueues.
-	if err := s.store.SetUserUnretired("bob"); err != nil {
+	if _, _, err := s.store.SetUserUnretired("bob"); err != nil {
 		t.Fatalf("unretire: %v", err)
 	}
 	if err := s.store.RecordPendingUserUnretirement("bob", "os:1000"); err != nil {
@@ -141,7 +141,7 @@ func TestProcessPendingUserUnretirements_AuditEntryCreditsOperator(t *testing.T)
 	if err := s.store.SetUserRetired("bob", "test"); err != nil {
 		t.Fatalf("retire: %v", err)
 	}
-	if err := s.store.SetUserUnretired("bob"); err != nil {
+	if _, _, err := s.store.SetUserUnretired("bob"); err != nil {
 		t.Fatalf("unretire: %v", err)
 	}
 	if err := s.store.RecordPendingUserUnretirement("bob", "os:5678"); err != nil {
@@ -177,7 +177,7 @@ func TestProcessPendingUserUnretirements_BroadcastsToAllClients(t *testing.T) {
 	if err := s.store.SetUserRetired("bob", "test"); err != nil {
 		t.Fatalf("retire: %v", err)
 	}
-	if err := s.store.SetUserUnretired("bob"); err != nil {
+	if _, _, err := s.store.SetUserUnretired("bob"); err != nil {
 		t.Fatalf("unretire: %v", err)
 	}
 	if err := s.store.RecordPendingUserUnretirement("bob", "os:1000"); err != nil {

@@ -831,7 +831,12 @@ func cmdUnretireUser(dataDir string, args []string) error {
 	// whether the running server processes the queue row, then
 	// enqueue a row so the running server can broadcast
 	// user_unretired to connected clients.
-	if err := st.SetUserUnretired(name); err != nil {
+	//
+	// SetUserUnretired tries to restore the original display name; if it was
+	// claimed by another account while this one was retired, it assigns a
+	// unique placeholder instead and reports restoredOriginal=false.
+	chosenName, restoredOriginal, err := st.SetUserUnretired(name)
+	if err != nil {
 		return fmt.Errorf("unretire user: %w", err)
 	}
 	unretiredBy := fmt.Sprintf("os:%d", os.Getuid())
@@ -839,16 +844,12 @@ func cmdUnretireUser(dataDir string, args []string) error {
 		return fmt.Errorf("unretire-user: flag cleared but queue enqueue failed (unretirement is still effective in users.db, but live broadcasts to connected sessions will be skipped until the server next restarts): %w", err)
 	}
 
-	// Re-fetch the user to get the post-unretirement display name
-	// (with the retirement suffix stripped) so the operator sees the
-	// restored name in the success output.
-	uAfter := st.GetUserByID(name)
-	displayName := name
-	if uAfter != nil {
-		displayName = uAfter.DisplayName
+	if restoredOriginal {
+		fmt.Printf("User %q unretired (display name restored: %q).\n", name, chosenName)
+	} else {
+		fmt.Printf("User %q unretired. The original display name was taken, so a temporary name %q was assigned.\n", name, chosenName)
+		fmt.Println("The user can change it from their client (set_profile), subject to the usual uniqueness check.")
 	}
-
-	fmt.Printf("User %q unretired (display name: %q).\n", name, displayName)
 	fmt.Println("Connected clients will flush the [retired] marker shortly.")
 	fmt.Println()
 	fmt.Println("Note: room/group/DM memberships were NOT restored. To restore them:")

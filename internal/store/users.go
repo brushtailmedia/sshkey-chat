@@ -235,77 +235,157 @@ func (s *Store) InsertUser(id, key, displayName string) error {
 	return err
 }
 
-// SetUserRetired marks a user as retired, suffixes the display name, and records the reason.
+// maxDisplayNameBytes mirrors the display-name byte cap enforced by
+// config.ValidateDisplayName. Kept as a local constant so the store layer does
+// not depend on the config package; if the policy cap ever changes, update both.
+const maxDisplayNameBytes = 32
+
+// truncateToBytes returns the longest prefix of s whose length in bytes does not
+// exceed max, cut on a UTF-8 rune boundary so a multi-byte rune is never split.
+func truncateToBytes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if len(s) <= max {
+		return s
+	}
+	cut := 0
+	for i := range s { // i is the byte offset of each rune's start
+		if i > max {
+			break
+		}
+		cut = i
+	}
+	return s[:cut]
+}
+
+// SetUserRetired marks a user as retired, suffixes the display name to free it
+// for reuse, and records the reason.
+//
+// Option (b) of retirement-name-handling: the 32-byte display-name policy is
+// left unchanged, and when the name plus the retirement suffix would exceed the
+// byte cap the name is truncated on a UTF-8 rune boundary to make room — only on
+// retire, only when necessary. (See refactor-plan.md.)
 func (s *Store) SetUserRetired(userID, reason string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	// Suffix display name to free it for reuse
+	// Suffix display name to free it for reuse.
 	suffix := ""
 	if len(userID) > 8 {
 		suffix = "_" + userID[4:8]
 	}
+
+	// Short userID (no suffix): preserve the original flag-only update so the
+	// display name passes through untouched.
+	if suffix == "" {
+		_, err := s.usersDB.Exec(`
+			UPDATE users SET
+				retired = 1,
+				retired_at = ?,
+				retired_reason = ?
+			WHERE id = ? AND retired = 0`,
+			now, reason, userID,
+		)
+		return err
+	}
+
+	// Read the current name so we can rune-safe truncate it to leave room for
+	// the suffix within the byte cap, then write base+suffix. (The WHERE
+	// retired = 0 guard below still makes a re-retire a no-op.)
+	user := s.GetUserByID(userID)
+	if user == nil {
+		return fmt.Errorf("user %q does not exist", userID)
+	}
+	base := truncateToBytes(user.DisplayName, maxDisplayNameBytes-len(suffix))
+	retiredName := base + suffix
 
 	_, err := s.usersDB.Exec(`
 		UPDATE users SET
 			retired = 1,
 			retired_at = ?,
 			retired_reason = ?,
-			display_name = display_name || ?
+			display_name = ?
 		WHERE id = ? AND retired = 0`,
-		now, reason, suffix, userID,
+		now, reason, retiredName, userID,
 	)
 	return err
 }
 
-// SetUserUnretired reverses a retirement by flipping retired back to 0,
-// clearing retired_at / retired_reason, and stripping the suffix that
-// SetUserRetired added to the display name. Phase 16 Gap 1 escape hatch
-// for mistaken retirements.
+// setUserUnretiredMaxAttempts bounds placeholder-name regeneration when the
+// original display name is unavailable on unretire. A random GenerateID name
+// effectively never collides, so this is purely defensive (mirrors rooms'
+// setRoomRetiredMaxAttempts).
+const setUserUnretiredMaxAttempts = 5
+
+// SetUserUnretired reverses a retirement. It attempts to restore the user's
+// original display name (stripping the retirement suffix that SetUserRetired
+// added); if that name is unavailable — empty, or already claimed by another
+// account while this one was retired (retirement frees the name) — it assigns a
+// unique random placeholder instead, which the user can change later via their
+// client. Phase 16 Gap 1 escape hatch for mistaken retirements.
 //
-// The display-name un-suffix is best-effort: SetUserRetired adds
-// "_<userID[4:8]>" to the end of the display name (when the userID is
-// longer than 8 characters). SetUserUnretired strips the same suffix
-// IF the current display name ends with it. If the display name
-// doesn't end with the expected suffix (e.g. the operator manually
-// edited it via a future rename-user verb), the name is left
-// unchanged — the operator can always rename explicitly afterwards.
+// Returns the assigned display name and whether the original was restored
+// (false = a placeholder was assigned). The stripped original is valid by
+// construction (it was a valid name before retirement, and rune-safe truncation
+// preserves validity), so unretirement gates only on availability, not on
+// re-validation.
 //
-// What this does NOT do: restore room/group/DM memberships. The
-// retirement cascade in handleRetirement removed the user from every
-// shared context, and SetUserUnretired only touches the users table.
-// Operators must manually re-add via `sshkey-ctl add-to-room` (or
-// in-group /add for group DMs). This matches the Phase 16 plan's
-// documented behavior — `unretire-user` is intentionally minimal.
+// What this does NOT do: restore room/group/DM memberships. The retirement
+// cascade in handleRetirement removed the user from every shared context, and
+// SetUserUnretired only touches the users table. Operators must manually re-add
+// via `sshkey-ctl add-to-room` (or in-group /add for group DMs).
 //
-// Returns an error if the user doesn't exist or is not currently
-// retired (the CLI side surfaces these as user-facing errors).
-func (s *Store) SetUserUnretired(userID string) error {
+// Returns an error if the user doesn't exist or is not currently retired (the
+// CLI side surfaces these as user-facing errors).
+func (s *Store) SetUserUnretired(userID string) (string, bool, error) {
 	user := s.GetUserByID(userID)
 	if user == nil {
-		return fmt.Errorf("user %q does not exist", userID)
+		return "", false, fmt.Errorf("user %q does not exist", userID)
 	}
 	if !user.Retired {
-		return fmt.Errorf("user %q is not retired", userID)
+		return "", false, fmt.Errorf("user %q is not retired", userID)
 	}
 
-	// Compute the un-suffixed display name. The suffix logic is the
-	// inverse of SetUserRetired's: same userID slice, same separator.
-	newName := user.DisplayName
+	// Best-effort original name: strip the retirement suffix (inverse of
+	// SetUserRetired's: same userID slice, same separator).
+	candidate := user.DisplayName
 	if len(userID) > 8 {
-		suffix := "_" + userID[4:8]
-		newName = strings.TrimSuffix(newName, suffix)
+		candidate = strings.TrimSuffix(candidate, "_"+userID[4:8])
 	}
 
-	_, err := s.usersDB.Exec(`
+	chosen := candidate
+	restoredOriginal := true
+
+	// If the original name is empty or has been claimed by another account,
+	// fall back to a unique random placeholder. IsDisplayNameTaken excludes this
+	// user's own (still-suffixed) row, so it detects a genuine third-party claim.
+	if candidate == "" || s.IsDisplayNameTaken(candidate, userID) {
+		restoredOriginal = false
+		chosen = ""
+		for attempt := 0; attempt < setUserUnretiredMaxAttempts; attempt++ {
+			name := GenerateID("user_")
+			if !s.IsDisplayNameTaken(name, userID) {
+				chosen = name
+				break
+			}
+		}
+		if chosen == "" {
+			return "", false, fmt.Errorf("unretire %q: could not generate an available placeholder display name", userID)
+		}
+	}
+
+	if _, err := s.usersDB.Exec(`
 		UPDATE users SET
 			retired = 0,
 			retired_at = '',
 			retired_reason = '',
 			display_name = ?
 		WHERE id = ? AND retired = 1`,
-		newName, userID,
-	)
-	return err
+		chosen, userID,
+	); err != nil {
+		return "", false, err
+	}
+	return chosen, restoredOriginal, nil
 }
 
 // SetUserDisplayName updates a user's display name.
@@ -331,7 +411,10 @@ func (s *Store) UsersDB() *sql.DB {
 
 // --- helpers ---
 
-func scanUserRows(rows interface{ Next() bool; Scan(...any) error }) []UserRecord {
+func scanUserRows(rows interface {
+	Next() bool
+	Scan(...any) error
+}) []UserRecord {
 	var users []UserRecord
 	for rows.Next() {
 		var u UserRecord
