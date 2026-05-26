@@ -282,6 +282,36 @@ func TestHandleEpochRotate_StoreBatchFailure_AbortsAndClearsRotation(t *testing.
 	}
 }
 
+func TestHandleSetProfile_UserDBWriteFailure_AbortsBroadcastAndRespondsInternal(t *testing.T) {
+	s := newTestServer(t)
+
+	alice := testClientFor("alice", "dev_alice_setprofile_fail")
+	s.clients[alice.DeviceID] = alice.Client
+
+	raw, _ := json.Marshal(protocol.SetProfile{
+		Type:        "set_profile",
+		DisplayName: "Alice Renamed",
+	})
+
+	if _, err := s.store.UsersDB().Exec(`DROP TABLE users`); err != nil {
+		t.Fatalf("drop users table: %v", err)
+	}
+
+	s.handleSetProfile(alice.Client, raw)
+
+	msgs := alice.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected exactly one internal_error response and no profile broadcast, got %d: %s", len(msgs), msgs)
+	}
+	var got protocol.Error
+	if err := json.Unmarshal(msgs[0], &got); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if got.Type != "error" || got.Code != protocol.CodeInternal {
+		t.Fatalf("response = %#v, want error/internal", got)
+	}
+}
+
 // TestHandleReact_DBFailure note: bug #4 fix is verified by
 // TestHandleSend_DBFailure above (same error-path pattern: DB INSERT
 // failure → respondError with CodeInternal). A dedicated failure-

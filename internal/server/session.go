@@ -3298,8 +3298,18 @@ func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Update display name in users.db
-	s.store.SetUserDisplayName(c.UserID, msg.DisplayName)
+	// Update display name in users.db. Check the write: if it fails *after*
+	// validation + the uniqueness check passed, do NOT fall through to the
+	// profile broadcast below — broadcasting a self-`profile` the client treats
+	// as durable confirmation while the DB write actually failed is a false
+	// success (see rename-collision-ux.md). internal_error is Category-A
+	// (client retry), NOT operation_rejected/CodeDenied (Category D = privacy/
+	// authorization denial, the wrong category for a storage-write failure).
+	if err := s.store.SetUserDisplayName(c.UserID, msg.DisplayName); err != nil {
+		s.logger.Error("set_profile: display name write failed", "user", c.UserID, "error", err)
+		s.respondError(c, "", protocol.CodeInternal, "Could not save display name — please try again", 0)
+		return
+	}
 
 	// Update avatar in data.db profiles table
 	if s.store != nil {

@@ -10,8 +10,9 @@ import (
 
 // Conformance-vector loader test (displayname-validator-conformance.md, Option
 // C). The canonical vector file lives here in the authoritative server repo;
-// sshkey-term vendors a byte-identical copy and runs the equivalent test, and a
-// repo-root drift check in the term repo guards the vendored copy. The contract:
+// sshkey-term vendors a byte-identical copy and runs the equivalent test, and an
+// in-package drift check in the term repo's internal/tui guards the vendored copy.
+// The contract:
 // assert accept/reject and the trimmed return for valid cases — never error
 // text. Length is bytes-after-trim, not rune count.
 
