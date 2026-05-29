@@ -24,7 +24,7 @@ func TestDeleteDirectMessage_RemovesRowAndFile(t *testing.T) {
 
 	// Insert a message so the per-DM database file is actually created
 	// on disk (DMDB is lazy — it only opens the file on first use).
-	if err := s.InsertDMMessage(dm.ID, StoredMessage{
+	if _, err := s.InsertDMMessage(dm.ID, StoredMessage{
 		ID: "msg_1", Sender: "alice", TS: 100, Payload: "hi",
 	}); err != nil {
 		t.Fatalf("insert DM message: %v", err)

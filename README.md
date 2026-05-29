@@ -52,6 +52,16 @@ Key wrapping: Ed25519 -> X25519 conversion, ephemeral ECDH, HKDF-SHA256, AES-256
 
 Only Ed25519 SSH keys are supported. The server rejects RSA, ECDSA, and other key types.
 
+The SSH transport pins a modern algorithm allowlist (post-quantum-hybrid key exchange, AEAD-only ciphers); see [`PROTOCOL.md`](PROTOCOL.md) → *Transport security*.
+
+### Data at rest
+
+The server is an untrusted **relay** — it cannot read message content (it holds no message keys, epoch keys, or user private keys). Two pieces of server-side state are nonetheless stored **unencrypted on disk**, protected by filesystem permissions rather than encryption. These are **accepted design choices for now**, documented here so operators can make an informed deployment decision, and revisable in future:
+
+- **Host private key — unencrypted (`host_key`, mode `0600`).** The server's Ed25519 SSH host key is written without a passphrase so the server can start unattended (the standard SSH host-key model). *Implication:* anyone who can read the config directory can take the host key and impersonate the server to clients — on a client's first connect, or after a client resets its trust-on-first-use record. *Mitigation:* restrict the config directory and treat host-filesystem access as equivalent to server compromise. A future option is an encrypted host key unlocked by a boot-time secret.
+
+- **Database + backups — unencrypted (plaintext SQLite).** The server database stores **no secrets** — only public keys, fingerprints, opaque ciphertext (message payloads it cannot decrypt), and per-recipient wrapped keys it cannot unwrap; there is no plaintext message body, user private key, or unwrapped epoch key. It does, however, hold **metadata** in the clear: who is in which room / group / DM, fingerprints, and message timing and size. Backups carry the same data. *Implication:* anyone who can read the data directory (or a backup) learns the social graph and metadata — the same information the operator inherently sees, but now also at rest. *Mitigation:* restrict the data directory and backup location; use full-disk encryption if metadata-at-rest is in your threat model. (The client-side database, by contrast, *is* encrypted — SQLCipher — because it holds unwrapped keys.)
+
 ## Binaries
 
 | Binary | Description |

@@ -94,11 +94,16 @@ func (s *Server) syncRoom(c *Client, roomID string, sinceTS int64, limit int) {
 		return
 	}
 
-	// Filter out messages from epochs before the user's first_epoch
+	// Filter out messages from epochs before the user's first_epoch. Tombstones
+	// obey the same gate: a deleted row's existence is itself information, so a
+	// pre-first_epoch tombstone must not appear in a member's sync batch — the
+	// same rule the history path enforces (history-state-model.md S4). Previously
+	// deleted rows were exempted here (`|| m.Deleted`), leaking that a
+	// pre-membership message had existed (S5 follow-up).
 	if firstEpoch > 0 {
 		filtered := msgs[:0]
 		for _, m := range msgs {
-			if m.Epoch >= firstEpoch || m.Deleted {
+			if m.Epoch >= firstEpoch {
 				filtered = append(filtered, m)
 			}
 		}
@@ -335,17 +340,19 @@ func storedToRawDMMessages(msgs []store.StoredMessage, dmID string) []json.RawMe
 		var data []byte
 		if m.Deleted {
 			tombstone := protocol.Deleted{
-				Type:      "deleted",
-				ID:        m.ID,
-				DeletedBy: m.Sender,
-				TS:        m.TS,
-				DM:        dmID,
+				Type:        "deleted",
+				ID:          m.ID,
+				ServerOrder: m.ServerOrder,
+				DeletedBy:   m.Sender,
+				TS:          m.TS,
+				DM:          dmID,
 			}
 			data, _ = json.Marshal(tombstone)
 		} else {
 			msg := protocol.DM{
 				Type:        "dm",
 				ID:          m.ID,
+				ServerOrder: m.ServerOrder,
 				From:        m.Sender,
 				DM:          dmID,
 				TS:          m.TS,
@@ -364,9 +371,26 @@ func storedToRawDMMessages(msgs []store.StoredMessage, dmID string) []json.RawMe
 
 // handleHistory processes a history (scroll-back) request.
 func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
+	// Extract the corr_id before the limiter so a rate-limited history request
+	// is correlated. The term client pins history errors by corr_id (Incoming
+	// Result Guard + abort path); an uncorrelated rate_limit can't be
+	// attributed to a specific history request, which would force a fragile
+	// "abort on any uncorrelated rate_limited" heuristic on the client. This is
+	// a cheap partial parse — the full unmarshal + corr_id validation still run
+	// below if we pass the limiter. Echo only a well-formed corr_id
+	// (ValidateCorrID treats empty as valid, so a missing one stays empty).
+	var corrPeek struct {
+		CorrID string `json:"corr_id,omitempty"`
+	}
+	_ = json.Unmarshal(raw, &corrPeek)
+	peekCorrID := corrPeek.CorrID
+	if protocol.ValidateCorrID(peekCorrID) != nil {
+		peekCorrID = ""
+	}
+
 	if allowed, retryMs := s.limiter.allowPerMinuteWithRetry("history:"+c.UserID, s.cfg.Server.RateLimits.HistoryPerMinute); !allowed {
 		s.rejectAndLog(c, counters.SignalRateLimited, "history", "history rate limit exceeded",
-			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many requests — wait a moment", RetryAfterMs: retryMs})
+			&protocol.Error{Type: "error", Code: protocol.ErrRateLimited, Message: "Too many requests — wait a moment", RetryAfterMs: retryMs, CorrID: peekCorrID})
 		return
 	}
 
@@ -380,7 +404,37 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	// Require exactly one context. An empty context would fall through the
+	// room/group/dm chain below with no response (the client's history request
+	// hangs); an ambiguous one (>1 set) would be silently treated as the first
+	// matching branch. Reject explicitly with the request corr_id so the client
+	// can correlate and abort the load. The first-party client always sets one;
+	// this is defense against malformed frames from any client (mirrors the
+	// typing handler's empty/ambiguous-context check). This request-malformed
+	// check runs before the server-state check below, so a bad frame gets
+	// invalid_context regardless of store availability.
+	ctxCount := 0
+	if req.Room != "" {
+		ctxCount++
+	}
+	if req.Group != "" {
+		ctxCount++
+	}
+	if req.DM != "" {
+		ctxCount++
+	}
+	if ctxCount != 1 {
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "history", "empty/ambiguous history context",
+			&protocol.Error{Type: "error", Code: "invalid_context", Message: "history request must target exactly one of room, group, or DM", CorrID: req.CorrID})
+		return
+	}
+
+	// An accepted history request must always resolve with a terminal frame, so
+	// a storage-unavailable path returns a correlated internal_error rather than
+	// silently returning (which would leave the client's load stuck forever).
+	// store is non-nil in production; this is the defensive owned-response path.
 	if s.store == nil {
+		s.respondError(c, req.CorrID, protocol.CodeInternal, "history temporarily unavailable", 0)
 		return
 	}
 
@@ -400,31 +454,22 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 			return
 		}
 
-		msgs, err := s.store.GetRoomMessagesBefore(req.Room, req.Before, limit+1)
+		// Resolve the cursor + page within the caller's visibility window in one
+		// query (S4): first_seen/first_epoch are applied in SQL before LIMIT, so
+		// has_more counts only visible rows (invisible pre-join/pre-epoch rows
+		// can't consume the lookahead), and the cursor must itself resolve to a
+		// visible row — otherwise the request is a correlated invalid_cursor.
+		firstSeen, firstEpoch, _ := s.store.GetUserRoom(c.UserID, req.Room)
+		msgs, hasMore, cursorOK, err := s.store.GetRoomHistoryBefore(req.Room, req.Before, firstSeen, firstEpoch, limit)
 		if err != nil {
 			s.logger.Error("history failed", "room", req.Room, "error", err)
+			s.respondError(c, req.CorrID, protocol.CodeInternal, "history query failed", 0)
 			return
 		}
-
-		// Apply first_seen/first_epoch filter
-		firstSeen, firstEpoch, _ := s.store.GetUserRoom(c.UserID, req.Room)
-		if firstSeen > 0 || firstEpoch > 0 {
-			filtered := msgs[:0]
-			for _, m := range msgs {
-				if firstSeen > 0 && m.TS < firstSeen {
-					continue
-				}
-				if firstEpoch > 0 && m.Epoch < firstEpoch && !m.Deleted {
-					continue
-				}
-				filtered = append(filtered, m)
-			}
-			msgs = filtered
-		}
-
-		hasMore := len(msgs) > limit
-		if hasMore {
-			msgs = msgs[:limit]
+		if !cursorOK {
+			s.rejectAndLog(c, counters.SignalMalformedFrame, "history", "history cursor does not resolve in the visible room window",
+				&protocol.Error{Type: "error", Code: protocol.CodeInvalidCursor, Message: "history cursor is invalid for this context", CorrID: req.CorrID})
+			return
 		}
 
 		// Collect epoch keys
@@ -468,32 +513,22 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 			return
 		}
 
-		msgs, err := s.store.GetGroupMessagesBefore(req.Group, req.Before, limit+1)
+		// Resolve the cursor + page within the joined_at visibility window in one
+		// query (S4): joined_at is applied in SQL before LIMIT (messages at exactly
+		// joined_at are kept), so has_more counts only visible rows and the cursor
+		// must resolve to a visible row or the request is a correlated
+		// invalid_cursor.
+		joinedAt, _ := s.store.GetUserGroupJoinedAt(c.UserID, req.Group)
+		msgs, hasMore, cursorOK, err := s.store.GetGroupHistoryBefore(req.Group, req.Before, joinedAt, limit)
 		if err != nil {
 			s.logger.Error("history failed", "group", req.Group, "error", err)
+			s.respondError(c, req.CorrID, protocol.CodeInternal, "history query failed", 0)
 			return
 		}
-
-		// Apply joined_at filter — post-query filter (not sinceTS raise)
-		// because GetGroupMessagesBefore is id+limit shaped, not
-		// timestamp-shaped. Mirrors the rooms history branch which does
-		// the same post-filter on first_seen/first_epoch. Messages at
-		// exactly joined_at are kept (strict less-than).
-		joinedAt, _ := s.store.GetUserGroupJoinedAt(c.UserID, req.Group)
-		if joinedAt > 0 {
-			filtered := msgs[:0]
-			for _, m := range msgs {
-				if m.TS < joinedAt {
-					continue
-				}
-				filtered = append(filtered, m)
-			}
-			msgs = filtered
-		}
-
-		hasMore := len(msgs) > limit
-		if hasMore {
-			msgs = msgs[:limit]
+		if !cursorOK {
+			s.rejectAndLog(c, counters.SignalMalformedFrame, "history", "history cursor does not resolve in the visible group window",
+				&protocol.Error{Type: "error", Code: protocol.CodeInvalidCursor, Message: "history cursor is invalid for this context", CorrID: req.CorrID})
+			return
 		}
 
 		var groupReactions []json.RawMessage
@@ -520,15 +555,20 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 			return
 		}
 
-		msgs, err := s.store.GetDMMessagesBeforeForUser(req.DM, c.UserID, req.Before, limit+1)
+		// Resolve the cursor + page within the per-user cutoff visibility window in
+		// one query (S4): the cutoff is applied in SQL before LIMIT and the cursor
+		// must resolve to a visible row or the request is a correlated
+		// invalid_cursor.
+		msgs, hasMore, cursorOK, err := s.store.GetDMHistoryBeforeForUser(req.DM, c.UserID, req.Before, limit)
 		if err != nil {
 			s.logger.Error("history failed", "dm", req.DM, "error", err)
+			s.respondError(c, req.CorrID, protocol.CodeInternal, "history query failed", 0)
 			return
 		}
-
-		hasMore := len(msgs) > limit
-		if hasMore {
-			msgs = msgs[:limit]
+		if !cursorOK {
+			s.rejectAndLog(c, counters.SignalMalformedFrame, "history", "history cursor does not resolve in the visible DM window",
+				&protocol.Error{Type: "error", Code: protocol.CodeInvalidCursor, Message: "history cursor is invalid for this context", CorrID: req.CorrID})
+			return
 		}
 
 		var dmReactions []json.RawMessage
@@ -602,32 +642,35 @@ func storedToRawMessages(msgs []store.StoredMessage, roomID, groupID string) []j
 
 		if m.Deleted {
 			tombstone := protocol.Deleted{
-				Type:      "deleted",
-				ID:        m.ID,
-				DeletedBy: m.Sender, // sender field repurposed for deleted_by on tombstones
-				TS:        m.TS,
-				Room:      roomID,
-				Group:     groupID,
+				Type:        "deleted",
+				ID:          m.ID,
+				ServerOrder: m.ServerOrder,
+				DeletedBy:   m.Sender, // sender field repurposed for deleted_by on tombstones
+				TS:          m.TS,
+				Room:        roomID,
+				Group:       groupID,
 			}
 			data, _ = json.Marshal(tombstone)
 		} else if roomID != "" {
 			msg := protocol.Message{
-				Type:      "message",
-				ID:        m.ID,
-				From:      m.Sender,
-				Room:      roomID,
-				TS:        m.TS,
-				Epoch:     m.Epoch,
-				Payload:   m.Payload,
-				FileIDs:   m.FileIDs,
-				Signature: m.Signature,
-				EditedAt:  m.EditedAt, // Phase 15: 0 on unedited rows (omitempty)
+				Type:        "message",
+				ID:          m.ID,
+				ServerOrder: m.ServerOrder,
+				From:        m.Sender,
+				Room:        roomID,
+				TS:          m.TS,
+				Epoch:       m.Epoch,
+				Payload:     m.Payload,
+				FileIDs:     m.FileIDs,
+				Signature:   m.Signature,
+				EditedAt:    m.EditedAt, // Phase 15: 0 on unedited rows (omitempty)
 			}
 			data, _ = json.Marshal(msg)
 		} else {
 			msg := protocol.GroupMessage{
 				Type:        "group_message",
 				ID:          m.ID,
+				ServerOrder: m.ServerOrder,
 				From:        m.Sender,
 				Group:       groupID,
 				TS:          m.TS,

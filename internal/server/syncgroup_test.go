@@ -38,12 +38,12 @@ func TestSyncGroup_FiltersPreJoinMessages(t *testing.T) {
 
 	// Pre-join messages at TS=100, 200 (year 1970, definitely before any
 	// possible joined_at from datetime('now')).
-	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "m_pre1", Sender: "alice", TS: 100, Payload: "pre1",
 	}); err != nil {
 		t.Fatalf("insert pre-join msg: %v", err)
 	}
-	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "m_pre2", Sender: "bob", TS: 200, Payload: "pre2",
 	}); err != nil {
 		t.Fatalf("insert pre-join msg: %v", err)
@@ -58,7 +58,7 @@ func TestSyncGroup_FiltersPreJoinMessages(t *testing.T) {
 	// Post-join message at now+3600 (one hour in the future, definitely
 	// after charlie's joined_at).
 	postTS := time.Now().Unix() + 3600
-	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "m_post", Sender: "alice", TS: postTS, Payload: "post",
 	}); err != nil {
 		t.Fatalf("insert post-join msg: %v", err)
@@ -177,7 +177,7 @@ func TestSyncGroup_ReAddResetsJoinedAt(t *testing.T) {
 	// use a past TS here because we want it to predate charlie's SECOND
 	// joined_at (the re-add). Using TS=1000 keeps it well before the
 	// re-add's datetime('now').
-	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "m_during_first_membership", Sender: "alice", TS: 1000, Payload: "during1",
 	}); err != nil {
 		t.Fatalf("insert msg: %v", err)
@@ -189,7 +189,7 @@ func TestSyncGroup_ReAddResetsJoinedAt(t *testing.T) {
 	}
 
 	// A message sent while charlie is absent (TS=2000).
-	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "m_while_absent", Sender: "alice", TS: 2000, Payload: "absent",
 	}); err != nil {
 		t.Fatalf("insert msg: %v", err)
@@ -203,7 +203,7 @@ func TestSyncGroup_ReAddResetsJoinedAt(t *testing.T) {
 
 	// Post-re-add message.
 	postTS := time.Now().Unix() + 3600
-	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "m_after_readd", Sender: "alice", TS: postTS, Payload: "post",
 	}); err != nil {
 		t.Fatalf("insert msg: %v", err)
@@ -266,12 +266,12 @@ func TestHandleHistory_FiltersPreJoinGroupMessages(t *testing.T) {
 
 	// Two pre-join messages at TS=100, 200 (well before any future
 	// joined_at).
-	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "h_pre1", Sender: "alice", TS: 100, Payload: "pre1",
 	}); err != nil {
 		t.Fatalf("insert msg: %v", err)
 	}
-	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "h_pre2", Sender: "bob", TS: 200, Payload: "pre2",
 	}); err != nil {
 		t.Fatalf("insert msg: %v", err)
@@ -284,7 +284,7 @@ func TestHandleHistory_FiltersPreJoinGroupMessages(t *testing.T) {
 
 	// One post-join message that should survive the filter.
 	postTS := time.Now().Unix() + 3600
-	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "h_post", Sender: "alice", TS: postTS, Payload: "post",
 	}); err != nil {
 		t.Fatalf("insert msg: %v", err)
@@ -294,7 +294,7 @@ func TestHandleHistory_FiltersPreJoinGroupMessages(t *testing.T) {
 	// message itself will be excluded from the result (the query is
 	// `rowid <` not `<=`).
 	cursorTS := postTS + 1
-	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "h_cursor", Sender: "alice", TS: cursorTS, Payload: "cursor",
 	}); err != nil {
 		t.Fatalf("insert msg: %v", err)
@@ -361,12 +361,12 @@ func TestSyncGroup_ExistingMemberSeesAllPostJoin(t *testing.T) {
 	// Messages sent AFTER creation (all post-alice-joined_at).
 	postTS1 := time.Now().Unix() + 3600
 	postTS2 := postTS1 + 1
-	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "m_post1", Sender: "alice", TS: postTS1, Payload: "post1",
 	}); err != nil {
 		t.Fatalf("insert msg: %v", err)
 	}
-	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "m_post2", Sender: "alice", TS: postTS2, Payload: "post2",
 	}); err != nil {
 		t.Fatalf("insert msg: %v", err)

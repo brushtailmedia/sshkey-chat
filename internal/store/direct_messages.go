@@ -245,10 +245,10 @@ func (s *Store) directMessageColumnExists(name string) bool {
 }
 
 // InsertDMMessage stores a 1:1 DM message.
-func (s *Store) InsertDMMessage(dmID string, msg StoredMessage) error {
+func (s *Store) InsertDMMessage(dmID string, msg StoredMessage) (int64, error) {
 	db, err := s.DMDB(dmID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	return insertMessage(db, msg)
 }
@@ -271,48 +271,43 @@ func (s *Store) GetDMMessagesSince(dmID, userID string, sinceTS int64, limit int
 	return getMessagesSince(db, sinceTS, limit)
 }
 
-// GetDMMessagesBeforeForUser retrieves messages from a 1:1 DM before a
-// specific message ID, filtered by the caller's per-user cutoff. Used by
-// history (scroll-back).
-func (s *Store) GetDMMessagesBeforeForUser(dmID, userID, beforeID string, limit int) ([]StoredMessage, error) {
+// GetDMHistoryBeforeForUser pages 1:1 DM scroll-back before beforeID, applying
+// the caller's per-user cutoff visibility window IN SQL. Returns the page
+// oldest-first; see GetRoomHistoryBefore for the (msgs, hasMore, cursorOK, err)
+// contract. A cutoff of 0 means no restriction (no ts gate).
+func (s *Store) GetDMHistoryBeforeForUser(dmID, userID, beforeID string, limit int) (msgs []StoredMessage, hasMore, cursorOK bool, err error) {
 	dm, err := s.GetDirectMessage(dmID)
 	if err != nil || dm == nil {
-		return nil, err
+		return nil, false, false, err
 	}
 	cutoff := dm.CutoffFor(userID)
 	db, err := s.DMDB(dmID)
 	if err != nil {
-		return nil, err
+		return nil, false, false, err
 	}
-
-	// If the user has a cutoff, we need to filter out messages at or before it.
-	// getMessagesBefore already filters by rowid < beforeID's rowid; we add the
-	// cutoff as an additional WHERE ts > cutoff.
 	if cutoff > 0 {
-		rows, err := db.Query(`
-			SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at
-			FROM messages
-			WHERE rowid < (SELECT rowid FROM messages WHERE id = ?)
-			  AND ts > ?
-			ORDER BY rowid DESC
-			LIMIT ?`,
-			beforeID, cutoff, limit,
-		)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
-		return scanMessages(rows)
+		// Strict ts > cutoff: messages at or before the cutoff are invisible.
+		// Tombstones obey it too (their existence is information).
+		return getHistoryBefore(db, beforeID, "ts > ?", []any{cutoff}, limit)
 	}
-
-	return getMessagesBefore(db, beforeID, limit)
+	return getHistoryBefore(db, beforeID, "", nil, limit)
 }
 
 // DeleteDMMessage marks a 1:1 DM message as deleted. Returns file IDs for cleanup.
 func (s *Store) DeleteDMMessage(dmID, msgID, deletedBy string) ([]string, error) {
-	db, err := s.DMDB(dmID)
+	result, err := s.DeleteDMMessageWithResult(dmID, msgID, deletedBy)
 	if err != nil {
 		return nil, err
+	}
+	return result.FileIDs, nil
+}
+
+// DeleteDMMessageWithResult marks a 1:1 DM message as deleted and returns
+// cleanup metadata plus the original server_order for live tombstone broadcasts.
+func (s *Store) DeleteDMMessageWithResult(dmID, msgID, deletedBy string) (DeleteMessageResult, error) {
+	db, err := s.DMDB(dmID)
+	if err != nil {
+		return DeleteMessageResult{}, err
 	}
 	return deleteMessage(db, msgID, deletedBy)
 }
@@ -354,16 +349,19 @@ func (s *Store) GetDMUnreadCount(dmID, user, deviceID string) (int, string, erro
 			err = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE deleted = 0`).Scan(&count)
 		}
 	} else {
+		// Unread = messages committed after the last-read marker, compared by
+		// server_order (== rowid on the server; the authoritative commit order)
+		// rather than rowid directly (S5).
 		if cutoff > 0 {
 			err = db.QueryRow(`
 				SELECT COUNT(*) FROM messages
-				WHERE deleted = 0 AND ts > ? AND rowid > (SELECT rowid FROM messages WHERE id = ?)`,
+				WHERE deleted = 0 AND ts > ? AND server_order > (SELECT server_order FROM messages WHERE id = ?)`,
 				cutoff, lastRead,
 			).Scan(&count)
 		} else {
 			err = db.QueryRow(`
 				SELECT COUNT(*) FROM messages
-				WHERE deleted = 0 AND rowid > (SELECT rowid FROM messages WHERE id = ?)`,
+				WHERE deleted = 0 AND server_order > (SELECT server_order FROM messages WHERE id = ?)`,
 				lastRead,
 			).Scan(&count)
 		}

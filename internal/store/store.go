@@ -827,7 +827,13 @@ func (s *Store) initDataDB() error {
 func (s *Store) initMessageDB(db *sql.DB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS messages (
-			id        TEXT PRIMARY KEY,
+			-- server_order is the server's authoritative per-conversation commit
+			-- order. It is the INTEGER PRIMARY KEY (== rowid), so existing
+			-- ORDER BY rowid queries already order by commit order, and
+			-- AUTOINCREMENT guarantees it is monotonic and never reused. Clients
+			-- page by this value rather than guessing from local rowid/(ts,id).
+			server_order INTEGER PRIMARY KEY AUTOINCREMENT,
+			id        TEXT NOT NULL UNIQUE,
 			sender    TEXT NOT NULL,
 			ts        INTEGER NOT NULL,
 			epoch     INTEGER,

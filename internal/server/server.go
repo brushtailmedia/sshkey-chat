@@ -327,12 +327,61 @@ func New(cfg *config.Config, logger *slog.Logger, dataDir ...string) (*Server, e
 	s.hostKey = hostKey
 
 	s.sshCfg = &ssh.ServerConfig{
+		Config:            secureSSHConfig(),
 		PublicKeyCallback: s.authenticateKey,
 		ServerVersion:     "SSH-2.0-sshkey-server",
 	}
 	s.sshCfg.AddHostKey(hostKey)
 
 	return s, nil
+}
+
+// secureSSHConfig returns the explicitly-pinned SSH transport algorithm
+// allowlist (audit finding S4). It is pinned — rather than inheriting the
+// golang.org/x/crypto/ssh defaults — so a future dependency bump cannot
+// silently alter the negotiated suite. Rationale per family:
+//
+//   - Ciphers: AEAD-only (ChaCha20-Poly1305, AES-GCM). Drops the non-AEAD
+//     aes*-ctr modes that x/crypto still allows by default.
+//   - KeyExchanges: ML-KEM-768 + X25519 post-quantum hybrid preferred, with a
+//     classical curve25519 fallback. The hybrid gives the SSH transport
+//     harvest-now-decrypt-later resistance for routing metadata. It does NOT
+//     protect E2E message content — that is sealed separately by the client's
+//     X25519 ECIES wrap, which is classical-only. A network MITM cannot force
+//     the classical fallback: the KEXINIT algorithm lists are bound into the
+//     signed exchange hash, so a downgrade attempt breaks the handshake.
+//   - MACs: ETM-SHA2. Unused while the negotiated cipher is AEAD (the cipher
+//     supplies integrity and the separate MAC is not applied), but pinned so a
+//     future non-AEAD cipher cannot pair with a weak MAC.
+//
+// The sshkey-term client pins the same set (client.secureSSHConfig); both ends
+// run the same x/crypto, so the negotiated KEX is always the PQ hybrid and
+// there is no compatibility risk. Strict-KEX (Terrapin, CVE-2023-48795) is
+// applied by x/crypto automatically and is unaffected by this pin.
+//
+// This is mostly DOWNGRADE PROTECTION, not a strength upgrade: x/crypto already
+// defaults to the hybrid KEX and to AEAD ciphers, so the pin's main effect is
+// removing the weak fallbacks the defaults still carry (SHA-1 KEX
+// diffie-hellman-group14-sha1, SHA-1 MACs, non-AEAD aes*-ctr) and guaranteeing
+// the hybrid. The only change to live negotiation between two current
+// first-party clients is preferring a 256-bit AEAD cipher (ChaCha20-Poly1305 /
+// AES-256-GCM) over the default AES-128-GCM, matching the PQ KEX's margin.
+func secureSSHConfig() ssh.Config {
+	return ssh.Config{
+		Ciphers: []string{
+			ssh.CipherChaCha20Poly1305,
+			ssh.CipherAES256GCM,
+			ssh.CipherAES128GCM,
+		},
+		KeyExchanges: []string{
+			ssh.KeyExchangeMLKEM768X25519,
+			ssh.KeyExchangeCurve25519,
+		},
+		MACs: []string{
+			"hmac-sha2-256-etm@openssh.com",
+			"hmac-sha2-512-etm@openssh.com",
+		},
+	}
 }
 
 // ListenAndServe starts the SSH listener and accepts connections.

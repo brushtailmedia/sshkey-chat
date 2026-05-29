@@ -236,7 +236,7 @@ func TestHandleLeaveDM_TriggersCleanupWhenBothLeft(t *testing.T) {
 
 	// Insert a message so the per-DM database file exists on disk and we
 	// can verify it gets unlinked. DMDB is lazy.
-	if err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
+	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
 		ID: "msg_1", Sender: "alice", TS: 100, Payload: "hi",
 	}); err != nil {
 		t.Fatalf("insert msg: %v", err)

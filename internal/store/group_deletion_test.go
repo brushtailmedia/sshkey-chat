@@ -206,7 +206,7 @@ func TestDeleteGroupConversation(t *testing.T) {
 	}
 
 	// Insert a message so the per-group db file actually exists on disk
-	if err := s.InsertGroupMessage(groupID, StoredMessage{
+	if _, err := s.InsertGroupMessage(groupID, StoredMessage{
 		ID: "m1", Sender: "alice", TS: 100, Payload: "hi",
 	}); err != nil {
 		t.Fatalf("insert msg: %v", err)

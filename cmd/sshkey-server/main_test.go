@@ -666,7 +666,9 @@ func TestHistory(t *testing.T) {
 		t.Error("expected has_more=true (there are more messages before these)")
 	}
 
-	// Messages should be in descending order (newest first for history)
+	// Messages arrive oldest-first (S3 history-state-model.md): the server
+	// reverses history windows at the store boundary so the wire batch is
+	// chronological and the term TUI prepends without re-reversing.
 	var histMsgs []protocol.Message
 	for _, raw := range result.Messages {
 		var m protocol.Message
@@ -674,12 +676,15 @@ func TestHistory(t *testing.T) {
 		histMsgs = append(histMsgs, m)
 	}
 
-	// The two messages before msg[4] should be msg[3] and msg[2] (newest first)
-	if histMsgs[0].Payload != "hist_3" {
-		t.Errorf("first history message payload = %q, want hist_3", histMsgs[0].Payload)
+	// The limited page before msg[4] is the two rows adjacent to the cursor —
+	// msg[2] and msg[3] — in oldest-first order. (Also confirms the far-end trim:
+	// the +1 lookahead row is the oldest, so it is dropped from the front, NOT
+	// collapsing the page to the very oldest rows.)
+	if histMsgs[0].Payload != "hist_2" {
+		t.Errorf("first history message payload = %q, want hist_2 (oldest-first)", histMsgs[0].Payload)
 	}
-	if histMsgs[1].Payload != "hist_2" {
-		t.Errorf("second history message payload = %q, want hist_2", histMsgs[1].Payload)
+	if histMsgs[1].Payload != "hist_3" {
+		t.Errorf("second history message payload = %q, want hist_3 (oldest-first)", histMsgs[1].Payload)
 	}
 
 	t.Logf("history: got %d messages, has_more=%v", len(result.Messages), result.HasMore)

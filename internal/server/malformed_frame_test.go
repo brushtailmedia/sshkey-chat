@@ -258,3 +258,86 @@ func TestHandleCreateDM_SelfFiresSignal(t *testing.T) {
 		t.Errorf("SignalMalformedFrame on create_dm with self = %d, want 1", got)
 	}
 }
+
+// TestHandleHistory_EmptyOrAmbiguousContextRejected covers the exactly-one-context
+// guard: a history request with zero or more than one of room/group/dm is rejected
+// with invalid_context (echoing the request corr_id) and fires SignalMalformedFrame,
+// instead of hanging with no response (empty) or silently picking the first branch
+// (ambiguous).
+func TestHandleHistory_EmptyOrAmbiguousContextRejected(t *testing.T) {
+	cases := []struct {
+		name, dev string
+		req       protocol.History
+	}{
+		{"empty", "dev_hist_ctx_empty", protocol.History{Type: "history"}},
+		{"room+group", "dev_hist_ctx_rg", protocol.History{Type: "history", Room: "rm_x", Group: "grp_x"}},
+		{"room+dm", "dev_hist_ctx_rd", protocol.History{Type: "history", Room: "rm_x", DM: "dm_x"}},
+		{"all three", "dev_hist_ctx_all", protocol.History{Type: "history", Room: "rm_x", Group: "grp_x", DM: "dm_x"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t)
+			alice := testClientFor("alice", tc.dev)
+			const corrID = "corr_ABCDEFGHIJKLMNOPQRSTU" // valid shape: corr_ + 21 chars
+			req := tc.req
+			req.CorrID = corrID
+			raw, err := json.Marshal(req)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			s.handleHistory(alice.Client, raw)
+
+			if got := s.counters.Get(counters.SignalMalformedFrame, tc.dev); got != 1 {
+				t.Errorf("SignalMalformedFrame = %d, want 1", got)
+			}
+			msgs := alice.messages()
+			if len(msgs) != 1 {
+				t.Fatalf("expected 1 error message, got %d", len(msgs))
+			}
+			var errMsg protocol.Error
+			if err := json.Unmarshal(msgs[0], &errMsg); err != nil {
+				t.Fatalf("parse error reply: %v", err)
+			}
+			if errMsg.Code != "invalid_context" {
+				t.Errorf("error code = %q, want invalid_context", errMsg.Code)
+			}
+			if errMsg.CorrID != corrID {
+				t.Errorf("error corr_id = %q, want echoed %q", errMsg.CorrID, corrID)
+			}
+		})
+	}
+}
+
+// TestHandleHistory_StoreUnavailableReturnsInternalError locks in the
+// owned-response guarantee (history-state-model.md step 11): an accepted
+// history request (valid corr_id + exactly one context) that hits a
+// storage-unavailable path returns a correlated internal_error rather than
+// silently returning, which would leave the client's load stuck forever. The
+// store==nil path is the defensive, testable instance of that rule.
+func TestHandleHistory_StoreUnavailableReturnsInternalError(t *testing.T) {
+	const corrID = "corr_ABCDEFGHIJKLMNOPQRSTU"
+	s := newTestServer(t)
+	alice := testClientFor("alice", "dev_alice_hist_internal")
+
+	origStore := s.store
+	s.store = nil                          // simulate storage unavailable
+	defer func() { s.store = origStore }() // restore before t.Cleanup closes it
+
+	raw, _ := json.Marshal(protocol.History{Type: "history", Room: "room_x", CorrID: corrID})
+	s.handleHistory(alice.Client, raw)
+
+	msgs := alice.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(msgs))
+	}
+	var errMsg protocol.Error
+	if json.Unmarshal(msgs[0], &errMsg) != nil {
+		t.Fatalf("reply not a protocol.Error: %s", msgs[0])
+	}
+	if errMsg.Code != protocol.CodeInternal {
+		t.Errorf("error code = %q, want internal_error", errMsg.Code)
+	}
+	if errMsg.CorrID != corrID {
+		t.Errorf("error corr_id = %q, want echoed %q", errMsg.CorrID, corrID)
+	}
+}

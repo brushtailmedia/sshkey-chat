@@ -38,6 +38,8 @@ func TestCategoryForCode_KnownCodes(t *testing.T) {
 		{ErrNotAuthorized, CategoryC, "C"},
 		{"too_many_members", CategoryC, "C"},
 		{"invalid_upload_id", CategoryC, "C"},
+		{"invalid_context", CategoryC, "C"},
+		{CodeInvalidCursor, CategoryC, "C"},
 		{CodeMalformed, CategoryC, "C"},
 		{CodeInvalidID, CategoryC, "C"},
 		{CodeTooLarge, CategoryC, "C"},
@@ -92,7 +94,7 @@ func TestCategoryForCode_ExhaustiveOverConstants(t *testing.T) {
 		ErrServerBusy, ErrEditNotAuthorized, ErrEditNotMostRecent,
 		ErrEditWindowExpired, ErrEditDeletedMessage,
 		CodeDenied, CodeRateLimit, CodeMalformed, CodeInvalidID,
-		CodeTooLarge, CodeUnknownVerb, CodeInternal,
+		CodeTooLarge, CodeUnknownVerb, CodeInternal, CodeInvalidCursor,
 	}
 	for _, code := range codes {
 		t.Run(code, func(t *testing.T) {

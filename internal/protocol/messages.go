@@ -69,17 +69,18 @@ type Send struct {
 }
 
 type Message struct {
-	Type      string   `json:"type"` // "message"
-	ID        string   `json:"id"`   // server-assigned, msg_ prefix
-	From      string   `json:"from"`
-	Room      string   `json:"room"`
-	TS        int64    `json:"ts"` // unix epoch seconds
-	Epoch     int64    `json:"epoch"`
-	Payload   string   `json:"payload"` // base64 encrypted, pass-through
-	FileIDs   []string `json:"file_ids,omitempty"`
-	Signature string   `json:"signature"`           // base64, pass-through
-	EditedAt  int64    `json:"edited_at,omitempty"` // Phase 15: server sets on edit, absent on unedited messages
-	CorrID    string   `json:"corr_id,omitempty"`   // Phase 17c: echoed from the originator's Send for client send-queue ack correlation (omitted on broadcasts to non-originators)
+	Type        string   `json:"type"`                   // "message"
+	ID          string   `json:"id"`                     // server-assigned, msg_ prefix
+	ServerOrder int64    `json:"server_order,omitempty"` // server-assigned per-conversation commit order
+	From        string   `json:"from"`
+	Room        string   `json:"room"`
+	TS          int64    `json:"ts"` // unix epoch seconds
+	Epoch       int64    `json:"epoch"`
+	Payload     string   `json:"payload"` // base64 encrypted, pass-through
+	FileIDs     []string `json:"file_ids,omitempty"`
+	Signature   string   `json:"signature"`           // base64, pass-through
+	EditedAt    int64    `json:"edited_at,omitempty"` // Phase 15: server sets on edit, absent on unedited messages
+	CorrID      string   `json:"corr_id,omitempty"`   // Phase 17c: echoed from the originator's Send for client send-queue ack correlation (omitted on broadcasts to non-originators)
 }
 
 // Edit is the client → server envelope for replacing a room message's
@@ -166,8 +167,9 @@ type SendGroup struct {
 }
 
 type GroupMessage struct {
-	Type        string            `json:"type"` // "group_message"
-	ID          string            `json:"id"`   // server-assigned
+	Type        string            `json:"type"`                   // "group_message"
+	ID          string            `json:"id"`                     // server-assigned
+	ServerOrder int64             `json:"server_order,omitempty"` // server-assigned per-conversation commit order
 	From        string            `json:"from"`
 	Group       string            `json:"group"`
 	TS          int64             `json:"ts"`
@@ -712,8 +714,9 @@ type SendDM struct {
 }
 
 type DM struct {
-	Type        string            `json:"type"` // "dm"
-	ID          string            `json:"id"`   // server-assigned msg ID
+	Type        string            `json:"type"`                   // "dm"
+	ID          string            `json:"id"`                     // server-assigned msg ID
+	ServerOrder int64             `json:"server_order,omitempty"` // server-assigned per-conversation commit order
 	From        string            `json:"from"`
 	DM          string            `json:"dm"` // DM row ID
 	TS          int64             `json:"ts"`
@@ -802,14 +805,15 @@ type Delete struct {
 }
 
 type Deleted struct {
-	Type      string `json:"type"` // "deleted"
-	ID        string `json:"id"`
-	DeletedBy string `json:"deleted_by"`
-	TS        int64  `json:"ts"`
-	Room      string `json:"room,omitempty"`    // set for room messages
-	Group     string `json:"group,omitempty"`   // set for group DM messages
-	DM        string `json:"dm,omitempty"`      // set for 1:1 DM messages
-	CorrID    string `json:"corr_id,omitempty"` // Phase 17c: originator-only ack echo
+	Type        string `json:"type"` // "deleted"
+	ID          string `json:"id"`
+	ServerOrder int64  `json:"server_order,omitempty"` // preserved from the original message (tombstone keeps its position)
+	DeletedBy   string `json:"deleted_by"`
+	TS          int64  `json:"ts"`
+	Room        string `json:"room,omitempty"`    // set for room messages
+	Group       string `json:"group,omitempty"`   // set for group DM messages
+	DM          string `json:"dm,omitempty"`      // set for 1:1 DM messages
+	CorrID      string `json:"corr_id,omitempty"` // Phase 17c: originator-only ack echo
 }
 
 // Typing indicators (capability: typing)
@@ -1435,6 +1439,11 @@ const (
 	CodeTooLarge    = "payload_too_large" // oversized-input rejection
 	CodeUnknownVerb = "unknown_verb"      // unrecognized type (reserved; currently silent)
 	CodeInternal    = "internal_error"    // server-internal failure (client handles as Category A retry)
+	// CodeInvalidCursor: history `before` cursor does not resolve to a visible row
+	// in the requested context (empty, not found, cross-context, or pre-visibility).
+	// Category C — permanent for that cursor; resending the same cursor fails
+	// identically. Sibling of invalid_context. (S4, history-state-model.md.)
+	CodeInvalidCursor = "invalid_cursor"
 )
 
 // OpaqueReject returns a byte-identical opaque rejection suitable for

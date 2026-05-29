@@ -962,7 +962,7 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 
 	// Store in room DB
 	if s.store != nil {
-		err := s.store.InsertRoomMessage(msg.Room, store.StoredMessage{
+		serverOrder, err := s.store.InsertRoomMessage(msg.Room, store.StoredMessage{
 			ID:        outMsg.ID,
 			Sender:    outMsg.From,
 			TS:        outMsg.TS,
@@ -982,6 +982,9 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 			s.respondError(c, msg.CorrID, protocol.CodeInternal, "", 0)
 			return
 		}
+		// Carry the committed server_order on the live broadcast so it matches
+		// the stored row and the sync/history shape.
+		outMsg.ServerOrder = serverOrder
 	}
 
 	// Broadcast to all connected clients in this room
@@ -1082,7 +1085,7 @@ func (s *Server) handleSendGroup(c *Client, raw json.RawMessage) {
 
 	// Store in group DM DB
 	if s.store != nil {
-		err := s.store.InsertGroupMessage(msg.Group, store.StoredMessage{
+		serverOrder, err := s.store.InsertGroupMessage(msg.Group, store.StoredMessage{
 			ID:          outMsg.ID,
 			Sender:      outMsg.From,
 			TS:          outMsg.TS,
@@ -1096,6 +1099,7 @@ func (s *Server) handleSendGroup(c *Client, raw json.RawMessage) {
 			s.respondError(c, msg.CorrID, protocol.CodeInternal, "", 0)
 			return
 		}
+		outMsg.ServerOrder = serverOrder
 	}
 
 	// Broadcast to all connected clients in this group
@@ -1889,20 +1893,21 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 			return
 		}
 
-		fileIDs, err := s.store.DeleteRoomMessage(roomID, msg.ID, c.UserID)
+		deletedResult, err := s.store.DeleteRoomMessageWithResult(roomID, msg.ID, c.UserID)
 		if err != nil {
 			s.logger.Error("delete failed", "room", roomID, "id", msg.ID, "error", err)
 			return
 		}
-		s.cleanupFiles(fileIDs)
+		s.cleanupFiles(deletedResult.FileIDs)
 
 		s.broadcastToRoom(roomID, protocol.Deleted{
-			Type:      "deleted",
-			ID:        msg.ID,
-			DeletedBy: c.UserID,
-			TS:        time.Now().Unix(),
-			Room:      roomID,
-			CorrID:    msg.CorrID, // Phase 17c
+			Type:        "deleted",
+			ID:          msg.ID,
+			ServerOrder: deletedResult.ServerOrder,
+			DeletedBy:   c.UserID,
+			TS:          time.Now().Unix(),
+			Room:        roomID,
+			CorrID:      msg.CorrID, // Phase 17c
 		})
 		return
 	}
@@ -1930,20 +1935,21 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 			return
 		}
 
-		fileIDs, err := s.store.DeleteGroupMessage(g.ID, msg.ID, c.UserID)
+		deletedResult, err := s.store.DeleteGroupMessageWithResult(g.ID, msg.ID, c.UserID)
 		if err != nil {
 			s.logger.Error("delete failed", "group", g.ID, "id", msg.ID, "error", err)
 			return
 		}
-		s.cleanupFiles(fileIDs)
+		s.cleanupFiles(deletedResult.FileIDs)
 
 		s.broadcastToGroup(g.ID, protocol.Deleted{
-			Type:      "deleted",
-			ID:        msg.ID,
-			DeletedBy: c.UserID,
-			TS:        time.Now().Unix(),
-			Group:     g.ID,
-			CorrID:    msg.CorrID, // Phase 17c
+			Type:        "deleted",
+			ID:          msg.ID,
+			ServerOrder: deletedResult.ServerOrder,
+			DeletedBy:   c.UserID,
+			TS:          time.Now().Unix(),
+			Group:       g.ID,
+			CorrID:      msg.CorrID, // Phase 17c
 		})
 		return
 	}
@@ -1971,21 +1977,22 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 			return
 		}
 
-		fileIDs, err := s.store.DeleteDMMessage(dm.ID, msg.ID, c.UserID)
+		deletedResult, err := s.store.DeleteDMMessageWithResult(dm.ID, msg.ID, c.UserID)
 		if err != nil {
 			s.logger.Error("delete failed", "dm", dm.ID, "id", msg.ID, "error", err)
 			return
 		}
-		s.cleanupFiles(fileIDs)
+		s.cleanupFiles(deletedResult.FileIDs)
 
 		// Broadcast to both DM members
 		deleted := protocol.Deleted{
-			Type:      "deleted",
-			ID:        msg.ID,
-			DeletedBy: c.UserID,
-			TS:        time.Now().Unix(),
-			DM:        dm.ID,
-			CorrID:    msg.CorrID, // Phase 17c
+			Type:        "deleted",
+			ID:          msg.ID,
+			ServerOrder: deletedResult.ServerOrder,
+			DeletedBy:   c.UserID,
+			TS:          time.Now().Unix(),
+			DM:          dm.ID,
+			CorrID:      msg.CorrID, // Phase 17c
 		}
 		// Phase 17 Step 3: lock-release pattern.
 		s.mu.RLock()
@@ -3108,7 +3115,7 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 
 	// Store in DM DB — messages are always written regardless of cutoffs.
 	// The cutoff filters on read, not on write.
-	if err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
+	serverOrder, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
 		ID:          outMsg.ID,
 		Sender:      outMsg.From,
 		TS:          outMsg.TS,
@@ -3116,11 +3123,13 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 		FileIDs:     outMsg.FileIDs,
 		Signature:   outMsg.Signature,
 		WrappedKeys: outMsg.WrappedKeys,
-	}); err != nil {
+	})
+	if err != nil {
 		s.logger.Error("failed to store DM", "dm", dm.ID, "error", err)
 		s.respondError(c, msg.CorrID, protocol.CodeInternal, "", 0)
 		return
 	}
+	outMsg.ServerOrder = serverOrder
 
 	// Broadcast to both members' active sessions.
 	// Phase 17 Step 3: lock-release pattern.

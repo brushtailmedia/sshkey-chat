@@ -311,3 +311,48 @@ func TestRateLimitsSection_Step5DefaultsSet(t *testing.T) {
 	// specifically; the shared counter + shared key validates it.
 	_ = strings.Contains // keep import if compiler pedantic
 }
+
+// TestHandleHistory_RateLimitEchoesCorrID locks in the companion server change
+// for the term history abort lifecycle (history-state-model.md step 11): a
+// rate-limited history request must echo the request corr_id so the client can
+// correlate it to the in-flight scroll-back and abort/drop it through the same
+// Verb == "history" path as other history errors — rather than the fragile
+// "abort on any uncorrelated rate_limited" heuristic. The corr_id is extracted
+// before the limiter, so it survives even though the limiter rejects before the
+// full unmarshal.
+func TestHandleHistory_RateLimitEchoesCorrID(t *testing.T) {
+	const corrID = "corr_ABCDEFGHIJKLMNOPQRSTU"
+	s := newTestServer(t)
+	s.cfg.Lock()
+	s.cfg.Server.RateLimits.HistoryPerMinute = 1 // burst clamped to 5
+	s.cfg.Unlock()
+
+	alice := testClientFor("alice", "dev_alice_hist_rl")
+	generalID := s.store.RoomDisplayNameToID("general")
+	raw, _ := json.Marshal(protocol.History{Type: "history", Room: generalID, CorrID: corrID})
+	for i := 0; i < 6; i++ {
+		s.handleHistory(alice.Client, raw)
+	}
+
+	if got := s.counters.Get(counters.SignalRateLimited, "dev_alice_hist_rl"); got < 1 {
+		t.Fatalf("SignalRateLimited on handleHistory = %d, want >= 1 (burst exhausted by 6 rapid calls)", got)
+	}
+
+	// At least one rate_limited error must echo the request corr_id; none may
+	// carry an empty corr_id (that would force the client into the uncorrelated
+	// fallback this change removes).
+	foundCorrelated := false
+	for _, m := range alice.messages() {
+		var e protocol.Error
+		if json.Unmarshal(m, &e) == nil && e.Code == protocol.ErrRateLimited {
+			if e.CorrID != corrID {
+				t.Errorf("history rate_limited corr_id = %q, want %q (echoed for correlation)", e.CorrID, corrID)
+			} else {
+				foundCorrelated = true
+			}
+		}
+	}
+	if !foundCorrelated {
+		t.Error("expected at least one rate_limited error echoing the history corr_id")
+	}
+}

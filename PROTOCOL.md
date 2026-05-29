@@ -38,6 +38,24 @@ Access control, content-hash verification, and cascade cleanup are enforced by t
 
 The server's SSH host key is Ed25519, generated on first run. Clients should use trust-on-first-use (TOFU) -- store the host key fingerprint on first connect, verify on subsequent connects.
 
+### Transport security (SSH algorithm suite)
+
+The SSH **transport** protects routing metadata in transit (channel framing, verbs, fingerprints, timing) — **not** E2E message content, which is sealed separately (see Encryption). The first-party server and client pin an explicit, modern algorithm allowlist rather than relying on the SSH library's defaults, and both pin the **same** set. A third-party client SHOULD offer a compatible suite:
+
+| Category | Pinned (preference order) |
+|---|---|
+| **Key exchange** | `mlkem768x25519-sha256` (ML-KEM-768 + X25519 hybrid, post-quantum), then `curve25519-sha256` (and its `@libssh.org` alias) |
+| **Cipher** | `chacha20-poly1305@openssh.com`, `aes256-gcm@openssh.com`, `aes128-gcm@openssh.com` (AEAD only) |
+| **MAC** | `hmac-sha2-256-etm@openssh.com`, `hmac-sha2-512-etm@openssh.com` (applied only with a non-AEAD cipher, so unused under this suite) |
+
+Rationale:
+
+- **Post-quantum key exchange.** The hybrid `mlkem768x25519-sha256` is preferred so a network observer cannot record today's handshake and decrypt the transport later with a quantum computer (*harvest-now-decrypt-later*). Being a hybrid, security holds if *either* X25519 or ML-KEM-768 holds. This protects transport **metadata only** — E2E content uses a classical X25519 ECIES wrap and is unaffected by the transport KEX.
+- **AEAD ciphers, 256-bit preferred.** Only AEAD ciphers are offered, and the 256-bit options (ChaCha20-Poly1305, AES-256-GCM) are preferred over AES-128-GCM so the symmetric layer keeps a comfortable margin against Grover's algorithm, consistent with the post-quantum KEX. AES-128-GCM remains a last-resort interop fallback.
+- **Downgrade resistance.** Pinning removes the weaker fallbacks the SSH library still offers by default — SHA-1 key exchange (`diffie-hellman-group14-sha1`), SHA-1 MACs (`hmac-sha1`, `hmac-sha1-96`), and the non-AEAD `aes*-ctr` ciphers — so a downgraded or hostile peer cannot negotiate them. A network attacker cannot force a downgrade by tampering with the offered lists: the SSH `KEXINIT` payloads are bound into the signed exchange hash, so tampering breaks the handshake. Strict-KEX (the Terrapin / CVE-2023-48795 countermeasure) is applied automatically.
+
+This is **transport hardening**: the post-quantum hybrid is already the SSH library's default first choice, so the pin's primary effect is *guaranteeing* it and removing the weak fallbacks — not changing what two up-to-date first-party clients already negotiate (aside from preferring a 256-bit AEAD cipher).
+
 ## Handshake
 
 ```
@@ -282,7 +300,7 @@ Every room message, group DM, and 1:1 DM is split into:
 
 The server routes on the envelope but never decrypts the payload. The three context fields (`room`, `group`, `dm`) are mutually exclusive — exactly one is set per message envelope, and it selects the crypto model (epoch key vs per-message wrapped key).
 
-**Server-set fields:** `from`, `id`, and `ts` are always set by the server, never by the client. Clients should NOT set `from` on outbound messages — the server ignores it and fills in the authenticated user ID from the SSH connection. `id` is a server-generated nanoid (`msg_` prefix). `ts` is the server's wall clock (unix seconds), the single source of truth for message ordering.
+**Server-set fields:** `from`, `id`, `ts`, and `server_order` are always set by the server, never by the client. Clients should NOT set `from` on outbound messages — the server ignores it and fills in the authenticated user ID from the SSH connection. `id` is a server-generated nanoid (`msg_` prefix). `ts` is the server's wall clock (unix seconds). `server_order` is the server's authoritative **per-conversation** commit order — a monotonic, never-reused integer assigned on store and echoed on every `message` / `group_message` / `dm` / `deleted` envelope (live broadcast, `sync_batch`, and `history_result`). It is the cursor clients should sort and page by; `ts` is only second-resolution and cannot disambiguate same-second messages. Because each room/group/DM numbers independently, `server_order` is comparable only **within** one conversation, not across conversations. A `deleted` tombstone preserves the original message's `server_order` (deletion changes rendering, not position).
 
 ### Room Messages
 
@@ -613,7 +631,17 @@ The `history` request carries exactly one context field (`room`, `group`, or `dm
 
 Store fetched messages and epoch keys locally -- subsequent scroll-back for the same range is served from the local DB.
 
+Ordering: `history_result.messages` is returned **oldest-first** (chronological), ordered by `server_order`. `before` is the message ID of the cursor (the oldest message the client currently has); the server resolves it to that row's `server_order` and returns the page of older messages immediately below it — the `limit` rows with the **highest** `server_order` that is still less than the cursor — so successive scroll-backs walk strictly backwards without gaps or overlap. `deleted` tombstones are interleaved in `server_order` position. Clients should prepend the batch as-is and must not re-sort or reverse it.
+
 Privacy: callers who are not members of the requested context get the same byte-identical error as "context not found" (`unknown_room` / `unknown_group` / `unknown_dm`), so a probing client cannot enumerate existence via `history`.
+
+Context validation: a `history` request must set **exactly one** of `room` / `group` / `dm`. A request with none set, or more than one, is rejected with `{"type":"error","code":"invalid_context","corr_id":"..."}` (the request `corr_id` is echoed so the client can correlate and abort the load); the server does not silently pick a context or leave the request unanswered.
+
+Cursor validation: the `before` cursor must resolve to a row the caller may actually see in the requested context — present in that conversation **and** inside the caller's visibility window (room `first_seen`/`first_epoch`, group `joined_at`, or DM per-user cutoff). An empty `before`, a `before` for a message in a different conversation, or one that predates the caller's visibility is rejected with a correlated `{"type":"error","code":"invalid_cursor","corr_id":"..."}` rather than silently returning an empty page. `invalid_cursor` is permanent for that cursor (Category C — resending the same cursor fails identically); the first-party client never sends one. Visibility is applied **inside the SQL query before the page limit**, so `has_more` reflects only visible rows (invisible pre-membership rows cannot consume the lookahead and falsely report "no more history"), and `deleted` tombstones obey the same visibility gates as live messages — a tombstone's existence is itself information and must not leak past a caller's join/epoch/cutoff boundary.
+
+Rate limiting: a rate-limited `history` request is rejected with `{"type":"error","code":"rate_limited","retry_after_ms":...,"corr_id":"..."}`. The server extracts and echoes the request `corr_id` **before** applying the limiter (the only handler that does so), so a rate-limited scroll-back is correlated like any other history error and the client can abort/drop the exact in-flight request rather than guessing from an uncorrelated rate-limit.
+
+Owned responses: an **accepted** `history` request (valid `corr_id`, exactly one context) always resolves with a terminal frame. A server-internal failure after acceptance — storage unavailable or a room/group/DM history query error — is rejected with a correlated `{"type":"error","code":"internal_error","corr_id":"..."}` rather than logging and returning silently, so the client's load fails cleanly instead of hanging.
 
 ### Message Deletion
 

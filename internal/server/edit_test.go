@@ -32,7 +32,7 @@ func TestHandleEdit_PrivacyResponsesIdentical(t *testing.T) {
 
 	// Insert alice's message in general so bob can try to impersonate.
 	aliceMsgID := "msg_alice_edit"
-	if err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
+	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
 		ID: aliceMsgID, Sender: "alice", TS: 1000, Epoch: 1, Payload: "orig", Signature: "sig",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -97,7 +97,7 @@ func TestHandleEdit_HappyPath_ReplacesPayloadAndBroadcasts(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	msgID := "msg_happy"
-	if err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
+	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
 		ID: msgID, Sender: "alice", TS: 500, Epoch: 1, Payload: "original", Signature: "orig_sig",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -164,12 +164,12 @@ func TestHandleEdit_NotMostRecent_ReturnsSpecificError(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	// Alice sends two messages; the OLDER one can't be edited.
-	if err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
+	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
 		ID: "msg_older", Sender: "alice", TS: 100, Epoch: 1, Payload: "1", Signature: "s",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	if err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
+	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
 		ID: "msg_newer", Sender: "alice", TS: 200, Epoch: 1, Payload: "2", Signature: "s",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -212,7 +212,7 @@ func TestHandleEdit_DeletedMessage_CollapsedToUnknown(t *testing.T) {
 	}
 
 	// Insert and tombstone a message.
-	if err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
+	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
 		ID: "msg_tombstoned", Sender: "alice", TS: 100, Epoch: 1, Payload: "p", Signature: "s",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -246,7 +246,7 @@ func TestHandleEdit_RetiredRoom(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	// Insert alice's message first, then retire the room.
-	if err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
+	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
 		ID: "msg_retire", Sender: "alice", TS: 100, Epoch: 1, Payload: "p", Signature: "s",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -281,7 +281,7 @@ func TestHandleEdit_EpochTooOld(t *testing.T) {
 	// epochs manager starts at 0, so we need to push forward.
 	// Simpler approach: insert the message at epoch 1 and then set
 	// the current epoch to 5 manually via the epochs manager.
-	if err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
+	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
 		ID: "msg_old", Sender: "alice", TS: 100, Epoch: 1, Payload: "p", Signature: "s",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -320,7 +320,7 @@ func TestHandleEdit_ClearsReactions(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	if err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
+	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
 		ID: "msg_rx", Sender: "alice", TS: 100, Epoch: 1, Payload: "p", Signature: "s",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -361,7 +361,7 @@ func TestHandleEditGroup_PrivacyResponsesIdentical(t *testing.T) {
 	}
 
 	// Insert alice's message.
-	if err := s.store.InsertGroupMessage(groupPriv, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupPriv, store.StoredMessage{
 		ID: "msg_alice_g", Sender: "alice", TS: 1000, Payload: "p", Signature: "s",
 		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
 	}); err != nil {
@@ -426,7 +426,7 @@ func TestHandleEditGroup_HappyPath(t *testing.T) {
 	if err := s.store.CreateGroup(groupHappy, "alice", []string{"alice", "bob"}, "Happy"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if err := s.store.InsertGroupMessage(groupHappy, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupHappy, store.StoredMessage{
 		ID: "msg_gh", Sender: "alice", TS: 500, Payload: "orig", Signature: "orig_sig",
 		WrappedKeys: map[string]string{"alice": "v1a", "bob": "v1b"},
 	}); err != nil {
@@ -473,7 +473,7 @@ func TestHandleEditDM_PrivacyResponsesIdentical(t *testing.T) {
 		t.Fatalf("create DM: %v", err)
 	}
 	dmID := dm.ID
-	if err := s.store.InsertDMMessage(dmID, store.StoredMessage{
+	if _, err := s.store.InsertDMMessage(dmID, store.StoredMessage{
 		ID: "msg_dm_alice", Sender: "alice", TS: time.Now().Unix(), Payload: "p", Signature: "s",
 		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
 	}); err != nil {
@@ -536,13 +536,13 @@ func TestHandleEditGroup_NotMostRecent_ReturnsSpecificError(t *testing.T) {
 	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "recent"); err != nil {
 		t.Fatalf("CreateGroup: %v", err)
 	}
-	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "msg_old", Sender: "alice", TS: 100, Payload: "old", Signature: "s",
 		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
 	}); err != nil {
 		t.Fatalf("insert old: %v", err)
 	}
-	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "msg_new", Sender: "alice", TS: 200, Payload: "new", Signature: "s",
 		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
 	}); err != nil {
@@ -595,7 +595,7 @@ func TestHandleEditGroup_DeletedMessage_CollapsedToUnknown(t *testing.T) {
 		t.Fatalf("baseline expected 1 reply, got %d", len(baselineMsgs))
 	}
 
-	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "msg_deleted", Sender: "alice", TS: 123, Payload: "body", Signature: "sig",
 		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
 	}); err != nil {
@@ -630,7 +630,7 @@ func TestHandleEditGroup_ClearsReactions(t *testing.T) {
 	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "react"); err != nil {
 		t.Fatalf("CreateGroup: %v", err)
 	}
-	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "msg_group_rx", Sender: "alice", TS: 100, Payload: "body", Signature: "sig",
 		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
 	}); err != nil {
@@ -671,7 +671,7 @@ func TestHandleEditGroup_InvalidWrappedKeys(t *testing.T) {
 	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "keys"); err != nil {
 		t.Fatalf("CreateGroup: %v", err)
 	}
-	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "msg_group_keys", Sender: "alice", TS: 100, Payload: "body", Signature: "sig",
 		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
 	}); err != nil {
@@ -708,7 +708,7 @@ func TestHandleEditDM_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateOrGetDirectMessage: %v", err)
 	}
-	if err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
+	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
 		ID: "msg_dm_happy", Sender: "alice", TS: 500, Payload: "orig", Signature: "sig",
 		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
 	}); err != nil {
@@ -769,13 +769,13 @@ func TestHandleEditDM_NotMostRecent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateOrGetDirectMessage: %v", err)
 	}
-	if err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
+	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
 		ID: "msg_dm_old", Sender: "alice", TS: 100, Payload: "old", Signature: "s",
 		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
 	}); err != nil {
 		t.Fatalf("insert old: %v", err)
 	}
-	if err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
+	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
 		ID: "msg_dm_new", Sender: "alice", TS: 200, Payload: "new", Signature: "s",
 		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
 	}); err != nil {
@@ -828,7 +828,7 @@ func TestHandleEditDM_DeletedMessage_CollapsedToUnknown(t *testing.T) {
 		t.Fatalf("baseline expected 1 reply, got %d", len(baseMsgs))
 	}
 
-	if err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
+	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
 		ID: "msg_dm_deleted", Sender: "alice", TS: 123, Payload: "body", Signature: "sig",
 		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
 	}); err != nil {
@@ -863,7 +863,7 @@ func TestHandleEditDM_ClearsReactions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateOrGetDirectMessage: %v", err)
 	}
-	if err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
+	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
 		ID: "msg_dm_rx", Sender: "alice", TS: 100, Payload: "body", Signature: "sig",
 		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
 	}); err != nil {
@@ -904,7 +904,7 @@ func TestHandleEditDM_FrozenCallerRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateOrGetDirectMessage: %v", err)
 	}
-	if err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
+	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
 		ID: "msg_dm_frozen", Sender: "alice", TS: 100, Payload: "body", Signature: "sig",
 		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
 	}); err != nil {

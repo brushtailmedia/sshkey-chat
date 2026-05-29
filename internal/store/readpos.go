@@ -55,7 +55,7 @@ func (s *Store) GetReadPosition(user, deviceID, room, groupID, dmID string) (str
 // protocol.Unread. Count is the canonical unread cardinality.
 // LastRead keeps its persisted read-marker semantics. FirstUnreadID
 // is the explicit unread-divider boundary — the earliest in-scope
-// unread message id, ordered by rowid — empty when Count == 0.
+// unread message id, ordered by server_order — empty when Count == 0.
 type UnreadCount struct {
 	Count         int
 	LastRead      string
@@ -75,8 +75,8 @@ type UnreadCount struct {
 // Two-stage query because rooms.db (room_members) and <roomID>.db
 // (messages) are separate SQLite files (cross-DB JOIN needs ATTACH;
 // the two-query shape matches existing store patterns).
-// first_unread_id is ordered by rowid (SQLite insertion order =
-// the codebase's chronological order) — NOT MIN(id): message ids
+// first_unread_id is ordered by server_order (the authoritative
+// commit order; == rowid on the server) — NOT MIN(id): message ids
 // are random nanoids, so MIN(id) would be an arbitrary row.
 func (s *Store) GetRoomUnreadCount(room, user, deviceID string) (UnreadCount, error) {
 	lastRead, err := s.GetReadPosition(user, deviceID, room, "", "")
@@ -113,7 +113,7 @@ func (s *Store) GetRoomUnreadCount(room, user, deviceID string) (UnreadCount, er
 			     WHERE deleted = 0 AND ts >= ?),
 			  COALESCE((SELECT id FROM messages
 			     WHERE deleted = 0 AND ts >= ?
-			     ORDER BY rowid ASC LIMIT 1), '')`,
+			     ORDER BY server_order ASC LIMIT 1), '')`,
 			joinedAt, joinedAt,
 		).Scan(&out.Count, &out.FirstUnreadID)
 	} else {
@@ -121,11 +121,11 @@ func (s *Store) GetRoomUnreadCount(room, user, deviceID string) (UnreadCount, er
 			SELECT
 			  (SELECT COUNT(*) FROM messages
 			     WHERE deleted = 0 AND ts >= ?
-			       AND rowid > (SELECT rowid FROM messages WHERE id = ?)),
+			       AND server_order > (SELECT server_order FROM messages WHERE id = ?)),
 			  COALESCE((SELECT id FROM messages
 			     WHERE deleted = 0 AND ts >= ?
-			       AND rowid > (SELECT rowid FROM messages WHERE id = ?)
-			     ORDER BY rowid ASC LIMIT 1), '')`,
+			       AND server_order > (SELECT server_order FROM messages WHERE id = ?)
+			     ORDER BY server_order ASC LIMIT 1), '')`,
 			joinedAt, lastRead, joinedAt, lastRead,
 		).Scan(&out.Count, &out.FirstUnreadID)
 	}
@@ -179,7 +179,7 @@ func (s *Store) GetGroupUnreadCount(groupID, user, deviceID string) (UnreadCount
 			     WHERE deleted = 0 AND ts >= ?),
 			  COALESCE((SELECT id FROM messages
 			     WHERE deleted = 0 AND ts >= ?
-			     ORDER BY rowid ASC LIMIT 1), '')`,
+			     ORDER BY server_order ASC LIMIT 1), '')`,
 			joinedAt, joinedAt,
 		).Scan(&out.Count, &out.FirstUnreadID)
 	} else {
@@ -187,11 +187,11 @@ func (s *Store) GetGroupUnreadCount(groupID, user, deviceID string) (UnreadCount
 			SELECT
 			  (SELECT COUNT(*) FROM messages
 			     WHERE deleted = 0 AND ts >= ?
-			       AND rowid > (SELECT rowid FROM messages WHERE id = ?)),
+			       AND server_order > (SELECT server_order FROM messages WHERE id = ?)),
 			  COALESCE((SELECT id FROM messages
 			     WHERE deleted = 0 AND ts >= ?
-			       AND rowid > (SELECT rowid FROM messages WHERE id = ?)
-			     ORDER BY rowid ASC LIMIT 1), '')`,
+			       AND server_order > (SELECT server_order FROM messages WHERE id = ?)
+			     ORDER BY server_order ASC LIMIT 1), '')`,
 			joinedAt, lastRead, joinedAt, lastRead,
 		).Scan(&out.Count, &out.FirstUnreadID)
 	}

@@ -29,7 +29,7 @@ func openStore(t *testing.T) *Store {
 
 func roomMsg(t *testing.T, s *Store, room, id string, epoch, ts int64) {
 	t.Helper()
-	if err := s.InsertRoomMessage(room, StoredMessage{
+	if _, err := s.InsertRoomMessage(room, StoredMessage{
 		ID: id, Sender: "alice", TS: ts, Epoch: epoch, Payload: "x",
 	}); err != nil {
 		t.Fatalf("insert room msg %q: %v", id, err)
@@ -38,7 +38,7 @@ func roomMsg(t *testing.T, s *Store, room, id string, epoch, ts int64) {
 
 func groupMsg(t *testing.T, s *Store, gid, id string, ts int64) {
 	t.Helper()
-	if err := s.InsertGroupMessage(gid, StoredMessage{
+	if _, err := s.InsertGroupMessage(gid, StoredMessage{
 		ID: id, Sender: "alice", TS: ts, Payload: "x",
 	}); err != nil {
 		t.Fatalf("insert group msg %q: %v", id, err)

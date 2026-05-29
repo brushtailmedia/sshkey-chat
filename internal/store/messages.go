@@ -9,47 +9,62 @@ import (
 // StoredMessage represents a message as stored on disk.
 type StoredMessage struct {
 	ID          string
+	ServerOrder int64 // server's authoritative per-conversation commit order (== rowid)
 	Sender      string
 	TS          int64
-	Epoch       int64              // rooms only
-	Payload     string             // base64 encrypted blob
+	Epoch       int64  // rooms only
+	Payload     string // base64 encrypted blob
 	FileIDs     []string
 	Signature   string
-	WrappedKeys map[string]string  // DMs only: userID -> base64 wrapped key
+	WrappedKeys map[string]string // DMs only: userID -> base64 wrapped key
 	Deleted     bool
 	DeletedBy   string
-	EditedAt    int64              // Phase 15: 0 if never edited, else server's edit wall clock
+	EditedAt    int64 // Phase 15: 0 if never edited, else server's edit wall clock
+}
+
+// DeleteMessageResult contains the metadata needed after a message is
+// tombstoned. FileIDs drive attachment cleanup; ServerOrder lets live
+// deleted broadcasts preserve the row's original position.
+type DeleteMessageResult struct {
+	FileIDs     []string
+	ServerOrder int64
 }
 
 // InsertRoomMessage stores a room message.
-func (s *Store) InsertRoomMessage(room string, msg StoredMessage) error {
+func (s *Store) InsertRoomMessage(room string, msg StoredMessage) (int64, error) {
 	db, err := s.RoomDB(room)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	return insertMessage(db, msg)
 }
 
 // InsertGroupMessage stores a group DM message.
-func (s *Store) InsertGroupMessage(groupID string, msg StoredMessage) error {
+func (s *Store) InsertGroupMessage(groupID string, msg StoredMessage) (int64, error) {
 	db, err := s.GroupDB(groupID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	return insertMessage(db, msg)
 }
 
-func insertMessage(db *sql.DB, msg StoredMessage) error {
+// insertMessage inserts a message and returns the assigned server_order (the
+// AUTOINCREMENT rowid). LastInsertId on the same Exec result is bound to this
+// insert — not a loose later lookup — so it is the committed commit order.
+func insertMessage(db *sql.DB, msg StoredMessage) (int64, error) {
 	fileIDs := encodeStringSlice(msg.FileIDs)
 	wrappedKeys := encodeMap(msg.WrappedKeys)
 
-	_, err := db.Exec(`
+	result, err := db.Exec(`
 		INSERT INTO messages (id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.ID, msg.Sender, msg.TS, msg.Epoch, msg.Payload,
 		fileIDs, msg.Signature, wrappedKeys,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
 }
 
 // GetRoomMessages retrieves messages from a room, ordered by timestamp descending.
@@ -93,16 +108,20 @@ func getMessages(db *sql.DB, beforeTS int64, limit int) ([]StoredMessage, error)
 	var rows *sql.Rows
 	var err error
 
+	// Order by server_order (the authoritative commit order) rather than rowid.
+	// On the server they coincide (server_order is the INTEGER PRIMARY KEY), so
+	// this is behavior-identical, but it states the chronological intent and
+	// stays correct if the schema ever stops aliasing them (S5).
 	if beforeTS > 0 {
 		rows, err = db.Query(`
-			SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at
-			FROM messages WHERE ts < ? ORDER BY rowid DESC LIMIT ?`,
+			SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at, server_order
+			FROM messages WHERE ts < ? ORDER BY server_order DESC LIMIT ?`,
 			beforeTS, limit,
 		)
 	} else {
 		rows, err = db.Query(`
-			SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at
-			FROM messages ORDER BY rowid DESC LIMIT ?`,
+			SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at, server_order
+			FROM messages ORDER BY server_order DESC LIMIT ?`,
 			limit,
 		)
 	}
@@ -115,9 +134,11 @@ func getMessages(db *sql.DB, beforeTS int64, limit int) ([]StoredMessage, error)
 }
 
 func getMessagesSince(db *sql.DB, sinceTS int64, limit int) ([]StoredMessage, error) {
+	// server_order ASC == commit order (oldest-first), so sync_batch rows are
+	// emitted in chronological commit order. server_order == rowid here (S5).
 	rows, err := db.Query(`
-		SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at
-		FROM messages WHERE ts >= ? ORDER BY rowid ASC LIMIT ?`,
+		SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at, server_order
+		FROM messages WHERE ts >= ? ORDER BY server_order ASC LIMIT ?`,
 		sinceTS, limit,
 	)
 	if err != nil {
@@ -136,7 +157,7 @@ func scanMessages(rows *sql.Rows) ([]StoredMessage, error) {
 		var epoch sql.NullInt64
 
 		err := rows.Scan(&msg.ID, &msg.Sender, &msg.TS, &epoch,
-			&msg.Payload, &fileIDs, &msg.Signature, &wrappedKeys, &msg.Deleted, &msg.EditedAt)
+			&msg.Payload, &fileIDs, &msg.Signature, &wrappedKeys, &msg.Deleted, &msg.EditedAt, &msg.ServerOrder)
 		if err != nil {
 			return nil, err
 		}
@@ -153,18 +174,38 @@ func scanMessages(rows *sql.Rows) ([]StoredMessage, error) {
 
 // DeleteMessage marks a message as deleted (tombstone).
 func (s *Store) DeleteRoomMessage(room, msgID, deletedBy string) ([]string, error) {
-	db, err := s.RoomDB(room)
+	result, err := s.DeleteRoomMessageWithResult(room, msgID, deletedBy)
 	if err != nil {
 		return nil, err
+	}
+	return result.FileIDs, nil
+}
+
+// DeleteRoomMessageWithResult marks a room message as deleted and returns
+// cleanup metadata plus the original server_order for live tombstone broadcasts.
+func (s *Store) DeleteRoomMessageWithResult(room, msgID, deletedBy string) (DeleteMessageResult, error) {
+	db, err := s.RoomDB(room)
+	if err != nil {
+		return DeleteMessageResult{}, err
 	}
 	return deleteMessage(db, msgID, deletedBy)
 }
 
 // DeleteGroupMessage marks a group DM message as deleted. Returns file IDs for cleanup.
 func (s *Store) DeleteGroupMessage(groupID, msgID, deletedBy string) ([]string, error) {
-	db, err := s.GroupDB(groupID)
+	result, err := s.DeleteGroupMessageWithResult(groupID, msgID, deletedBy)
 	if err != nil {
 		return nil, err
+	}
+	return result.FileIDs, nil
+}
+
+// DeleteGroupMessageWithResult marks a group DM message as deleted and returns
+// cleanup metadata plus the original server_order for live tombstone broadcasts.
+func (s *Store) DeleteGroupMessageWithResult(groupID, msgID, deletedBy string) (DeleteMessageResult, error) {
+	db, err := s.GroupDB(groupID)
+	if err != nil {
+		return DeleteMessageResult{}, err
 	}
 	return deleteMessage(db, msgID, deletedBy)
 }
@@ -317,14 +358,16 @@ func (s *Store) GetUserMostRecentMessageIDDM(dmID, userID string) (msgID string,
 }
 
 // getUserMostRecentMessageID is the inner helper. Returns empty + 0 on
-// empty result sets (no error). Queries by rowid DESC instead of ts
-// DESC because rowid reflects insert order and is a cleaner tiebreaker
-// when two messages happen to land at the same unix-second timestamp.
+// empty result sets (no error). Queries by server_order DESC instead of ts
+// DESC because server_order is the authoritative commit order and a clean
+// tiebreaker when two messages land at the same unix-second timestamp. On the
+// server server_order == rowid (INTEGER PRIMARY KEY), so this is the same
+// commit-order query the comment always intended, stated explicitly (S5).
 func getUserMostRecentMessageID(db *sql.DB, userID string) (string, int64, error) {
 	var id string
 	var ts int64
 	err := db.QueryRow(
-		`SELECT id, ts FROM messages WHERE sender = ? AND deleted = 0 ORDER BY rowid DESC LIMIT 1`,
+		`SELECT id, ts FROM messages WHERE sender = ? AND deleted = 0 ORDER BY server_order DESC LIMIT 1`,
 		userID,
 	).Scan(&id, &ts)
 	if err == sql.ErrNoRows {
@@ -369,7 +412,7 @@ func (s *Store) GetDMMessageByID(dmID, msgID string) (*StoredMessage, error) {
 
 func getMessageByID(db *sql.DB, msgID string) (*StoredMessage, error) {
 	rows, err := db.Query(
-		`SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at
+		`SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at, server_order
 		 FROM messages WHERE id = ? LIMIT 1`,
 		msgID,
 	)
@@ -387,35 +430,38 @@ func getMessageByID(db *sql.DB, msgID string) (*StoredMessage, error) {
 	return &msgs[0], nil
 }
 
-// deleteMessage soft-deletes a message and returns its file IDs for cleanup.
-func deleteMessage(db *sql.DB, msgID, deletedBy string) ([]string, error) {
-	// Get file IDs before clearing payload
-	var fileIDsStr string
-	db.QueryRow(`SELECT file_ids FROM messages WHERE id = ?`, msgID).Scan(&fileIDsStr)
+// deleteMessage soft-deletes a message and returns cleanup/broadcast metadata.
+func deleteMessage(db *sql.DB, msgID, deletedBy string) (DeleteMessageResult, error) {
+	// Get metadata before clearing payload.
+	var fileIDsStr sql.NullString
+	var serverOrder int64
+	if err := db.QueryRow(`SELECT file_ids, server_order FROM messages WHERE id = ?`, msgID).Scan(&fileIDsStr, &serverOrder); err != nil {
+		return DeleteMessageResult{}, err
+	}
 
 	result, err := db.Exec(`UPDATE messages SET deleted = 1, payload = '', sender = ? WHERE id = ?`,
 		deletedBy, msgID)
 	if err != nil {
-		return nil, err
+		return DeleteMessageResult{}, err
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
-		return nil, sql.ErrNoRows
+		return DeleteMessageResult{}, sql.ErrNoRows
 	}
 	// Clean up reactions and pins on the deleted message
 	if err := DeleteReactionsForMessage(db, msgID); err != nil {
-		return nil, err
+		return DeleteMessageResult{}, err
 	}
 	db.Exec(`DELETE FROM pins WHERE message_id = ?`, msgID)
 
 	var fileIDs []string
-	if fileIDsStr != "" {
-		if err := json.Unmarshal([]byte(fileIDsStr), &fileIDs); err != nil {
+	if fileIDsStr.Valid && fileIDsStr.String != "" {
+		if err := json.Unmarshal([]byte(fileIDsStr.String), &fileIDs); err != nil {
 			// Try comma-separated fallback
-			fileIDs = strings.Split(fileIDsStr, ",")
+			fileIDs = strings.Split(fileIDsStr.String, ",")
 		}
 	}
-	return fileIDs, nil
+	return DeleteMessageResult{FileIDs: fileIDs, ServerOrder: serverOrder}, nil
 }
 
 // DeleteReactionsForMessage removes all reactions for a single message id.
@@ -424,38 +470,106 @@ func DeleteReactionsForMessage(db *sql.DB, msgID string) error {
 	return err
 }
 
-// GetRoomMessagesBefore retrieves messages from a room before a specific message ID.
-func (s *Store) GetRoomMessagesBefore(room, beforeID string, limit int) ([]StoredMessage, error) {
+// GetRoomHistoryBefore pages room scroll-back before beforeID, applying the
+// caller's room visibility window (first_seen / first_epoch) IN SQL. Returns the
+// page oldest-first. cursorOK is false (with no error, no rows) when beforeID is
+// empty or does not resolve to a row the caller may see — the handler turns that
+// into a correlated invalid_cursor. hasMore reflects visible rows only.
+//
+// Tombstones obey the same gates: a deleted row's *existence* is itself
+// information, so a pre-join/pre-epoch tombstone must not bypass visibility
+// (S4) — unlike the prior in-memory filter, which exempted deleted rows from the
+// epoch gate.
+func (s *Store) GetRoomHistoryBefore(room, beforeID string, firstSeen, firstEpoch int64, limit int) (msgs []StoredMessage, hasMore, cursorOK bool, err error) {
 	db, err := s.RoomDB(room)
 	if err != nil {
-		return nil, err
+		return nil, false, false, err
 	}
-	return getMessagesBefore(db, beforeID, limit)
+	// firstSeen/firstEpoch == 0 means "no restriction": both clauses are then
+	// trivially true, so the gate is a no-op. COALESCE guards NULL epoch rows.
+	return getHistoryBefore(db, beforeID, "ts >= ? AND COALESCE(epoch, 0) >= ?", []any{firstSeen, firstEpoch}, limit)
 }
 
-// GetGroupMessagesBefore retrieves messages from a group DM before a specific message ID.
-func (s *Store) GetGroupMessagesBefore(groupID, beforeID string, limit int) ([]StoredMessage, error) {
+// GetGroupHistoryBefore pages group-DM scroll-back before beforeID, applying the
+// caller's joined_at visibility window IN SQL. See GetRoomHistoryBefore for the
+// (msgs, hasMore, cursorOK, err) contract.
+func (s *Store) GetGroupHistoryBefore(groupID, beforeID string, joinedAt int64, limit int) (msgs []StoredMessage, hasMore, cursorOK bool, err error) {
 	db, err := s.GroupDB(groupID)
 	if err != nil {
-		return nil, err
+		return nil, false, false, err
 	}
-	return getMessagesBefore(db, beforeID, limit)
+	return getHistoryBefore(db, beforeID, "ts >= ?", []any{joinedAt}, limit)
 }
 
-func getMessagesBefore(db *sql.DB, beforeID string, limit int) ([]StoredMessage, error) {
-	rows, err := db.Query(`
-		SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at
-		FROM messages
-		WHERE rowid < (SELECT rowid FROM messages WHERE id = ?)
-		ORDER BY rowid DESC
-		LIMIT ?`,
-		beforeID, limit,
-	)
+// getHistoryBefore is the shared visibility-aware scroll-back pager (S4). It
+// resolves the beforeID cursor WITHIN the visible window (visGate), pages older
+// visible rows by server_order, applies the visibility gate BEFORE LIMIT+1 (so
+// invisible rows cannot consume the lookahead and make has_more falsely false),
+// and returns the page oldest-first.
+//
+// Returns (msgs, hasMore, cursorOK, err). cursorOK is false — with no error and
+// no rows — when beforeID is empty or does not resolve to a visible row in this
+// context; the caller turns that into a correlated invalid_cursor. visGate may be
+// empty (no visibility restriction); visArgs are its bound parameters.
+func getHistoryBefore(db *sql.DB, beforeID, visGate string, visArgs []any, limit int) (msgs []StoredMessage, hasMore, cursorOK bool, err error) {
+	if beforeID == "" {
+		return nil, false, false, nil // empty cursor -> invalid_cursor
+	}
+	// Resolve the cursor's server_order, but only if beforeID is itself a visible
+	// row — a cross-context, forged, or pre-visibility cursor must not anchor a
+	// page.
+	cursorWhere := "id = ?"
+	cursorArgs := []any{beforeID}
+	if visGate != "" {
+		cursorWhere += " AND " + visGate
+		cursorArgs = append(cursorArgs, visArgs...)
+	}
+	var cursorOrder int64
+	err = db.QueryRow("SELECT server_order FROM messages WHERE "+cursorWhere, cursorArgs...).Scan(&cursorOrder)
+	if err == sql.ErrNoRows {
+		return nil, false, false, nil // not-found / not-visible cursor -> invalid_cursor
+	}
 	if err != nil {
-		return nil, err
+		return nil, false, false, err
+	}
+	// Page the visible rows immediately below the cursor. The visibility gate is
+	// applied here too (before LIMIT) so has_more counts only visible rows.
+	pageWhere := "server_order < ?"
+	pageArgs := []any{}
+	if visGate != "" {
+		pageWhere = visGate + " AND " + pageWhere
+		pageArgs = append(pageArgs, visArgs...)
+	}
+	pageArgs = append(pageArgs, cursorOrder, limit+1)
+	rows, err := db.Query(`
+		SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at, server_order
+		FROM messages
+		WHERE `+pageWhere+`
+		ORDER BY server_order DESC
+		LIMIT ?`, pageArgs...)
+	if err != nil {
+		return nil, false, false, err
 	}
 	defer rows.Close()
-	return scanMessages(rows)
+	msgs, err = scanMessages(rows)
+	if err != nil {
+		return nil, false, false, err
+	}
+	// has_more from the +1 lookahead (visible rows only); drop the extra (oldest,
+	// last in this newest-first slice), then reverse to oldest-first for the wire.
+	hasMore = len(msgs) > limit
+	if hasMore {
+		msgs = msgs[:limit]
+	}
+	reverseStoredMessages(msgs)
+	return msgs, hasMore, true, nil
+}
+
+// reverseStoredMessages flips a slice in place (newest-first -> oldest-first).
+func reverseStoredMessages(msgs []StoredMessage) {
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
 }
 
 // StoredReaction represents a reaction as stored on disk.

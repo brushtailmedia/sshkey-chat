@@ -28,7 +28,7 @@ func TestHandleReact_RejectsTombstonedRoomMessage(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	// Alice sends a message.
-	if err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
+	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
 		ID: "msg_react_rt", Sender: "alice", TS: 100, Epoch: 1, Payload: "p", Signature: "s",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -86,7 +86,7 @@ func TestHandleReact_RejectsTombstonedGroupMessage(t *testing.T) {
 		t.Fatalf("create group: %v", err)
 	}
 
-	if err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
+	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID:          "msg_grt",
 		Sender:      "alice",
 		TS:          100,
@@ -137,7 +137,7 @@ func TestHandleReact_RejectsTombstonedDMMessage(t *testing.T) {
 	}
 	dmID := dm.ID
 
-	if err := s.store.InsertDMMessage(dmID, store.StoredMessage{
+	if _, err := s.store.InsertDMMessage(dmID, store.StoredMessage{
 		ID:          "msg_drt",
 		Sender:      "alice",
 		TS:          100,
@@ -223,7 +223,7 @@ func TestHandleReact_HappyPath_StillWorks(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	if err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
+	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
 		ID: "msg_live", Sender: "alice", TS: 100, Epoch: 1, Payload: "p", Signature: "s",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)

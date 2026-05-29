@@ -21,7 +21,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 
 	// Insert a room message
-	err = s.InsertRoomMessage(generalID, StoredMessage{
+	_, err = s.InsertRoomMessage(generalID, StoredMessage{
 		ID:        "msg_test001",
 		Sender:    "alice",
 		TS:        1712345678,
@@ -57,7 +57,7 @@ func TestStoreRoundTrip(t *testing.T) {
 
 	// Insert a group DM message
 	groupID := GenerateID("group_")
-	err = s.InsertGroupMessage(groupID, StoredMessage{
+	_, err = s.InsertGroupMessage(groupID, StoredMessage{
 		ID:          "msg_dm001",
 		Sender:      "alice",
 		TS:          1712345680,

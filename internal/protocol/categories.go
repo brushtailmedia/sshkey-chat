@@ -146,7 +146,7 @@ func CategoryForCode(code string) ErrorCategory {
 		return CategoryC
 	case "too_many_members", "username_taken", "invalid_profile":
 		return CategoryC
-	case "invalid_upload_id", "invalid_content_hash", "missing_hash", "invalid_context":
+	case "invalid_upload_id", "invalid_content_hash", "missing_hash", "invalid_context", "invalid_cursor":
 		return CategoryC
 	case "invalid_file_id", "invalid_message":
 		return CategoryC

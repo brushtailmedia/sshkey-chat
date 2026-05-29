@@ -29,7 +29,7 @@ func setupEditTestStore(t *testing.T) (*Store, string) {
 func TestUpdateRoomMessageEdited_ReplacesPayloadAndSetsEditedAt(t *testing.T) {
 	s, roomID := setupEditTestStore(t)
 
-	err := s.InsertRoomMessage(roomID, StoredMessage{
+	_, err := s.InsertRoomMessage(roomID, StoredMessage{
 		ID:        "msg_edit1",
 		Sender:    "alice",
 		TS:        1000,
@@ -65,7 +65,7 @@ func TestUpdateRoomMessageEdited_ReplacesPayloadAndSetsEditedAt(t *testing.T) {
 func TestUpdateRoomMessageEdited_PreservesFileIDsTSSenderEpoch(t *testing.T) {
 	s, roomID := setupEditTestStore(t)
 
-	err := s.InsertRoomMessage(roomID, StoredMessage{
+	_, err := s.InsertRoomMessage(roomID, StoredMessage{
 		ID:        "msg_edit2",
 		Sender:    "alice",
 		TS:        5000,
@@ -108,7 +108,7 @@ func TestUpdateRoomMessageEdited_PreservesFileIDsTSSenderEpoch(t *testing.T) {
 func TestUpdateRoomMessageEdited_RejectsDeletedRow(t *testing.T) {
 	s, roomID := setupEditTestStore(t)
 
-	err := s.InsertRoomMessage(roomID, StoredMessage{
+	_, err := s.InsertRoomMessage(roomID, StoredMessage{
 		ID: "msg_del1", Sender: "alice", TS: 100, Epoch: 1, Payload: "p", Signature: "s",
 	})
 	if err != nil {
@@ -139,7 +139,7 @@ func TestUpdateRoomMessageEdited_MissingRowReturnsErrNoRows(t *testing.T) {
 func TestUpdateRoomMessageEdited_ClearsReactions(t *testing.T) {
 	s, roomID := setupEditTestStore(t)
 
-	err := s.InsertRoomMessage(roomID, StoredMessage{
+	_, err := s.InsertRoomMessage(roomID, StoredMessage{
 		ID: "msg_r1", Sender: "alice", TS: 100, Epoch: 1, Payload: "p", Signature: "s",
 	})
 	if err != nil {
@@ -187,7 +187,7 @@ func TestGetUserMostRecentMessageIDRoom_ReturnsLatest(t *testing.T) {
 		{ID: "msg_a3", Sender: "alice", TS: 130, Epoch: 1, Payload: "4", Signature: "s"},
 	}
 	for _, m := range inserts {
-		if err := s.InsertRoomMessage(roomID, m); err != nil {
+		if _, err := s.InsertRoomMessage(roomID, m); err != nil {
 			t.Fatalf("insert %s: %v", m.ID, err)
 		}
 	}
@@ -244,7 +244,7 @@ func TestGetUserMostRecentMessageIDRoom_EmptyReturnsBlank(t *testing.T) {
 func TestGetRoomMessageByID_ReturnsMessage(t *testing.T) {
 	s, roomID := setupEditTestStore(t)
 
-	err := s.InsertRoomMessage(roomID, StoredMessage{
+	_, err := s.InsertRoomMessage(roomID, StoredMessage{
 		ID: "msg_fetch", Sender: "alice", TS: 500, Epoch: 2,
 		Payload: "pl", FileIDs: []string{"f1"}, Signature: "sg",
 	})
@@ -277,7 +277,7 @@ func TestUpdateGroupMessageEditedWithKeys_RewrapsWrappedKeys(t *testing.T) {
 
 	groupID := GenerateID("group_")
 	// Insert a group message with initial wrapped_keys.
-	err := s.InsertGroupMessage(groupID, StoredMessage{
+	_, err := s.InsertGroupMessage(groupID, StoredMessage{
 		ID:          "msg_g1",
 		Sender:      "alice",
 		TS:          1000,

@@ -169,24 +169,28 @@ func (s *Server) sendPins(c *Client) {
 			var messageData []json.RawMessage
 			for _, msgID := range pinnedMsgIDs {
 				var id, sender, payload, signature string
-				var msgTS, msgEpoch int64
+				var msgTS, msgEpoch, msgServerOrder int64
 				var fileIDs sql.NullString
 				err := db.QueryRow(`
-					SELECT id, sender, ts, epoch, payload, signature, file_ids
+					SELECT id, sender, ts, epoch, payload, signature, file_ids, server_order
 					FROM messages WHERE id = ? AND deleted = 0`, msgID,
-				).Scan(&id, &sender, &msgTS, &msgEpoch, &payload, &signature, &fileIDs)
+				).Scan(&id, &sender, &msgTS, &msgEpoch, &payload, &signature, &fileIDs, &msgServerOrder)
 				if err != nil {
 					continue
 				}
+				// Carry server_order so the pinned-message envelope matches the
+				// live/sync/history shape — every hydrated message has the same
+				// ordering metadata (history-state-model.md step 8).
 				msg := protocol.Message{
-					Type:      "message",
-					ID:        id,
-					From:      sender,
-					Room:      roomID,
-					TS:        msgTS,
-					Epoch:     msgEpoch,
-					Payload:   payload,
-					Signature: signature,
+					Type:        "message",
+					ID:          id,
+					From:        sender,
+					Room:        roomID,
+					TS:          msgTS,
+					Epoch:       msgEpoch,
+					Payload:     payload,
+					Signature:   signature,
+					ServerOrder: msgServerOrder,
 				}
 				if fileIDs.Valid && fileIDs.String != "" {
 					msg.FileIDs = strings.Split(fileIDs.String, ",")
