@@ -292,6 +292,13 @@ func (s *Server) handleRemoveFromGroup(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	// S9: hold groupAdminMu across the last-admin check and the removal.
+	// Acquired AFTER the self-kick dispatch above (which delegates to
+	// handleLeaveGroup, itself a groupAdminMu acquirer) to avoid a re-entrant
+	// deadlock — the self-kick path returns before reaching here.
+	s.groupAdminMu.Lock()
+	defer s.groupAdminMu.Unlock()
+
 	// Last-admin check: if target is an admin and removing them would leave
 	// the group with zero admins, reject. Requires a successor promotion
 	// first.
@@ -430,6 +437,12 @@ func (s *Server) handleDemoteGroupAdmin(c *Client, raw json.RawMessage) {
 		s.respondError(c, "", protocol.ErrUnknownGroup, "You are not a member of this group", 0)
 		return
 	}
+
+	// S9: hold groupAdminMu across the last-admin check and the demote so a
+	// concurrent demote/remove can't also pass the count>1 guard and drop the
+	// group to zero admins. defer-unlock spans the mutation + broadcasts.
+	s.groupAdminMu.Lock()
+	defer s.groupAdminMu.Unlock()
 
 	// Last-admin check.
 	if count, _ := s.store.CountGroupAdmins(msg.Group); count <= 1 {

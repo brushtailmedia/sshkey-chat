@@ -19,6 +19,11 @@ import (
 
 const maxPayloadBytes = 16 * 1024 // 16KB max message body
 
+// maxStatusTextBytes bounds the user status string (audit S7). It is stored
+// verbatim, so an unbounded value is a storage-abuse vector. Generous for a
+// one-line status; byte length (UTF-8), consistent with the display-name policy.
+const maxStatusTextBytes = 256
+
 // handleSession runs the protocol session on an accepted SSH channel.
 // The session channel is the NDJSON control plane (1st session channel
 // on the SSH connection).
@@ -1244,10 +1249,53 @@ func (s *Server) handleRead(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Store read position
-	if s.store != nil {
-		s.store.SetReadPosition(c.UserID, c.DeviceID, msg.Room, msg.Group, msg.DM, msg.LastRead)
+	// Read receipts are membership-gated, mirroring handleTyping (audit S5):
+	// without this a non-member could write a read_positions row for a context
+	// it doesn't belong to AND have a `read` receipt fanned out to that
+	// context's real members (recipients are derived from server-side
+	// membership). Gate exactly-one-context + membership BEFORE SetReadPosition
+	// and the broadcast. Unlike typing there is NO retired-room rejection —
+	// reading (hence marking read) stays valid in a read-only retired room, so
+	// membership is the only gate.
+	nCtx := 0
+	if msg.Room != "" {
+		nCtx++
 	}
+	if msg.Group != "" {
+		nCtx++
+	}
+	if msg.DM != "" {
+		nCtx++
+	}
+	if nCtx != 1 {
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "read", "empty/ambiguous read context (silent-drop)", nil)
+		return
+	}
+	if s.store == nil {
+		return
+	}
+	switch {
+	case msg.Room != "":
+		if !s.store.IsRoomMemberByID(msg.Room, c.UserID) {
+			s.rejectAndLog(c, counters.SignalNonMemberContext, "read", "read for non-member room (silent-drop)", nil)
+			return
+		}
+	case msg.Group != "":
+		isMember, err := s.store.IsGroupMember(msg.Group, c.UserID)
+		if err != nil || !isMember {
+			s.rejectAndLog(c, counters.SignalNonMemberContext, "read", "read for non-member group (silent-drop)", nil)
+			return
+		}
+	case msg.DM != "":
+		dm, err := s.store.GetDirectMessage(msg.DM)
+		if err != nil || dm == nil || (c.UserID != dm.UserA && c.UserID != dm.UserB) {
+			s.rejectAndLog(c, counters.SignalNonMemberContext, "read", "read for non-party DM (silent-drop)", nil)
+			return
+		}
+	}
+
+	// Store read position (membership verified above).
+	s.store.SetReadPosition(c.UserID, c.DeviceID, msg.Room, msg.Group, msg.DM, msg.LastRead)
 
 	out := protocol.Read{
 		Type:     "read",
@@ -1342,6 +1390,34 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 		if s.store.IsRoomRetired(msg.Room) {
 			s.respondError(c, msg.CorrID, protocol.ErrRoomRetired, "This room has been archived and is read-only", 0)
 			return
+		}
+	}
+
+	// S7: validate group/DM reaction wrapped_keys against the current member
+	// set (mirroring send/edit). A NON-empty map must exactly match the
+	// members, so a client cannot stuff entries for non-members; an empty map
+	// is tolerated — a reaction reusing an existing key carries none, and an
+	// empty/partial map is only self-inflicted undecryptability, never a key
+	// leak (delivery below uses the server-authoritative recipient set). Room
+	// reactions carry no wrapped_keys (shared epoch key). The reaction `epoch`
+	// is intentionally NOT range-validated: unlike send, a reaction legitimately
+	// targets messages across past epochs.
+	if s.store != nil && len(msg.WrappedKeys) > 0 {
+		switch {
+		case msg.Group != "":
+			if members, err := s.store.GetGroupMembers(msg.Group); err == nil && !wrappedKeysMatchMemberSet(msg.WrappedKeys, members) {
+				s.respondError(c, msg.CorrID, protocol.ErrInvalidWrappedKeys, "wrapped_keys must match group member list", 0)
+				return
+			}
+		case msg.DM != "":
+			if dm, err := s.store.GetDirectMessage(msg.DM); err == nil && dm != nil {
+				_, okA := msg.WrappedKeys[dm.UserA]
+				_, okB := msg.WrappedKeys[dm.UserB]
+				if len(msg.WrappedKeys) != 2 || !okA || !okB {
+					s.respondError(c, msg.CorrID, protocol.ErrInvalidWrappedKeys, "wrapped_keys must include both DM members", 0)
+					return
+				}
+			}
 		}
 	}
 
@@ -2205,6 +2281,14 @@ func (s *Server) handleLeaveGroup(c *Client, raw json.RawMessage) {
 	// performGroupLeave path will correctly trigger last-member cleanup
 	// on its own. Without this carve-out a solo member would be
 	// permanently trapped.
+	// S9: serialize the last-admin gate + the leave against a concurrent
+	// demote/remove so they can't race to a zero-admin group. defer-unlock
+	// spans performGroupLeave below. handleLeaveGroup always acquires fresh —
+	// its only internal caller (handleRemoveFromGroup's self-kick) dispatches
+	// here BEFORE acquiring the lock, so there is no re-entrant acquisition.
+	s.groupAdminMu.Lock()
+	defer s.groupAdminMu.Unlock()
+
 	if s.store != nil {
 		if isAdmin, _ := s.store.IsGroupAdmin(msg.Group, c.UserID); isAdmin {
 			if count, _ := s.store.CountGroupAdmins(msg.Group); count == 1 {
@@ -2396,6 +2480,12 @@ func (s *Server) handleDeleteGroup(c *Client, raw json.RawMessage) {
 	//     deletion intent and echoes group_deleted even if the caller
 	//     has already left the group. performGroupLeave assumes the
 	//     caller was a member.
+	// S9: serialize the last-admin gate + the member removal below against a
+	// concurrent demote/remove (zero-admin race). defer-unlock spans the
+	// RemoveGroupMember call.
+	s.groupAdminMu.Lock()
+	defer s.groupAdminMu.Unlock()
+
 	isMemberGate, _ := s.store.IsGroupMember(msg.Group, c.UserID)
 	if isMemberGate {
 		if isAdmin, _ := s.store.IsGroupAdmin(msg.Group, c.UserID); isAdmin {
@@ -3365,6 +3455,14 @@ func (s *Server) handleSetStatus(c *Client, raw json.RawMessage) {
 		// Phase 17c Step 3: silent-drop fixed. Status is broadcast-only
 		// (no client response), counter fires on malformed input.
 		s.rejectAndLog(c, counters.SignalMalformedFrame, "set_status", "malformed set_status frame", nil)
+		return
+	}
+
+	// S7: bound the status text (stored verbatim → storage-abuse vector).
+	// Byte length, mirroring the display-name policy; over-long is
+	// silent-dropped + counted (a well-behaved client caps this in its UI).
+	if len(msg.Text) > maxStatusTextBytes {
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "set_status", "status_text exceeds max length (silent-drop)", nil)
 		return
 	}
 

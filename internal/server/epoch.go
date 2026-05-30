@@ -11,12 +11,12 @@ import (
 
 // roomEpochState tracks epoch rotation state for a single room.
 type roomEpochState struct {
-	currentEpoch    int64     // latest confirmed epoch
-	confirmedEpoch  int64     // epoch that has been confirmed and distributed (messages allowed)
-	messageCount    int64     // messages since last rotation
-	lastRotation    time.Time // time of last rotation
-	pendingRotation bool      // rotation in progress
-	pendingEpoch    int64     // the epoch being rotated to
+	currentEpoch    int64       // latest confirmed epoch
+	confirmedEpoch  int64       // epoch that has been confirmed and distributed (messages allowed)
+	messageCount    int64       // messages since last rotation
+	lastRotation    time.Time   // time of last rotation
+	pendingRotation bool        // rotation in progress
+	pendingEpoch    int64       // the epoch being rotated to
 	pendingTimer    *time.Timer // 5s timeout for pending rotation
 }
 
@@ -370,6 +370,18 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 			return
 		}
 	}
+	// S8: the loop above proves wrapped_keys COVERS the current members; also
+	// require it is LIMITED TO them (exact set match). Without this, a client
+	// whose membership view lags the server — e.g. a member removed between the
+	// epoch_trigger and this reply — carries an extra wrapped key for the
+	// now-removed user that would otherwise be persisted and distributed to
+	// them. Reject + re-trigger with the live member set.
+	if len(wrappedSet) != len(currentMembers) {
+		s.epochs.cancelRotation(msg.Room)
+		s.respondError(c, "", protocol.ErrStaleMemberList, "Member list changed during rotation", 0)
+		s.triggerEpochRotation(c, msg.Room, "stale_member_list_retry")
+		return
+	}
 
 	// Store wrapped keys for all members. Phase 17c Step 4 bug #3
 	// fix: pre-17c looped StoreEpochKey per-member with logged-but-
@@ -432,7 +444,15 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 	}
 	s.mu.RUnlock()
 
+	// S8: re-check live room membership outside the lock before handing out
+	// the new epoch key — a member removed between the member-set read above
+	// and now must not receive it, even though they remain in the
+	// client-supplied wrapped_keys map and are still connected. (DB call kept
+	// out of the s.mu critical section; rotation is infrequent.)
 	for _, t := range targets {
+		if s.store != nil && !s.store.IsRoomMemberByID(msg.Room, t.client.UserID) {
+			continue
+		}
 		perMsg := protocol.EpochKey{
 			Type:       "epoch_key",
 			Room:       msg.Room,

@@ -87,6 +87,10 @@ func (s *Server) handleRetirement(userID string, oldRooms []string, reason strin
 		} else {
 			groupCount = len(groups)
 			for _, g := range groups {
+				// S9: serialize per-group succession (check + promote +
+				// leave) against concurrent network demote/remove so the
+				// group can't be raced to zero admins.
+				s.groupAdminMu.Lock()
 				// Last-admin succession: if retiring user is the sole
 				// admin, auto-promote the oldest remaining member before
 				// leaving. If no other members exist, skip the promote
@@ -125,6 +129,7 @@ func (s *Server) handleRetirement(userID string, oldRooms []string, reason strin
 					}
 				}
 				s.performGroupLeave(g.ID, userID, "retirement", "", "system")
+				s.groupAdminMu.Unlock()
 			}
 		}
 	}

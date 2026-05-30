@@ -733,6 +733,24 @@ func (s *Server) handleBinaryChannel(userID string, ch ssh.Channel) {
 			continue
 		}
 
+		// Bind the byte-commit to the authenticated uploader (audit S6). The
+		// pending upload is keyed by uploadID alone, so without this check a
+		// user who learned another's in-flight uploadID could write bytes to it
+		// on their own channel. A correct client only ever writes uploadIDs it
+		// created via its own upload_start, where pending.user is the same
+		// authenticated identity that owns this binary channel — so a mismatch is
+		// necessarily another user's channel and is hostile. Reject and tear down
+		// the offending channel WITHOUT failUpload (the victim's pending upload
+		// must stay intact — otherwise this is a cross-user DoS) and WITHOUT
+		// draining the attacker-declared size (the size bound below has not run
+		// yet; return rather than discard a possibly-huge frame).
+		if pending.user != userID {
+			s.rejectAndLog(nil, counters.SignalNonMemberContext, "upload_frame",
+				fmt.Sprintf("upload_id=%s write by %s but owned by %s (cross-user commit rejected)",
+					uploadID, userID, pending.user), nil)
+			return
+		}
+
 		// Phase 17 Step 4b: bound `size` (the wire-supplied data_len)
 		// against the upload_start-declared size before any allocation.
 		// A hostile client can set data_len to ExaBytes — io.CopyN

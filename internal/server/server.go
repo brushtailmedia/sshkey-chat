@@ -66,6 +66,17 @@ type Server struct {
 	// (or has just been) deleted.
 	dmCleanupMu sync.Mutex
 
+	// groupAdminMu serializes group admin-state mutations (audit S9). The
+	// last-admin invariant is a check-then-act (CountGroupAdmins → demote /
+	// remove); without serialization two concurrent admin actions can each
+	// pass the count>1 guard and both mutate, leaving a group with zero admins.
+	// group_members.is_admin is mutated ONLY in-process — the network
+	// promote/demote/add/remove handlers and the retirement-succession
+	// processor — never by sshkey-ctl (which cannot send protocol messages), so
+	// one process-wide mutex held across each guarded check+mutate is
+	// sufficient. Acquire order: always before s.mu (broadcasts), never after.
+	groupAdminMu sync.Mutex
+
 	// roomRetirementStop signals the room retirement processor goroutine
 	// to stop. Closed by Close() during shutdown. The processor polls
 	// pending_room_retirements every roomRetirementPollInterval and
