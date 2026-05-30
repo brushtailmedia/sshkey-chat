@@ -89,47 +89,53 @@ func (s *Server) handleRetirement(userID string, oldRooms []string, reason strin
 			for _, g := range groups {
 				// S9: serialize per-group succession (check + promote +
 				// leave) against concurrent network demote/remove so the
-				// group can't be raced to zero admins.
-				s.groupAdminMu.Lock()
-				// Last-admin succession: if retiring user is the sole
-				// admin, auto-promote the oldest remaining member before
-				// leaving. If no other members exist, skip the promote
-				// entirely — the performGroupLeave call below will run
-				// the last-member cleanup cascade.
-				if isAdmin, _ := s.store.IsGroupAdmin(g.ID, userID); isAdmin {
-					if count, _ := s.store.CountGroupAdmins(g.ID); count == 1 {
-						successor, _ := s.store.GetOldestGroupMember(g.ID, userID)
-						if successor != "" {
-							if err := s.store.SetGroupMemberAdmin(g.ID, successor, true); err == nil {
-								s.broadcastToGroup(g.ID, protocol.GroupEvent{
-									Type:   "group_event",
-									Group:  g.ID,
-									Event:  "promote",
-									User:   successor,
-									Reason: "retirement_succession",
-								})
-								// Audit the succession promote. The
-								// subsequent performGroupLeave call
-								// records its own "leave" event — two
-								// distinct event types, two recording
-								// sites, no duplication.
-								if err := s.store.RecordGroupEvent(
-									g.ID, "promote", successor, "", "retirement_succession", "", false, time.Now().Unix(),
-								); err != nil {
-									s.logger.Error("failed to record retirement-succession promote event",
+				// group can't be raced to zero admins. Wrapped in a closure so
+				// defer-unlock releases groupAdminMu even if a step panics —
+				// consistent with the other four S9 sites, and avoids a latent
+				// lock leak should panic-recovery ever be added to this
+				// processor goroutine.
+				func() {
+					s.groupAdminMu.Lock()
+					defer s.groupAdminMu.Unlock()
+					// Last-admin succession: if retiring user is the sole
+					// admin, auto-promote the oldest remaining member before
+					// leaving. If no other members exist, skip the promote
+					// entirely — the performGroupLeave call below will run
+					// the last-member cleanup cascade.
+					if isAdmin, _ := s.store.IsGroupAdmin(g.ID, userID); isAdmin {
+						if count, _ := s.store.CountGroupAdmins(g.ID); count == 1 {
+							successor, _ := s.store.GetOldestGroupMember(g.ID, userID)
+							if successor != "" {
+								if err := s.store.SetGroupMemberAdmin(g.ID, successor, true); err == nil {
+									s.broadcastToGroup(g.ID, protocol.GroupEvent{
+										Type:   "group_event",
+										Group:  g.ID,
+										Event:  "promote",
+										User:   successor,
+										Reason: "retirement_succession",
+									})
+									// Audit the succession promote. The
+									// subsequent performGroupLeave call
+									// records its own "leave" event — two
+									// distinct event types, two recording
+									// sites, no duplication.
+									if err := s.store.RecordGroupEvent(
+										g.ID, "promote", successor, "", "retirement_succession", "", false, time.Now().Unix(),
+									); err != nil {
+										s.logger.Error("failed to record retirement-succession promote event",
+											"group", g.ID, "successor", successor, "error", err)
+									}
+									s.logger.Info("retirement-succession promote",
+										"group", g.ID, "successor", successor, "retiring_user", userID)
+								} else {
+									s.logger.Error("failed to auto-promote successor",
 										"group", g.ID, "successor", successor, "error", err)
 								}
-								s.logger.Info("retirement-succession promote",
-									"group", g.ID, "successor", successor, "retiring_user", userID)
-							} else {
-								s.logger.Error("failed to auto-promote successor",
-									"group", g.ID, "successor", successor, "error", err)
 							}
 						}
 					}
-				}
-				s.performGroupLeave(g.ID, userID, "retirement", "", "system")
-				s.groupAdminMu.Unlock()
+					s.performGroupLeave(g.ID, userID, "retirement", "", "system")
+				}()
 			}
 		}
 	}
