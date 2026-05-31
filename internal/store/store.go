@@ -337,6 +337,18 @@ func (s *Store) initDataDB() error {
 			PRIMARY KEY (room, epoch, user)
 		);
 
+		-- F7 room member attestation: the rotator's signed hash of the member
+		-- set it wrapped the epoch key for. One row per (room, epoch). Opaque
+		-- to the server (no crypto) — stored and forwarded to verifiers.
+		CREATE TABLE IF NOT EXISTS epoch_attestations (
+			room        TEXT NOT NULL,
+			epoch       INTEGER NOT NULL,
+			generator   TEXT NOT NULL,
+			member_hash TEXT NOT NULL,
+			member_sig  TEXT NOT NULL,
+			PRIMARY KEY (room, epoch)
+		);
+
 		CREATE TABLE IF NOT EXISTS group_conversations (
 			id          TEXT PRIMARY KEY,
 			name        TEXT NOT NULL DEFAULT '',

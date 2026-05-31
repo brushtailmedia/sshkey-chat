@@ -12,22 +12,31 @@ type Device struct {
 	CreatedAt  string
 }
 
-// UpsertDevice registers or updates a device. Returns the current device count for the user.
-func (s *Store) UpsertDevice(user, deviceID string) (int, error) {
+// UpsertDevice registers or updates a device. Returns the current device
+// count for the user and whether this registration created a brand-new
+// device row (isNew). isNew drives the shadow-device new-device notification
+// (Tier 1) — a reconnecting device returns isNew=false and is not announced.
+func (s *Store) UpsertDevice(user, deviceID string) (count int, isNew bool, err error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.dataDB.Exec(`
+	res, err := s.dataDB.Exec(`
 		INSERT INTO devices (user, device_id, created_at)
 		VALUES (?, ?, ?)
 		ON CONFLICT (user, device_id) DO NOTHING`,
 		user, deviceID, now,
 	)
 	if err != nil {
-		return 0, err
+		return 0, false, err
+	}
+	// RowsAffected is 1 when a row was inserted and 0 when ON CONFLICT DO
+	// NOTHING suppressed the insert (device already known). That distinguishes
+	// a first-seen device from a reconnect. (A nil/err RowsAffected is treated
+	// as "not new" — fail safe toward not over-notifying.)
+	if n, aerr := res.RowsAffected(); aerr == nil && n > 0 {
+		isNew = true
 	}
 
-	var count int
 	err = s.dataDB.QueryRow(`SELECT COUNT(*) FROM devices WHERE user = ?`, user).Scan(&count)
-	return count, err
+	return count, isNew, err
 }
 
 // UpdateDeviceSync updates the last_synced timestamp for a device.
@@ -103,4 +112,3 @@ func (s *Store) GetDevices(user string) ([]Device, error) {
 	}
 	return devices, rows.Err()
 }
-

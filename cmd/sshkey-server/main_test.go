@@ -362,9 +362,12 @@ func (tc *testClient) readMessage() (string, json.RawMessage) {
 		if err != nil {
 			tc.t.Fatalf("extract type: %v", err)
 		}
-		// Skip async messages that can arrive between any protocol messages
+		// Skip async messages that can arrive between any protocol messages.
+		// device_added is pushed to a user's other sessions whenever a new
+		// device of theirs connects (shadow-device transparency, Tier 1), so
+		// it can land between any two frames in a multi-device test.
 		switch msgType {
-		case "presence", "typing", "epoch_trigger", "epoch_key", "epoch_confirmed":
+		case "presence", "typing", "epoch_trigger", "epoch_key", "epoch_confirmed", "device_added":
 			continue
 		}
 		return msgType, raw

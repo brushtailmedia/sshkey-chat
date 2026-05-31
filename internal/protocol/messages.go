@@ -49,6 +49,12 @@ type SyncEpochKey struct {
 	Room       string `json:"room"`
 	Epoch      int64  `json:"epoch"`
 	WrappedKey string `json:"wrapped_key"` // base64, wrapped for the recipient
+	// F7 attestation — populated when available. Sync/history keys are
+	// historical-decryption-only and the client skip-verifies them, so these
+	// are informational/forward-compatible (carried, not relied upon).
+	Generator  string `json:"generator,omitempty"`
+	MemberHash string `json:"member_hash,omitempty"`
+	MemberSig  string `json:"member_sig,omitempty"`
 }
 
 type SyncComplete struct {
@@ -1064,6 +1070,13 @@ type EpochKey struct {
 	Room       string `json:"room"`
 	Epoch      int64  `json:"epoch"`
 	WrappedKey string `json:"wrapped_key"` // base64, wrapped for recipient
+	// F7 room member attestation — the server stores these from the rotator's
+	// epoch_rotate and forwards them unchanged with each current-epoch key so
+	// the recipient can verify the epoch key was wrapped for exactly the roster
+	// it can see (no shadow reader). Opaque to the server (it has no crypto).
+	Generator  string `json:"generator,omitempty"`   // userID that generated this epoch
+	MemberHash string `json:"member_hash,omitempty"` // SHA256(sort(member usernames))
+	MemberSig  string `json:"member_sig,omitempty"`  // generator's SignEpochRoster over (room,epoch,member_hash)
 }
 
 type EpochTrigger struct {
@@ -1082,8 +1095,9 @@ type EpochRotate struct {
 	Type        string            `json:"type"` // "epoch_rotate"
 	Room        string            `json:"room"`
 	Epoch       int64             `json:"epoch"`
-	WrappedKeys map[string]string `json:"wrapped_keys"` // userID -> base64 wrapped key
-	MemberHash  string            `json:"member_hash"`  // SHA256 of sorted member usernames
+	WrappedKeys map[string]string `json:"wrapped_keys"`         // userID -> base64 wrapped key
+	MemberHash  string            `json:"member_hash"`          // SHA256 of sorted member usernames
+	MemberSig   string            `json:"member_sig,omitempty"` // F7: generator's SignEpochRoster over (room,epoch,member_hash)
 }
 
 type EpochConfirmed struct {
@@ -1171,6 +1185,19 @@ type DeviceRevoked struct {
 	Type     string `json:"type"` // "device_revoked"
 	DeviceID string `json:"device_id"`
 	Reason   string `json:"reason"` // "admin_action"
+}
+
+// DeviceAdded is pushed to a user's OTHER connected sessions the moment a
+// brand-new device registers under their identity (shadow-device
+// transparency, Tier 1 — see docs/planning/open/device-identity-transparency.md).
+// It turns silent new-device registration into a proactive alert so a
+// stolen-key device using a fresh device_id cannot operate unseen. Offline
+// sessions catch the same device via the client's connect-time reconcile of
+// the authoritative device_list.
+type DeviceAdded struct {
+	Type      string `json:"type"` // "device_added"
+	DeviceID  string `json:"device_id"`
+	CreatedAt string `json:"created_at"`
 }
 
 // Device management (user-scoped; admin uses sshkey-ctl instead)

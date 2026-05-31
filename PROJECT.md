@@ -1001,27 +1001,26 @@ Sort the raw public key bytes lexicographically so both users compute the same v
 
 Same mechanism as Signal's safety numbers and WhatsApp's security codes.
 
-#### Member List Hashing (Rooms)
+#### Member List Attestation (Rooms) — F7
 
-Detects phantom member injection during epoch rotation. Included in `epoch_rotate` and verified by existing members.
+Detects covert (shadow-reader) injection during epoch rotation: confirms the new epoch key was wrapped for exactly the member set every other member can see. Implemented 2026-05-31 (F7); the earlier description here was of an *unsigned, unimplemented* mechanism — corrected below.
 
 **How it works:**
-1. Generating client receives `epoch_trigger` with member list and public keys
-2. Client wraps the epoch key for all listed members
-3. Client computes `member_hash = SHA256(sort(member_usernames))` -- a deterministic hash of who the key was wrapped for
-4. Client includes `member_hash` in the `epoch_rotate` message
-5. Server distributes the new epoch key and `member_hash` to all members
-6. Each existing member computes `SHA256(sort(local_member_list))` from their own locally-tracked membership (built from `room_event` join/leave messages)
-7. Match → the key was wrapped for exactly who the member expects. Proceed.
-8. Mismatch → hard warning: "Room membership may have been tampered with. The new epoch key was wrapped for a different set of members than expected."
+1. Generating client receives `epoch_trigger` with the member list + public keys and wraps the epoch key for all listed members.
+2. It computes `member_hash = SHA256(sort(member_usernames))` and **signs `(room, epoch, member_hash)`** with its identity key (`crypto.SignEpochRoster`, domain `epoch_roster:v1`).
+3. It sends `member_hash` + `member_sig` in `epoch_rotate`.
+4. The server stores `(generator, member_hash, member_sig)` per `(room, epoch)` **atomically with the key batch** and **forwards all three unchanged** on every current-epoch `epoch_key` (live distribution, on-connect `sendEpochKeys`, state-fix). The server never verifies — opaque store-and-forward.
+5. Each member, before adopting a current-epoch key, **verifies `member_sig` against the generator's pinned key** (`VerifyEpochRoster`), then recomputes `SHA256(sort(local_roster))` and compares.
+6. Match → adopt (advance current epoch).
+7. Failure (missing/invalid signature, unresolvable generator, or a member-set mismatch that persists after one `room_members` refresh) → **fail-closed**: the key is NOT adopted (the room is undecryptable for that epoch) and a tampering warning is surfaced.
 
-**What this catches:**
-- Server injects a phantom "eve" into the member list given to the generating client → existing members' local lists won't include "eve" → `member_hash` mismatch → detected
-- Server omits a member from the list (denying them the key) → `member_hash` mismatch → detected
+**Why the signature is essential:** an unsigned hash forwarded by an untrusted relay is forgeable — the server could rewrite it per-victim to match each member's roster, defeating detection entirely. The signature (verified against the generator's pinned key) makes the hash unforgeable by the relay.
 
-**What it doesn't catch:**
-- New members (they have no prior membership state to compare against -- they trust the server for their first list, same TOFU limitation as key pinning)
-- Server that consistently tampers with both `room_event` messages and `epoch_trigger` over time -- but this requires sustained active MITM of all members, not a one-off injection
+**Sync-path guard:** epoch keys delivered via `sync_batch` / `history_result` are historical-decryption-only, skip verification, and **never advance the current epoch** (`storeEpochKeyHistorical`). Only a verified `epoch_key` establishes the current epoch — otherwise a malicious server could deliver the current epoch's key via the sync path to dodge verification.
+
+**What this catches:** a malicious/compromised server wrapping the epoch key for a hidden reader (covert eavesdropper) or equivocating about membership → mismatch → fail-closed. An operator *openly* adding a member does so visibly in the roster (the accepted room trust model).
+
+**What it doesn't catch (accepted):** key-substitution of a member (real username, attacker pubkey) is not bound by the username-set hash — but it is reactively self-detecting (the real member can't decrypt). Binding device pubkeys becomes necessary only under per-device keys (the Tier 2 device-identity work); the `epoch_roster:v1` domain tag is the version hook for that.
 
 #### Replay Detection
 

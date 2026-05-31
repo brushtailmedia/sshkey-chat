@@ -46,7 +46,7 @@ func testClientFor(userID, deviceID string) *captureClient {
 func TestListDevices_EmptyForNewUser(t *testing.T) {
 	s := newTestServer(t)
 	// Register alice's first device
-	if _, err := s.store.UpsertDevice("alice", "dev_alice_1"); err != nil {
+	if _, _, err := s.store.UpsertDevice("alice", "dev_alice_1"); err != nil {
 		t.Fatalf("register device: %v", err)
 	}
 

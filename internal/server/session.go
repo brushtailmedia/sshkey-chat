@@ -150,6 +150,7 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 	)
 
 	// Check device revocation and register
+	var deviceIsNew bool // true when this connect registered a first-seen device
 	if s.store != nil {
 		revoked, err := s.store.IsDeviceRevoked(userID, clientHello.DeviceID)
 		if err == nil && revoked {
@@ -161,7 +162,8 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 			return
 		}
 
-		deviceCount, err := s.store.UpsertDevice(userID, clientHello.DeviceID)
+		deviceCount, isNew, err := s.store.UpsertDevice(userID, clientHello.DeviceID)
+		deviceIsNew = isNew
 		if err != nil {
 			s.logger.Error("device registration failed", "user", userID, "error", err)
 		} else if deviceCount > s.cfg.Server.Devices.MaxPerUser {
@@ -195,6 +197,16 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 	s.mu.Lock()
 	s.clients[clientHello.DeviceID] = client
 	s.mu.Unlock()
+
+	// Shadow-device transparency (Tier 1): a brand-new device just registered
+	// under this identity. Proactively announce it to the user's OTHER live
+	// sessions so a stolen-key device on a fresh device_id cannot appear
+	// silently. Offline sessions catch the same device on their next connect
+	// via the client's device_list reconcile. Best-effort; never blocks the
+	// session. Runs after registration so the new device is excluded by id.
+	if deviceIsNew {
+		s.notifyNewDevice(userID, clientHello.DeviceID)
+	}
 
 	// Phase 17b Step 5b: start the per-client writer goroutine.
 	// Must run AFTER the Client is registered in s.clients so

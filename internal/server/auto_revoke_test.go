@@ -82,7 +82,7 @@ func TestResolveDeviceUser_ActiveClient(t *testing.T) {
 	// Register alice's device via the store first (so store lookup
 	// would also find it — this test confirms the fast path is taken
 	// rather than falling through, but either way returns alice).
-	if _, err := s.store.UpsertDevice("alice", "dev_alice_active"); err != nil {
+	if _, _, err := s.store.UpsertDevice("alice", "dev_alice_active"); err != nil {
 		t.Fatalf("UpsertDevice: %v", err)
 	}
 
@@ -103,7 +103,7 @@ func TestResolveDeviceUser_ActiveClient(t *testing.T) {
 func TestResolveDeviceUser_StoreFallback(t *testing.T) {
 	s := newTestServer(t)
 
-	if _, err := s.store.UpsertDevice("bob", "dev_bob_offline"); err != nil {
+	if _, _, err := s.store.UpsertDevice("bob", "dev_bob_offline"); err != nil {
 		t.Fatalf("UpsertDevice: %v", err)
 	}
 
@@ -149,7 +149,7 @@ func TestProcessAutoRevoke_EnqueuesWhenThresholdCrossed(t *testing.T) {
 	var logBuf bytes.Buffer
 	captureServerLogs(s, &logBuf, slog.LevelWarn)
 
-	if _, err := s.store.UpsertDevice("alice", "dev_alice_bad"); err != nil {
+	if _, _, err := s.store.UpsertDevice("alice", "dev_alice_bad"); err != nil {
 		t.Fatalf("UpsertDevice: %v", err)
 	}
 
@@ -199,7 +199,7 @@ func TestProcessAutoRevoke_ObserverModeDoesNotEnqueue(t *testing.T) {
 	var logBuf bytes.Buffer
 	captureServerLogs(s, &logBuf, slog.LevelInfo)
 
-	if _, err := s.store.UpsertDevice("alice", "dev_alice_observed"); err != nil {
+	if _, _, err := s.store.UpsertDevice("alice", "dev_alice_observed"); err != nil {
 		t.Fatalf("UpsertDevice: %v", err)
 	}
 
@@ -234,7 +234,7 @@ func TestProcessAutoRevoke_IdempotentSkipsAlreadyRevoked(t *testing.T) {
 	s := newTestServer(t)
 	captureServerLogs(s, &bytes.Buffer{}, slog.LevelWarn)
 
-	if _, err := s.store.UpsertDevice("alice", "dev_alice_pre_revoked"); err != nil {
+	if _, _, err := s.store.UpsertDevice("alice", "dev_alice_pre_revoked"); err != nil {
 		t.Fatalf("UpsertDevice: %v", err)
 	}
 	// Pre-revoke the device (simulates admin-revoke between ticks).
@@ -273,7 +273,7 @@ func TestProcessAutoRevoke_MultipleDevicesIndependent(t *testing.T) {
 		{"carol", "dev_carol_multi"},
 	}
 	for _, d := range devs {
-		if _, err := s.store.UpsertDevice(d.user, d.device); err != nil {
+		if _, _, err := s.store.UpsertDevice(d.user, d.device); err != nil {
 			t.Fatalf("UpsertDevice(%s): %v", d.user, err)
 		}
 		for i := 0; i < 4; i++ {
@@ -310,7 +310,7 @@ func TestProcessAutoRevoke_SubThresholdSkipped(t *testing.T) {
 	s := newTestServer(t)
 	captureServerLogs(s, &bytes.Buffer{}, slog.LevelWarn)
 
-	if _, err := s.store.UpsertDevice("alice", "dev_alice_borderline"); err != nil {
+	if _, _, err := s.store.UpsertDevice("alice", "dev_alice_borderline"); err != nil {
 		t.Fatalf("UpsertDevice: %v", err)
 	}
 	// 2 events — under threshold of 3.
@@ -337,7 +337,7 @@ func TestProcessAutoRevoke_NoThresholdsNoOp(t *testing.T) {
 	s := newTestServer(t)
 	captureServerLogs(s, &bytes.Buffer{}, slog.LevelWarn)
 
-	if _, err := s.store.UpsertDevice("alice", "dev_alice_no_thresh"); err != nil {
+	if _, _, err := s.store.UpsertDevice("alice", "dev_alice_no_thresh"); err != nil {
 		t.Fatalf("UpsertDevice: %v", err)
 	}
 	for i := 0; i < 100; i++ {
@@ -361,7 +361,7 @@ func TestProcessAutoRevoke_WritesAuditLog(t *testing.T) {
 	s := newTestServer(t)
 	captureServerLogs(s, &bytes.Buffer{}, slog.LevelWarn)
 
-	if _, err := s.store.UpsertDevice("alice", "dev_alice_audit"); err != nil {
+	if _, _, err := s.store.UpsertDevice("alice", "dev_alice_audit"); err != nil {
 		t.Fatalf("UpsertDevice: %v", err)
 	}
 	for i := 0; i < 5; i++ {

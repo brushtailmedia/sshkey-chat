@@ -65,7 +65,7 @@ func TestProcessPendingDeviceRevocations_HappyPath(t *testing.T) {
 	s := newTestServer(t)
 
 	// Register a device for alice and revoke it via the CLI side.
-	if _, err := s.store.UpsertDevice("alice", "dev_laptop"); err != nil {
+	if _, _, err := s.store.UpsertDevice("alice", "dev_laptop"); err != nil {
 		t.Fatalf("upsert device: %v", err)
 	}
 	if err := s.store.RevokeDevice("alice", "dev_laptop", "stolen"); err != nil {

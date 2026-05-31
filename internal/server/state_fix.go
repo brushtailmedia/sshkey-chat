@@ -77,6 +77,9 @@ func (s *Server) pushEpochKeyFix(c *Client, verb, roomID string) {
 	if err != nil || wrappedKey == "" {
 		return
 	}
+	// F7: attach the stored attestation — this is a current-epoch key, so the
+	// client runs the same verify-or-fail-closed path as a live delivery.
+	gen, mh, ms, _ := s.store.GetEpochAttestation(roomID, epoch)
 	// Send directly via the client's encoder (the client expects
 	// this outside of the error response envelope). Error is
 	// intentionally swallowed — if the write fails, the client is
@@ -86,5 +89,8 @@ func (s *Server) pushEpochKeyFix(c *Client, verb, roomID string) {
 		Room:       roomID,
 		Epoch:      epoch,
 		WrappedKey: wrappedKey,
+		Generator:  gen,
+		MemberHash: mh,
+		MemberSig:  ms,
 	})
 }

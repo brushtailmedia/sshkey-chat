@@ -2,10 +2,36 @@ package server
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 )
+
+// notifyNewDevice announces a freshly-registered device to the user's OTHER
+// connected sessions (shadow-device transparency, Tier 1 — see
+// docs/planning/open/device-identity-transparency.md). The new device itself
+// is excluded (it knows it just connected). Best-effort fan-out via the
+// per-client send queue; offline sessions catch the same device on their next
+// connect through the client's device_list reconcile.
+func (s *Server) notifyNewDevice(userID, newDeviceID string) {
+	s.mu.RLock()
+	var targets []*Client
+	for _, c := range s.clients {
+		if c.UserID == userID && c.DeviceID != newDeviceID {
+			targets = append(targets, c)
+		}
+	}
+	s.mu.RUnlock()
+	if len(targets) == 0 {
+		return
+	}
+	s.fanOut("device_added", protocol.DeviceAdded{
+		Type:      "device_added",
+		DeviceID:  newDeviceID,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}, targets)
+}
 
 // handleListDevices returns the list of devices registered for the
 // authenticated user. Revocation status is included so the UI can render

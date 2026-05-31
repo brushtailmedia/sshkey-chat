@@ -285,9 +285,15 @@ display as: "1234 5678 9012 3456 7890 1234"
 
 Sort raw public key bytes lexicographically. Truncate SHA256 to 24 digits, displayed as six groups of four. Users compare via phone or in person.
 
-### Member List Hashing
+### Member List Attestation (F7)
 
-During epoch rotation, the generating client includes `member_hash = SHA256(sort(member_usernames))` in `epoch_rotate`. Existing members verify this against their locally-tracked membership. Mismatch = potential phantom member injection.
+During epoch rotation the generating client computes `member_hash = SHA256(sort(member_usernames))` over the set it wrapped the new epoch key for **and signs `(room, epoch, member_hash)`** with its identity key (`SignEpochRoster`, domain `epoch_roster:v1`), sending both `member_hash` and `member_sig` in `epoch_rotate`. The server stores them per `(room, epoch)` and **forwards `generator` + `member_hash` + `member_sig` unchanged** with every current-epoch `epoch_key` it delivers (live distribution, on-connect, state-fix). The server performs no verification — it treats the signature as opaque.
+
+Each receiving member, before adopting a current-epoch key, **verifies the signature against the generator's pinned key, then recomputes `SHA256(sort(local_roster))` and compares**. The signature is essential: an *unsigned* hash would be forgeable by the relay (it could rewrite it per-victim to match each member's roster). On any failure — missing/invalid signature, unresolvable generator, or a member-set mismatch that persists after one `room_members` refresh — the member **fail-closes**: it does NOT adopt the key (the room is undecryptable for that epoch) and surfaces a tampering warning, rather than silently accepting an epoch key that may have been wrapped for a hidden reader. This makes covert (shadow-reader) injection detectable; an operator who legitimately adds a member does so visibly in the roster.
+
+**Sync/history keys are exempt**: epoch keys delivered in `sync_batch` / `history_result` are historical-decryption-only, skip verification, and **must never advance the current epoch** — only a verified `epoch_key` establishes the current epoch. (Were that not enforced, a malicious server could deliver the current epoch's key via the sync path to bypass verification.)
+
+This is a **detection/transparency** property layered on the operator-controlled room membership model; it does not change who may be a member.
 
 ## Message Types
 

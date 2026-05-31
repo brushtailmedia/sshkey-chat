@@ -21,7 +21,13 @@ func (s *Store) StoreEpochKey(room string, epoch int64, user, wrappedKey string)
 // failure mid-loop silently left partial state while the rotation
 // still completed. This method wraps the whole batch in a single
 // transaction so the caller sees atomic success-or-failure.
-func (s *Store) StoreEpochKeysBatch(room string, epoch int64, keys map[string]string) error {
+//
+// F7: the rotator's member attestation (generator/memberHash/memberSig) is
+// written in the SAME transaction as the keys, so a verifier can never end up
+// holding the key without its attestation (which would fail-closed on a legit
+// rotation). memberSig may be empty pre-F7-client; the row is still written
+// (an empty sig is treated as "no attestation" → fail-closed by verifiers).
+func (s *Store) StoreEpochKeysBatch(room string, epoch int64, keys map[string]string, generator, memberHash, memberSig string) error {
 	tx, err := s.dataDB.Begin()
 	if err != nil {
 		return err
@@ -40,7 +46,28 @@ func (s *Store) StoreEpochKeysBatch(room string, epoch int64, keys map[string]st
 			return err
 		}
 	}
+	if _, err := tx.Exec(`
+		INSERT INTO epoch_attestations (room, epoch, generator, member_hash, member_sig)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT (room, epoch) DO UPDATE SET
+			generator = excluded.generator,
+			member_hash = excluded.member_hash,
+			member_sig = excluded.member_sig`,
+		room, epoch, generator, memberHash, memberSig); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+// GetEpochAttestation returns the F7 member attestation for a (room, epoch),
+// or sql.ErrNoRows if none was stored. The server treats all three values as
+// opaque — it stores and forwards them; verification is client-side.
+func (s *Store) GetEpochAttestation(room string, epoch int64) (generator, memberHash, memberSig string, err error) {
+	err = s.dataDB.QueryRow(`
+		SELECT generator, member_hash, member_sig FROM epoch_attestations WHERE room = ? AND epoch = ?`,
+		room, epoch,
+	).Scan(&generator, &memberHash, &memberSig)
+	return
 }
 
 // GetEpochKey retrieves a wrapped epoch key for a specific user/room/epoch.
@@ -88,4 +115,3 @@ func (s *Store) GetEpochKeysForUser(room, user string, minEpoch, maxEpoch int64)
 	}
 	return keys, rows.Err()
 }
-

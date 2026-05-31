@@ -80,30 +80,41 @@ func TestStoreRoundTrip(t *testing.T) {
 		t.Errorf("wrapped_keys[bob] = %q, want wrapped_b", dmMsgs[0].WrappedKeys["bob"])
 	}
 
-	// Test device registration
-	count, err := s.UpsertDevice("alice", "dev_test_001")
+	// Test device registration. isNew must be true for a first-seen device
+	// and false for a reconnect — this drives the Tier 1 new-device
+	// notification, and locks in the RowsAffected semantics it relies on.
+	count, isNew, err := s.UpsertDevice("alice", "dev_test_001")
 	if err != nil {
 		t.Fatalf("upsert device: %v", err)
 	}
 	if count != 1 {
 		t.Errorf("device count = %d, want 1", count)
 	}
+	if !isNew {
+		t.Error("first registration of dev_test_001 should report isNew=true")
+	}
 
-	count, err = s.UpsertDevice("alice", "dev_test_002")
+	count, isNew, err = s.UpsertDevice("alice", "dev_test_002")
 	if err != nil {
 		t.Fatalf("upsert device 2: %v", err)
 	}
 	if count != 2 {
 		t.Errorf("device count = %d, want 2", count)
 	}
+	if !isNew {
+		t.Error("first registration of dev_test_002 should report isNew=true")
+	}
 
-	// Duplicate device shouldn't increase count
-	count, err = s.UpsertDevice("alice", "dev_test_001")
+	// Duplicate device shouldn't increase count or report isNew.
+	count, isNew, err = s.UpsertDevice("alice", "dev_test_001")
 	if err != nil {
 		t.Fatalf("upsert device dup: %v", err)
 	}
 	if count != 2 {
 		t.Errorf("device count after dup = %d, want 2", count)
+	}
+	if isNew {
+		t.Error("re-registration of dev_test_001 should report isNew=false")
 	}
 
 	// Test group creation

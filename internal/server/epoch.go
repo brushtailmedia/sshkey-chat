@@ -212,11 +212,17 @@ func (s *Server) sendEpochKeys(c *Client) {
 			continue // no key for this user (new member, needs rotation)
 		}
 
+		// F7: attach the stored attestation so the connecting client verifies
+		// this (current-epoch) key like a live one. Absent for pre-F7 epochs.
+		gen, mh, ms, _ := s.store.GetEpochAttestation(roomID, epoch)
 		c.Encoder.Encode(protocol.EpochKey{
 			Type:       "epoch_key",
 			Room:       roomID,
 			Epoch:      epoch,
 			WrappedKey: wrappedKey,
+			Generator:  gen,
+			MemberHash: mh,
+			MemberSig:  ms,
 		})
 	}
 }
@@ -390,7 +396,10 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 	// one transaction — either all keys land or the rotation aborts
 	// with internal_error, preserving the invariant that every
 	// confirmed rotation has keys for every member.
-	if err := s.store.StoreEpochKeysBatch(msg.Room, msg.Epoch, msg.WrappedKeys); err != nil {
+	// F7: persist the rotator's member attestation atomically with the keys
+	// (generator = the authenticated rotator; member_hash/member_sig opaque,
+	// forwarded to verifiers). msg.MemberSig is empty for a pre-F7 client.
+	if err := s.store.StoreEpochKeysBatch(msg.Room, msg.Epoch, msg.WrappedKeys, c.UserID, msg.MemberHash, msg.MemberSig); err != nil {
 		s.logger.Error("failed to store epoch keys batch",
 			"room", msg.Room, "epoch", msg.Epoch, "members", len(msg.WrappedKeys), "error", err)
 		s.epochs.cancelRotation(msg.Room)
@@ -458,6 +467,11 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 			Room:       msg.Room,
 			Epoch:      msg.Epoch,
 			WrappedKey: t.wrappedKey,
+			// F7: forward the rotator's attestation so the recipient can verify
+			// the epoch key was wrapped for exactly the roster it sees.
+			Generator:  c.UserID,
+			MemberHash: msg.MemberHash,
+			MemberSig:  msg.MemberSig,
 		}
 		// Phase 17b Step 5b: route per-recipient varying message
 		// through the shared fanOutOne helper to pick up the
