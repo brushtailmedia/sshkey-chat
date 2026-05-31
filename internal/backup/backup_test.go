@@ -35,6 +35,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/brushtailmedia/sshkey-chat/internal/sqlitedsn"
+	"github.com/brushtailmedia/sshkey-chat/internal/store"
 	_ "modernc.org/sqlite"
 )
 
@@ -278,6 +280,51 @@ func TestRun_HappyPath(t *testing.T) {
 }
 
 // -------- Run: filename shape --------
+
+// TestRun_LiveWALStoreWriterAlive locks the production read-only backup shape:
+// each source DB is opened read-only (sqlitedsn.ReadOnly) against a live WAL
+// database created by store.Open with the writable store connection STILL OPEN,
+// and the per-DB integrity_check inside backupOneDB must pass. This guards the
+// corrected read-only-only source open (the old DSN wrongly combined
+// journal_mode=WAL with mode=ro) against a real, actively-held store — not just
+// closed raw fixture DBs.
+func TestRun_LiveWALStoreWriterAlive(t *testing.T) {
+	dir := t.TempDir()
+	// store.Open creates <dir>/data/{data,rooms,users}.db in WAL mode and holds
+	// live connections to all three.
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close() // writer stays alive across the backup below — that's the point
+	// A real write so the WAL has content and the writer is unambiguously live.
+	if err := st.InsertUser("usr_alice", "ssh-ed25519 AAAAseed", "Alice"); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	// The attachment dir may not exist on a fresh store; create it so the
+	// backup's files scan has nothing to trip on (0 attachments expected).
+	if err := os.MkdirAll(filepath.Join(dir, "data", "files"), 0o750); err != nil {
+		t.Fatalf("mkdir files: %v", err)
+	}
+
+	opts := Options{
+		DataDir:            dir,
+		DestDir:            filepath.Join(dir, "backups"),
+		Compress:           true,
+		IncludeConfigFiles: false,
+		NowFn:              fixedNow(),
+	}
+	res, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("backup of live WAL store (writer alive) failed: %v", err)
+	}
+	if res.CoreDBs != 3 {
+		t.Errorf("CoreDBs = %d, want 3 (data, rooms, users)", res.CoreDBs)
+	}
+	if _, err := os.Stat(res.Path); err != nil {
+		t.Errorf("tarball missing at %s: %v", res.Path, err)
+	}
+}
 
 func TestRun_FilenameIncludesLabel(t *testing.T) {
 	fx := newFixture(t)
@@ -601,8 +648,12 @@ func TestRun_DBDataSurvivesRoundTrip(t *testing.T) {
 	extractPath := filepath.Join(t.TempDir(), "extracted-data.db")
 	extractSingleFile(t, res.Path, "data/data.db", extractPath)
 
-	// Open the extracted DB and verify our marker row is there.
-	db2, err := sql.Open("sqlite", extractPath+"?mode=ro")
+	// Open the extracted DB read-only and verify our marker row is there.
+	dsn2, err := sqlitedsn.ReadOnly(extractPath)
+	if err != nil {
+		t.Fatalf("build extracted dsn: %v", err)
+	}
+	db2, err := sql.Open("sqlite", dsn2)
 	if err != nil {
 		t.Fatalf("open extracted: %v", err)
 	}

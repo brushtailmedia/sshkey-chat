@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/brushtailmedia/sshkey-chat/internal/sqlitedsn"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -37,12 +39,20 @@ type Store struct {
 
 // Open creates or opens all databases in the given data directory.
 func Open(dir string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Join(dir, "data"), 0750); err != nil {
+	// Normalize the data root to an absolute path up front. CLI/server `-data`
+	// inputs can be relative; an absolute root keeps per-DB paths stable across
+	// any later working-directory change, makes DataDir() genuinely absolute,
+	// and gives the sqlitedsn helper the absolute input its file: URIs require.
+	dataRoot, err := filepath.Abs(filepath.Join(dir, "data"))
+	if err != nil {
+		return nil, fmt.Errorf("resolve data dir: %w", err)
+	}
+	if err := os.MkdirAll(dataRoot, 0750); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
 
 	s := &Store{
-		dir:      filepath.Join(dir, "data"),
+		dir:      dataRoot,
 		roomDBs:  make(map[string]*sql.DB),
 		groupDBs: make(map[string]*sql.DB),
 		dmDBs:    make(map[string]*sql.DB),
@@ -180,19 +190,35 @@ func (s *Store) DeleteFileHash(fileID string) {
 	s.dataDB.Exec(`DELETE FROM file_hashes WHERE file_id = ?`, fileID)
 }
 
-// openDB opens a SQLite database in WAL mode.
+// openDB opens a SQLite database read-write in WAL mode.
+//
+// The DSN comes from sqlitedsn.Writable, which applies journal_mode(WAL) and
+// busy_timeout(5000) via modernc's `_pragma=` form to every pooled connection.
+// (The old mattn-style `?_busy_timeout=5000` was silently ignored by modernc,
+// leaving busy_timeout at 0 — concurrent writers failed immediately instead of
+// waiting.) s.dir is already absolute (see Open), so the helper's file: URI is
+// well-formed.
+//
+// The explicit PRAGMA Execs below are deliberate, not leftover duplication:
+//   - journal_mode=WAL is a checked startup assertion that WAL actually engaged
+//     (journal mode is persistent, so re-asserting it is cheap).
+//   - foreign_keys=ON is left exactly as it was — foreign-key behavior is
+//     intentionally out of scope for the DSN fix, so it stays a per-connection Exec.
 func (s *Store) openDB(name string) (*sql.DB, error) {
-	path := filepath.Join(s.dir, name)
-	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000")
+	dsn, err := sqlitedsn.Writable(filepath.Join(s.dir, name))
+	if err != nil {
+		return nil, fmt.Errorf("build dsn for %s: %w", name, err)
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
-	// Enable WAL mode explicitly (some drivers need this)
+	// Startup assertion that WAL engaged (see doc comment).
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("enable WAL: %w", err)
 	}
-	// Enable foreign keys
+	// Foreign keys: unchanged behavior, intentionally out of scope for the DSN fix.
 	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("enable foreign keys: %w", err)

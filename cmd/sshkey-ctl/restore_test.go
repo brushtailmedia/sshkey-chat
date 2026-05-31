@@ -37,6 +37,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/backup"
+	"github.com/brushtailmedia/sshkey-chat/internal/sqlitedsn"
 )
 
 // setupRestoreFixture builds a config + data dir with real SQLite
@@ -128,7 +129,11 @@ func produceBackup(t *testing.T, configDir, dataDir, label string) string {
 // the SQLite DB at path. Returns empty string on any error.
 func readMarker(t *testing.T, path string) string {
 	t.Helper()
-	db, err := sql.Open("sqlite", path+"?mode=ro")
+	dsn, err := sqlitedsn.ReadOnly(path)
+	if err != nil {
+		return ""
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return ""
 	}

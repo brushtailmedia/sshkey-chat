@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/brushtailmedia/sshkey-chat/internal/sqlitedsn"
 	"modernc.org/sqlite"
 )
 
@@ -36,7 +37,14 @@ func backupOneDB(ctx context.Context, srcPath, tempPath string, tw *tar.Writer, 
 	// this path as a SQLite DB; leftover bytes could confuse it.
 	_ = os.Remove(tempPath)
 
-	src, err := sql.Open("sqlite", srcPath+"?_journal_mode=WAL&_busy_timeout=5000&mode=ro")
+	// Read-only open of the live source DB. (The old DSN wrongly combined
+	// journal_mode=WAL with mode=ro; ReadOnly applies mode=ro + busy_timeout
+	// only and never mutates the source's journal mode.)
+	dsn, err := sqlitedsn.ReadOnly(srcPath)
+	if err != nil {
+		return fmt.Errorf("build source dsn %s: %w", srcPath, err)
+	}
+	src, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return fmt.Errorf("open source %s: %w", srcPath, err)
 	}
@@ -109,7 +117,11 @@ func runOnlineBackup(conn *sql.Conn, dstPath string) error {
 // them for the error message so the operator sees the full
 // diagnostic rather than just the first complaint.
 func integrityCheck(ctx context.Context, path string) error {
-	db, err := sql.Open("sqlite", path+"?mode=ro")
+	dsn, err := sqlitedsn.ReadOnly(path)
+	if err != nil {
+		return fmt.Errorf("build integrity-check dsn: %w", err)
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return fmt.Errorf("open for integrity check: %w", err)
 	}

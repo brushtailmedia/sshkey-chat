@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/audit"
+	"github.com/brushtailmedia/sshkey-chat/internal/sqlitedsn"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 
 	_ "modernc.org/sqlite"
@@ -107,14 +108,20 @@ func cmdRoomStats(dataDir string) error {
 		// Try to count messages in the per-room DB. If the file
 		// doesn't exist or the DB is locked, report "?" rather than
 		// failing the whole command.
+		// Read-only count from the per-room DB, via the store's normalized
+		// (absolute) data root. ReadOnly (mode=ro) also means a room whose
+		// message DB doesn't exist yet is left untouched rather than having an
+		// empty file created here. Any failure keeps the soft "?".
 		msgCount := "?"
-		roomDBPath := filepath.Join(dataDir, "data", fmt.Sprintf("room-%s.db", r.ID))
-		if db, err := sql.Open("sqlite", roomDBPath+"?_busy_timeout=5000"); err == nil {
-			var count int
-			if db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&count) == nil {
-				msgCount = fmt.Sprintf("%d", count)
+		roomDBPath := filepath.Join(st.DataDir(), fmt.Sprintf("room-%s.db", r.ID))
+		if dsn, derr := sqlitedsn.ReadOnly(roomDBPath); derr == nil {
+			if db, err := sql.Open("sqlite", dsn); err == nil {
+				var count int
+				if db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&count) == nil {
+					msgCount = fmt.Sprintf("%d", count)
+				}
+				db.Close()
 			}
-			db.Close()
 		}
 
 		status := ""
@@ -193,7 +200,13 @@ func cmdCheckIntegrity(dataDir string, args []string) error {
 	allOK := true
 	for _, path := range dbFiles {
 		name := filepath.Base(path)
-		db, err := sql.Open("sqlite", path+"?_busy_timeout=5000&mode=ro")
+		dsn, err := sqlitedsn.ReadOnly(path)
+		if err != nil {
+			fmt.Printf("  %-30s ERROR: %v\n", name, err)
+			allOK = false
+			continue
+		}
+		db, err := sql.Open("sqlite", dsn)
 		if err != nil {
 			fmt.Printf("  %-30s ERROR: %v\n", name, err)
 			allOK = false

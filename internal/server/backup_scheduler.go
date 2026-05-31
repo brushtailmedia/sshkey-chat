@@ -40,6 +40,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/backup"
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
+	"github.com/brushtailmedia/sshkey-chat/internal/sqlitedsn"
 )
 
 // backupStartupGracePeriod is how long after Server.Run starts the
@@ -381,7 +382,11 @@ func readDataVersion(dataDir string) (int64, error) {
 		}
 		return 0, err
 	}
-	db, err := sql.Open("sqlite", path+"?mode=ro")
+	dsn, err := sqlitedsn.ReadOnly(path)
+	if err != nil {
+		return 0, err
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return 0, err
 	}

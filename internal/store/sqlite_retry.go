@@ -6,10 +6,14 @@ import (
 )
 
 // retrySQLiteBusy retries a small SQLite operation when modernc/sqlite returns
-// transient SQLITE_BUSY / "database is locked" under writer contention. The
-// store opens databases with _busy_timeout, but the driver does not always wait
-// reliably for concurrent writers in WAL mode, so hot write primitives need an
-// explicit retry at the store boundary.
+// transient SQLITE_BUSY / "database is locked" under writer contention.
+//
+// The store now opens every connection with busy_timeout(5000) applied via the
+// DSN (sqlitedsn.Writable), so the driver itself waits up to 5s for a competing
+// writer — this retry is belt-and-suspenders for hot write primitives, not the
+// primary timeout mechanism. (Before the DSN fix, busy_timeout was effectively 0
+// because modernc silently ignores the mattn-style `_busy_timeout` param, so
+// this retry was the only thing absorbing contention.)
 func retrySQLiteBusy(operation string, fn func() error) error {
 	const maxAttempts = 10
 	delay := 5 * time.Millisecond

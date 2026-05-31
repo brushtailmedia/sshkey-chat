@@ -43,6 +43,7 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/backup"
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/lockfile"
+	"github.com/brushtailmedia/sshkey-chat/internal/sqlitedsn"
 )
 
 // freeSpaceMultiplier is the heuristic ratio used when estimating
@@ -401,7 +402,11 @@ func postRestoreIntegrityCheck(dataDir string) (int, error) {
 // integrity_check. Collects all result rows so a multi-error report
 // is preserved in the error message.
 func pragmaIntegrityCheckOne(path string) error {
-	db, err := sql.Open("sqlite", path+"?mode=ro")
+	dsn, err := sqlitedsn.ReadOnly(path)
+	if err != nil {
+		return fmt.Errorf("build integrity-check dsn: %w", err)
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return fmt.Errorf("open: %w", err)
 	}

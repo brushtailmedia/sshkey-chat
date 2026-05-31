@@ -21,6 +21,7 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/server"
+	"github.com/brushtailmedia/sshkey-chat/internal/sqlitedsn"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
 
@@ -140,7 +141,11 @@ type testEnv struct {
 func (e *testEnv) roomID(displayName string) string {
 	e.t.Helper()
 	dbPath := filepath.Join(e.dataDir, "data", "rooms.db")
-	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000")
+	dsn, err := sqlitedsn.ReadOnly(dbPath)
+	if err != nil {
+		e.t.Fatalf("build rooms.db dsn: %v", err)
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		e.t.Fatalf("open rooms.db: %v", err)
 	}
@@ -1267,7 +1272,11 @@ func TestEdit_RateLimitEnforced(t *testing.T) {
 func (e *testEnv) dmRowCutoffs(dmID string) (int64, int64) {
 	e.t.Helper()
 	dbPath := filepath.Join(e.dataDir, "data", "data.db")
-	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000")
+	dsn, err := sqlitedsn.ReadOnly(dbPath)
+	if err != nil {
+		e.t.Fatalf("build data.db dsn: %v", err)
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		e.t.Fatalf("open data.db: %v", err)
 	}
@@ -1609,7 +1618,11 @@ func TestRetirement_DMCutoffPropagation(t *testing.T) {
 func (e *testEnv) groupExists(groupID string) bool {
 	e.t.Helper()
 	dbPath := filepath.Join(e.dataDir, "data", "data.db")
-	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000")
+	dsn, err := sqlitedsn.ReadOnly(dbPath)
+	if err != nil {
+		e.t.Fatalf("build data.db dsn: %v", err)
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		e.t.Fatalf("open data.db: %v", err)
 	}
@@ -1630,7 +1643,11 @@ func (e *testEnv) groupExists(groupID string) bool {
 func (e *testEnv) deletedGroupsForUser(userID string) []string {
 	e.t.Helper()
 	dbPath := filepath.Join(e.dataDir, "data", "data.db")
-	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000")
+	dsn, err := sqlitedsn.ReadOnly(dbPath)
+	if err != nil {
+		e.t.Fatalf("build data.db dsn: %v", err)
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		e.t.Fatalf("open data.db: %v", err)
 	}

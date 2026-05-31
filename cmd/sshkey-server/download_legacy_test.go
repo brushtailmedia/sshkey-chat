@@ -44,8 +44,10 @@ import (
 // store.Store connection. Bypasses the upload protocol so the
 // download-side tests stay focused.
 //
-// Uses SQLite WAL + 5s busy_timeout (set by store.Open) so the second
-// connection doesn't conflict with the server's live store.
+// The second store.Open connection shares the data dir with the server's live
+// store; both now open with busy_timeout(5000) genuinely applied via the
+// _pragma DSN (sqlitedsn.Writable, modernc-correct), so a brief write overlap
+// waits up to 5s rather than failing immediately with SQLITE_BUSY.
 func seedDownloadableFile(t *testing.T, e *testEnv, fileID, ctxType, ctxID string, ts int64, data []byte) string {
 	t.Helper()
 	filesDir := filepath.Join(e.dataDir, "data", "files")

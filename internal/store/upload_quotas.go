@@ -66,13 +66,12 @@ func (s *Store) GetDailyUploadRow(userID, date string) (bytes int64, warnNotifie
 // Atomic via SQLite UPSERT — no read-modify-write race between
 // concurrent uploads from the same user.
 //
-// SQLITE_BUSY handling: the modernc.org/sqlite driver doesn't always
-// honor the URI _busy_timeout option for concurrent writers in WAL
-// mode. The retry loop below handles transient BUSY by sleeping +
-// retrying with backoff, capped at ~1s total wait. Real-world
-// contention on this code path is very low (per-user rate-limited at
-// UploadsPerMinute, typically 60/min), so retries are rare in
-// production.
+// SQLITE_BUSY handling: busy_timeout(5000) is now applied via the
+// sqlitedsn.Writable DSN for every pooled connection. The retry loop
+// below remains belt-and-suspenders for sustained contention after
+// that timeout budget is exhausted. Real-world contention on this
+// code path is very low (per-user rate-limited at UploadsPerMinute,
+// typically 60/min), so retries are rare in production.
 func (s *Store) IncrementDailyUploadBytes(userID, date string, bytes int64, markWarned bool) (int64, error) {
 	if bytes < 0 {
 		return 0, fmt.Errorf("IncrementDailyUploadBytes: bytes must be >= 0, got %d", bytes)
@@ -93,10 +92,11 @@ func (s *Store) IncrementDailyUploadBytes(userID, date string, bytes int64, mark
 			bytes_total = bytes_total + excluded.bytes_total,
 			warn_notified = MAX(warn_notified, excluded.warn_notified)`
 
-	// Retry-on-SQLITE_BUSY loop. modernc.org/sqlite doesn't always
-	// honor the URI _busy_timeout for concurrent writers in WAL mode;
-	// handle it explicitly. Total wait capped at ~1s (10 attempts,
-	// 5ms→200ms exponential). Real-world contention is very low
+	// Retry-on-SQLITE_BUSY loop, belt-and-suspenders. The store now opens with
+	// busy_timeout(5000) applied via the DSN (sqlitedsn.Writable), so the driver
+	// waits up to 5s on writer contention; this retry only matters if that
+	// budget is exhausted under sustained load. Total extra wait capped at ~1s
+	// (10 attempts, 5ms→200ms exponential). Real-world contention is very low
 	// (per-user UploadsPerMinute rate limit), so retries are rare.
 	const maxAttempts = 10
 	delay := 5 * time.Millisecond
