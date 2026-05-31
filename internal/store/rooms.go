@@ -144,13 +144,17 @@ func (s *Store) AddRoomMember(roomID, userID string, firstEpoch int64) error {
 // PRIMARY KEY (room_id, user_id) mechanics as AddRoomMember; mirrors the
 // RowsAffected() shape SetRoomRetired uses.
 func (s *Store) AddRoomMemberIfMissing(roomID, userID string, firstEpoch int64) (inserted bool, err error) {
-	res, err := s.roomsDB.Exec(
-		`INSERT OR IGNORE INTO room_members (room_id, user_id, first_epoch) VALUES (?, ?, ?)`,
-		roomID, userID, firstEpoch)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
+	var n int64
+	err = retrySQLiteBusy("AddRoomMemberIfMissing", func() error {
+		res, err := s.roomsDB.Exec(
+			`INSERT OR IGNORE INTO room_members (room_id, user_id, first_epoch) VALUES (?, ?, ?)`,
+			roomID, userID, firstEpoch)
+		if err != nil {
+			return err
+		}
+		n, err = res.RowsAffected()
+		return err
+	})
 	if err != nil {
 		return false, err
 	}
