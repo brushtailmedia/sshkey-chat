@@ -8,18 +8,19 @@ import (
 
 // StoredMessage represents a message as stored on disk.
 type StoredMessage struct {
-	ID          string
-	ServerOrder int64 // server's authoritative per-conversation commit order (== rowid)
-	Sender      string
-	TS          int64
-	Epoch       int64  // rooms only
-	Payload     string // base64 encrypted blob
-	FileIDs     []string
-	Signature   string
-	WrappedKeys map[string]string // DMs only: userID -> base64 wrapped key
-	Deleted     bool
-	DeletedBy   string
-	EditedAt    int64 // Phase 15: 0 if never edited, else server's edit wall clock
+	ID              string
+	ServerOrder     int64 // server's authoritative per-conversation commit order (== rowid)
+	Sender          string
+	TS              int64
+	Epoch           int64  // rooms only
+	Payload         string // base64 encrypted blob
+	FileIDs         []string
+	Signature       string
+	WrappedKeys     map[string]string // DMs only: userID -> base64 wrapped key
+	Deleted         bool
+	DeletedBy       string
+	EditedAt        int64  // Phase 15: 0 if never edited, else server's edit wall clock
+	DeleteSignature string // F6: client Ed25519 sig over the delete request (empty for non-deleted rows)
 }
 
 // DeleteMessageResult contains the metadata needed after a message is
@@ -114,13 +115,13 @@ func getMessages(db *sql.DB, beforeTS int64, limit int) ([]StoredMessage, error)
 	// stays correct if the schema ever stops aliasing them (S5).
 	if beforeTS > 0 {
 		rows, err = db.Query(`
-			SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at, server_order
+			SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at, server_order, delete_signature
 			FROM messages WHERE ts < ? ORDER BY server_order DESC LIMIT ?`,
 			beforeTS, limit,
 		)
 	} else {
 		rows, err = db.Query(`
-			SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at, server_order
+			SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at, server_order, delete_signature
 			FROM messages ORDER BY server_order DESC LIMIT ?`,
 			limit,
 		)
@@ -137,7 +138,7 @@ func getMessagesSince(db *sql.DB, sinceTS int64, limit int) ([]StoredMessage, er
 	// server_order ASC == commit order (oldest-first), so sync_batch rows are
 	// emitted in chronological commit order. server_order == rowid here (S5).
 	rows, err := db.Query(`
-		SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at, server_order
+		SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at, server_order, delete_signature
 		FROM messages WHERE ts >= ? ORDER BY server_order ASC LIMIT ?`,
 		sinceTS, limit,
 	)
@@ -153,11 +154,11 @@ func scanMessages(rows *sql.Rows) ([]StoredMessage, error) {
 	var msgs []StoredMessage
 	for rows.Next() {
 		var msg StoredMessage
-		var fileIDs, wrappedKeys sql.NullString
+		var fileIDs, wrappedKeys, deleteSignature sql.NullString
 		var epoch sql.NullInt64
 
 		err := rows.Scan(&msg.ID, &msg.Sender, &msg.TS, &epoch,
-			&msg.Payload, &fileIDs, &msg.Signature, &wrappedKeys, &msg.Deleted, &msg.EditedAt, &msg.ServerOrder)
+			&msg.Payload, &fileIDs, &msg.Signature, &wrappedKeys, &msg.Deleted, &msg.EditedAt, &msg.ServerOrder, &deleteSignature)
 		if err != nil {
 			return nil, err
 		}
@@ -167,6 +168,7 @@ func scanMessages(rows *sql.Rows) ([]StoredMessage, error) {
 		}
 		msg.FileIDs = decodeStringSlice(fileIDs.String)
 		msg.WrappedKeys = decodeMap(wrappedKeys.String)
+		msg.DeleteSignature = deleteSignature.String
 		msgs = append(msgs, msg)
 	}
 	return msgs, rows.Err()
@@ -174,7 +176,7 @@ func scanMessages(rows *sql.Rows) ([]StoredMessage, error) {
 
 // DeleteMessage marks a message as deleted (tombstone).
 func (s *Store) DeleteRoomMessage(room, msgID, deletedBy string) ([]string, error) {
-	result, err := s.DeleteRoomMessageWithResult(room, msgID, deletedBy)
+	result, err := s.DeleteRoomMessageWithResult(room, msgID, deletedBy, "")
 	if err != nil {
 		return nil, err
 	}
@@ -183,17 +185,17 @@ func (s *Store) DeleteRoomMessage(room, msgID, deletedBy string) ([]string, erro
 
 // DeleteRoomMessageWithResult marks a room message as deleted and returns
 // cleanup metadata plus the original server_order for live tombstone broadcasts.
-func (s *Store) DeleteRoomMessageWithResult(room, msgID, deletedBy string) (DeleteMessageResult, error) {
+func (s *Store) DeleteRoomMessageWithResult(room, msgID, deletedBy, deleteSignature string) (DeleteMessageResult, error) {
 	db, err := s.RoomDB(room)
 	if err != nil {
 		return DeleteMessageResult{}, err
 	}
-	return deleteMessage(db, msgID, deletedBy)
+	return deleteMessage(db, msgID, deletedBy, deleteSignature)
 }
 
 // DeleteGroupMessage marks a group DM message as deleted. Returns file IDs for cleanup.
 func (s *Store) DeleteGroupMessage(groupID, msgID, deletedBy string) ([]string, error) {
-	result, err := s.DeleteGroupMessageWithResult(groupID, msgID, deletedBy)
+	result, err := s.DeleteGroupMessageWithResult(groupID, msgID, deletedBy, "")
 	if err != nil {
 		return nil, err
 	}
@@ -202,12 +204,12 @@ func (s *Store) DeleteGroupMessage(groupID, msgID, deletedBy string) ([]string, 
 
 // DeleteGroupMessageWithResult marks a group DM message as deleted and returns
 // cleanup metadata plus the original server_order for live tombstone broadcasts.
-func (s *Store) DeleteGroupMessageWithResult(groupID, msgID, deletedBy string) (DeleteMessageResult, error) {
+func (s *Store) DeleteGroupMessageWithResult(groupID, msgID, deletedBy, deleteSignature string) (DeleteMessageResult, error) {
 	db, err := s.GroupDB(groupID)
 	if err != nil {
 		return DeleteMessageResult{}, err
 	}
-	return deleteMessage(db, msgID, deletedBy)
+	return deleteMessage(db, msgID, deletedBy, deleteSignature)
 }
 
 // UpdateRoomMessageEdited replaces a room message's encrypted payload and
@@ -412,7 +414,7 @@ func (s *Store) GetDMMessageByID(dmID, msgID string) (*StoredMessage, error) {
 
 func getMessageByID(db *sql.DB, msgID string) (*StoredMessage, error) {
 	rows, err := db.Query(
-		`SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at, server_order
+		`SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at, server_order, delete_signature
 		 FROM messages WHERE id = ? LIMIT 1`,
 		msgID,
 	)
@@ -430,25 +432,34 @@ func getMessageByID(db *sql.DB, msgID string) (*StoredMessage, error) {
 	return &msgs[0], nil
 }
 
-// deleteMessage soft-deletes a message and returns cleanup/broadcast metadata.
-func deleteMessage(db *sql.DB, msgID, deletedBy string) (DeleteMessageResult, error) {
-	// Get metadata before clearing payload.
+// deleteMessage soft-deletes a still-live message and returns cleanup/broadcast
+// metadata. The destructive UPDATE is conditional on `deleted = 0`, so two
+// concurrent deletes cannot both win: the loser's UPDATE affects zero rows and
+// returns sql.ErrNoRows (the handler collapses that to the privacy-preserving
+// unknown response), and can never overwrite the first deleter/signature or
+// emit a second tombstone. deleteSignature is the client's Ed25519 signature
+// over the delete request (F6), persisted in a new column so catch-up/history
+// replay can re-emit it for client verify-or-drop.
+func deleteMessage(db *sql.DB, msgID, deletedBy, deleteSignature string) (DeleteMessageResult, error) {
+	// Read metadata for a STILL-LIVE row (deleted = 0) before clearing payload.
 	var fileIDsStr sql.NullString
 	var serverOrder int64
-	if err := db.QueryRow(`SELECT file_ids, server_order FROM messages WHERE id = ?`, msgID).Scan(&fileIDsStr, &serverOrder); err != nil {
+	if err := db.QueryRow(`SELECT file_ids, server_order FROM messages WHERE id = ? AND deleted = 0`, msgID).Scan(&fileIDsStr, &serverOrder); err != nil {
 		return DeleteMessageResult{}, err
 	}
 
-	result, err := db.Exec(`UPDATE messages SET deleted = 1, payload = '', sender = ? WHERE id = ?`,
-		deletedBy, msgID)
+	// Conditional, race-safe claim: only a still-live row is tombstoned.
+	result, err := db.Exec(`UPDATE messages SET deleted = 1, payload = '', sender = ?, delete_signature = ? WHERE id = ? AND deleted = 0`,
+		deletedBy, deleteSignature, msgID)
 	if err != nil {
 		return DeleteMessageResult{}, err
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
+		// Lost the race to a concurrent delete between the read and the update.
 		return DeleteMessageResult{}, sql.ErrNoRows
 	}
-	// Clean up reactions and pins on the deleted message
+	// Clean up reactions and pins — only the winning delete reaches here.
 	if err := DeleteReactionsForMessage(db, msgID); err != nil {
 		return DeleteMessageResult{}, err
 	}
@@ -542,7 +553,7 @@ func getHistoryBefore(db *sql.DB, beforeID, visGate string, visArgs []any, limit
 	}
 	pageArgs = append(pageArgs, cursorOrder, limit+1)
 	rows, err := db.Query(`
-		SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at, server_order
+		SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at, server_order, delete_signature
 		FROM messages
 		WHERE `+pageWhere+`
 		ORDER BY server_order DESC

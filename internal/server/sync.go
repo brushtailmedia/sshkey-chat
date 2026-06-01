@@ -160,6 +160,7 @@ func (s *Server) syncRoom(c *Client, roomID string, sinceTS int64, limit int) {
 		protoEvents = roomEventsToRaw(events, roomID)
 	}
 
+	s.sendCatchupActorProfiles(c, msgs, protoReactions)
 	c.Encoder.Encode(protocol.SyncBatch{
 		Type:      "sync_batch",
 		Messages:  protoMsgs,
@@ -193,6 +194,38 @@ func roomEventsToRaw(events []store.GroupEventRow, roomID string) []json.RawMess
 		result = append(result, data)
 	}
 	return result
+}
+
+// sendCatchupActorProfiles emits a profile frame for every signature actor in a
+// catch-up batch — message senders (which on a tombstone row IS the deleter,
+// since storedToRaw* sets DeletedBy = m.Sender) and reaction authors — BEFORE
+// the batch frame, so a reconnecting client can verify the batch's signed
+// messages / edits / reactions and delete tombstones even for a departed or
+// never-pinned actor. The client's single readLoop applies the profiles before
+// the batch's inner frames (F6 §5b#17; also closes the same gap for F1 messages,
+// edits, and reactions). Deduped per call; best-effort — an unresolvable actor
+// is skipped (the tombstone then fails closed client-side, never admitting a
+// forgery).
+func (s *Server) sendCatchupActorProfiles(c *Client, msgs []store.StoredMessage, reactions []json.RawMessage) {
+	seen := make(map[string]bool)
+	emit := func(userID string) {
+		if userID == "" || seen[userID] {
+			return
+		}
+		seen[userID] = true
+		if p, ok := s.buildProfileFrame(userID); ok {
+			c.Encoder.Encode(p)
+		}
+	}
+	for _, m := range msgs {
+		emit(m.Sender)
+	}
+	for _, raw := range reactions {
+		var r protocol.Reaction
+		if json.Unmarshal(raw, &r) == nil {
+			emit(r.User)
+		}
+	}
 }
 
 // syncGroup sends a sync batch for a single group DM. Phase 14 extended
@@ -256,6 +289,7 @@ func (s *Server) syncGroup(c *Client, groupID string, sinceTS int64, limit int) 
 		protoEvents = groupEventsToRaw(events, groupID)
 	}
 
+	s.sendCatchupActorProfiles(c, msgs, protoReactions)
 	c.Encoder.Encode(protocol.SyncBatch{
 		Type:      "sync_batch",
 		Messages:  protoMsgs,
@@ -323,6 +357,7 @@ func (s *Server) syncDM(c *Client, dmID string, sinceTS int64, limit int) {
 		}
 	}
 
+	s.sendCatchupActorProfiles(c, msgs, protoReactions)
 	c.Encoder.Encode(protocol.SyncBatch{
 		Type:      "sync_batch",
 		Messages:  protoMsgs,
@@ -346,6 +381,7 @@ func storedToRawDMMessages(msgs []store.StoredMessage, dmID string) []json.RawMe
 				DeletedBy:   m.Sender,
 				TS:          m.TS,
 				DM:          dmID,
+				Signature:   m.DeleteSignature, // F6: re-emit the persisted delete signature on catch-up
 			}
 			data, _ = json.Marshal(tombstone)
 		} else {
@@ -495,6 +531,7 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 			}
 		}
 
+		s.sendCatchupActorProfiles(c, msgs, roomReactions)
 		c.Encoder.Encode(protocol.HistoryResult{
 			Type:      "history_result",
 			Room:      req.Room,
@@ -538,6 +575,7 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 			}
 		}
 
+		s.sendCatchupActorProfiles(c, msgs, groupReactions)
 		c.Encoder.Encode(protocol.HistoryResult{
 			Type:      "history_result",
 			Group:     req.Group,
@@ -587,6 +625,7 @@ func (s *Server) handleHistory(c *Client, raw json.RawMessage) {
 			}
 		}
 
+		s.sendCatchupActorProfiles(c, msgs, dmReactions)
 		c.Encoder.Encode(protocol.HistoryResult{
 			Type:      "history_result",
 			DM:        req.DM,
@@ -649,6 +688,7 @@ func storedToRawMessages(msgs []store.StoredMessage, roomID, groupID string) []j
 				TS:          m.TS,
 				Room:        roomID,
 				Group:       groupID,
+				Signature:   m.DeleteSignature, // F6: re-emit the persisted delete signature on catch-up
 			}
 			data, _ = json.Marshal(tombstone)
 		} else if roomID != "" {

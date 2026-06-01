@@ -4,7 +4,7 @@ Expect breaking changes until v1.0.
 
 Private messaging server over SSH with end-to-end encryption. No accounts, no passwords -- your identity is your SSH key.
 
-The server is a blind relay. It routes, stores, and sequences encrypted blobs. It sees metadata (who, when, where, sizes) but never message content. Same trust model as Signal.
+The server is a blind relay. It routes, stores, and sequences encrypted blobs. It sees metadata (who, when, where, sizes) but never message content.
 
 Inspired by [ssh-chat](https://github.com/shazow/ssh-chat).
 

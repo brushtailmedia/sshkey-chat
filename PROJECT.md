@@ -835,7 +835,7 @@ Two models, one per conversation type. The server never sees unwrapped keys in e
 
 ```json
 // Server -> Client (current epoch key on reconnect, so the client can send immediately)
-{"type":"epoch_key","room":"general","epoch":3,"wrapped_key":"base64...encrypted_with_your_pubkey"}
+{"type":"epoch_key","room":"general","epoch":3,"wrapped_key":"base64...encrypted_with_your_pubkey","generator":"alice","member_hash":"SHA256:abc123...","member_sig":"base64..."}
 ```
 
 Older epoch keys for missed messages are bundled with `sync_batch` and `history_result` messages -- not sent as a separate bulk delivery. The client receives exactly the keys it needs to decrypt each batch of messages, nothing more. See [Sync](#sync-catch-up-after-reconnect) and [History](#history-lazy-scroll-back).
@@ -846,7 +846,7 @@ New member joins a room:
 {"type":"epoch_trigger","room":"general","new_epoch":4,"members":[{"user":"alice","pubkey":"ssh-ed25519 AAAA..."},{"user":"bob","pubkey":"ssh-ed25519 AAAA..."},{"user":"carol","pubkey":"ssh-ed25519 AAAA..."}]}
 
 // Client -> Server (new member wraps the key for everyone)
-{"type":"epoch_rotate","room":"general","epoch":4,"wrapped_keys":{"alice":"base64...","bob":"base64...","carol":"base64..."},"member_hash":"SHA256:abc123..."}
+{"type":"epoch_rotate","room":"general","epoch":4,"wrapped_keys":{"alice":"base64...","bob":"base64...","carol":"base64..."},"member_hash":"SHA256:abc123...","member_sig":"base64..."}
 ```
 
 **DMs and group DMs: per-message keys (unique key per message, inline)**
@@ -1001,9 +1001,9 @@ Sort the raw public key bytes lexicographically so both users compute the same v
 
 Same mechanism as Signal's safety numbers and WhatsApp's security codes.
 
-#### Member List Attestation (Rooms) — F7
+#### Signed Room Member Attestation (Rooms)
 
-Detects covert (shadow-reader) injection during epoch rotation: confirms the new epoch key was wrapped for exactly the member set every other member can see. Implemented 2026-05-31 (F7); the earlier description here was of an *unsigned, unimplemented* mechanism — corrected below.
+Detects covert (shadow-reader) injection during epoch rotation: confirms the new epoch key was wrapped for exactly the member set every other member can see. Implemented 2026-05-31; the earlier description here was of an *unsigned, unimplemented* mechanism — corrected below.
 
 **How it works:**
 1. Generating client receives `epoch_trigger` with the member list + public keys and wraps the epoch key for all listed members.
@@ -1016,7 +1016,9 @@ Detects covert (shadow-reader) injection during epoch rotation: confirms the new
 
 **Why the signature is essential:** an unsigned hash forwarded by an untrusted relay is forgeable — the server could rewrite it per-victim to match each member's roster, defeating detection entirely. The signature (verified against the generator's pinned key) makes the hash unforgeable by the relay.
 
-**Sync-path guard:** epoch keys delivered via `sync_batch` / `history_result` are historical-decryption-only, skip verification, and **never advance the current epoch** (`storeEpochKeyHistorical`). Only a verified `epoch_key` establishes the current epoch — otherwise a malicious server could deliver the current epoch's key via the sync path to dodge verification.
+**Sync/history key scope:** epoch keys bundled in `sync_batch` and `history_result` are historical-decryption-only. They are not verified against the current roster and never advance the current room epoch.
+
+The server currently omits attestation fields from these historical key frames. Those fields are reserved for possible future provenance/debugging only. The security boundary is simple: current room epoch adoption happens exclusively via a verified `epoch_key`; sync/history keys are decrypt-only.
 
 **What this catches:** a malicious/compromised server wrapping the epoch key for a hidden reader (covert eavesdropper) or equivocating about membership → mismatch → fail-closed. An operator *openly* adding a member does so visibly in the roster (the accepted room trust model).
 
@@ -1565,7 +1567,7 @@ Epoch 3 (key_c): messages 201-300   ← current epoch, key_c only exists in clie
 {"type":"epoch_trigger","room":"general","new_epoch":4,"members":[{"user":"alice","pubkey":"ssh-ed25519 AAAA..."},{"user":"bob","pubkey":"ssh-ed25519 AAAA..."},{"user":"carol","pubkey":"ssh-ed25519 AAAA..."}]}
 
 // Client -> Server (new key, wrapped for each member)
-{"type":"epoch_rotate","room":"general","epoch":4,"wrapped_keys":{"alice":"base64...","bob":"base64...","carol":"base64..."},"member_hash":"SHA256:abc123..."}
+{"type":"epoch_rotate","room":"general","epoch":4,"wrapped_keys":{"alice":"base64...","bob":"base64...","carol":"base64..."},"member_hash":"SHA256:abc123...","member_sig":"base64..."}
 
 // Server -> Client (rotation accepted and distributed)
 {"type":"epoch_confirmed","room":"general","epoch":4}
@@ -1595,7 +1597,7 @@ DMs use per-message keys, so `create_dm` carries no encryption data. The server 
 **Epoch key distribution ordering (rooms only):** the server must distribute epoch keys to all online members **before** relaying any messages encrypted with that epoch. If Alice receives epoch N+1 and immediately sends a message, the server must ensure Bob has received the epoch N+1 key before delivering Alice's message to Bob. SSH channel ordering guarantees this as long as the server writes the key before the message to each connection. The server queues any epoch N+1 messages for a member until their epoch key has been written to their connection. DMs don't have this problem -- every message carries its own keys.
 
 **Offline client catch-up:**
-- **Rooms:** the server stores wrapped epoch keys on disk. On reconnect, epoch keys are bundled with sync batches -- only the keys needed to decrypt messages in the sync window (last 200 messages or 7 days per room). Older epoch keys are fetched on demand with `history` pages. Client unwraps and stores keys locally as they arrive.
+- **Rooms:** the server stores wrapped epoch keys on disk. On reconnect, epoch keys are bundled with sync batches -- only the keys needed to decrypt messages in the sync window (last 200 messages or 7 days per room). Older epoch keys are fetched on demand with `history` pages. These sync/history keys are decrypt-only and do not advance the current room epoch; only a verified current-epoch `epoch_key` can do that. Client unwraps and stores keys locally as they arrive.
 - **DMs:** no catch-up needed. Every DM message carries its own wrapped keys inline. The client simply unwraps each message individually as it arrives in `sync_batch` or `history_result`. No server-side key state for DMs.
 
 **Epoch key retention on server (rooms only):** wrapped epoch keys are retained as long as the room's messages exist. Purging old messages also purges their epoch keys. DM messages store their wrapped keys inline -- they're retained and purged as part of the message itself.

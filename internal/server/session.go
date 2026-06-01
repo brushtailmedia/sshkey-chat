@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/brushtailmedia/sshkey-chat/internal/actionauth"
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
@@ -700,45 +701,57 @@ func (s *Server) sendProfiles(c *Client) {
 
 	// Send profiles
 	for userID := range visible {
-		user := s.store.GetUserByID(userID)
-		if user == nil {
-			continue
+		if p, ok := s.buildProfileFrame(userID); ok {
+			c.Encoder.Encode(p)
 		}
-		parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(user.Key))
-		if err != nil {
-			continue
-		}
-
-		displayName := user.DisplayName
-		avatarID := ""
-		// Merge stored profile data (avatar, display_name overrides from
-		// set_profile) with users.db defaults. DB avatar takes precedence
-		// for fields users can customize at runtime.
-		if s.store != nil {
-			var dbDisplayName, dbAvatarID sql.NullString
-			s.store.DataDB().QueryRow(
-				`SELECT display_name, avatar_id FROM profiles WHERE user = ?`,
-				userID).Scan(&dbDisplayName, &dbAvatarID)
-			if dbDisplayName.Valid && dbDisplayName.String != "" {
-				displayName = dbDisplayName.String
-			}
-			if dbAvatarID.Valid {
-				avatarID = dbAvatarID.String
-			}
-		}
-
-		c.Encoder.Encode(protocol.Profile{
-			Type:           "profile",
-			User:           userID,
-			DisplayName:    displayName,
-			AvatarID:       avatarID,
-			PubKey:         user.Key,
-			KeyFingerprint: ssh.FingerprintSHA256(parsed),
-			Admin:          s.store.IsAdmin(userID),
-			Retired:        user.Retired,
-			RetiredAt:      user.RetiredAt,
-		})
 	}
+}
+
+// buildProfileFrame constructs the profile frame for userID, merging users.db
+// defaults with any set_profile overrides. Returns ok=false if the user or its
+// key can't be resolved. Shared by sendProfiles and the catch-up
+// signature-actor profile bundling (F6 §5b#17) so a verifying client always
+// holds the keys for message senders, tombstone deleters, and reaction authors.
+func (s *Server) buildProfileFrame(userID string) (protocol.Profile, bool) {
+	if s.store == nil {
+		return protocol.Profile{}, false
+	}
+	user := s.store.GetUserByID(userID)
+	if user == nil {
+		return protocol.Profile{}, false
+	}
+	parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(user.Key))
+	if err != nil {
+		return protocol.Profile{}, false
+	}
+
+	displayName := user.DisplayName
+	avatarID := ""
+	// Merge stored profile data (avatar, display_name overrides from
+	// set_profile) with users.db defaults. DB avatar takes precedence for
+	// fields users can customize at runtime.
+	var dbDisplayName, dbAvatarID sql.NullString
+	s.store.DataDB().QueryRow(
+		`SELECT display_name, avatar_id FROM profiles WHERE user = ?`,
+		userID).Scan(&dbDisplayName, &dbAvatarID)
+	if dbDisplayName.Valid && dbDisplayName.String != "" {
+		displayName = dbDisplayName.String
+	}
+	if dbAvatarID.Valid {
+		avatarID = dbAvatarID.String
+	}
+
+	return protocol.Profile{
+		Type:           "profile",
+		User:           userID,
+		DisplayName:    displayName,
+		AvatarID:       avatarID,
+		PubKey:         user.Key,
+		KeyFingerprint: ssh.FingerprintSHA256(parsed),
+		Admin:          s.store.IsAdmin(userID),
+		Retired:        user.Retired,
+		RetiredAt:      user.RetiredAt,
+	}, true
 }
 
 // messageLoop reads and dispatches messages from the client.
@@ -1694,7 +1707,8 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 		Group:      group,
 		DM:         dmID,
 		User:       c.UserID,
-		CorrID:     msg.CorrID, // Phase 17c
+		Signature:  msg.Signature, // F6: relay the author's un-react signature opaquely (server does not verify)
+		CorrID:     msg.CorrID,    // Phase 17c
 	}
 
 	if room != "" {
@@ -1925,7 +1939,15 @@ func (s *Server) handleCreateGroup(c *Client, raw json.RawMessage) {
 	)
 }
 
-// handleDelete processes a message deletion.
+// handleDelete processes a signed message-deletion request (F6). The request
+// carries exactly one context (room/group/dm) and an Ed25519 signature over
+// (kind, contextID, msgID); the server routes directly to that context (no
+// search), authorizes against it, VERIFIES the signature against the session
+// user's stored key (a data-integrity gate — never destroy content on a
+// cryptographically-invalid request), then soft-deletes (race-guarded),
+// persists + relays the signature, and audits a room-admin delete. Clients
+// re-verify on receipt — that re-verification is the security boundary, not
+// this server-side check.
 func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 	var msg protocol.Delete
 	if err := json.Unmarshal(raw, &msg); err != nil {
@@ -1942,15 +1964,9 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Check if user is admin (admins can delete any room message)
+	// Admins can delete any ROOM message (room is the only admin-override
+	// context); group/DM deletes remain own-message-only.
 	isAdmin := s.store.IsAdmin(c.UserID)
-
-	// Phase 12 note: GetUserRoomIDs filters WHERE r.retired = 0, so
-	// retired rooms are naturally excluded from the room search below.
-	// A user trying to delete a message in a retired room will fall
-	// through to group/DM search and return without action. Matches
-	// the behavior in handleUnreact; same limitation, same rationale.
-	rooms := s.store.GetUserRoomIDs(c.UserID)
 
 	// Rate limit — admins get a higher limit
 	limit := s.cfg.Server.RateLimits.DeletesPerMinute
@@ -1963,136 +1979,30 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Search room DBs for the message
-	for _, roomID := range rooms {
-		db, err := s.store.RoomDB(roomID)
-		if err != nil {
-			continue
-		}
-		var sender string
-		err = db.QueryRow(`SELECT sender FROM messages WHERE id = ? AND deleted = 0`, msg.ID).Scan(&sender)
-		if err != nil {
-			continue
-		}
-
-		// Permission check: own messages or admin
-		if sender != c.UserID && !isAdmin {
-			s.respondErrorRef(c, msg.CorrID, protocol.ErrNotAuthorized, "You can only delete your own messages", msg.ID, 0)
-			return
-		}
-
-		deletedResult, err := s.store.DeleteRoomMessageWithResult(roomID, msg.ID, c.UserID)
-		if err != nil {
-			s.logger.Error("delete failed", "room", roomID, "id", msg.ID, "error", err)
-			return
-		}
-		s.cleanupFiles(deletedResult.FileIDs)
-
-		s.broadcastToRoom(roomID, protocol.Deleted{
-			Type:        "deleted",
-			ID:          msg.ID,
-			ServerOrder: deletedResult.ServerOrder,
-			DeletedBy:   c.UserID,
-			TS:          time.Now().Unix(),
-			Room:        roomID,
-			CorrID:      msg.CorrID, // Phase 17c
-		})
+	// Syntactic checks before any DB work: exactly one context + a
+	// syntactically valid signature. The decoded signature is cryptographically
+	// verified later, inside each branch, AFTER the privacy/authz gates so an
+	// invalid signature cannot probe context/message existence.
+	kind, contextID, ok := exactlyOneContext(msg.Room, msg.Group, msg.DM)
+	if !ok {
+		s.respondError(c, msg.CorrID, "invalid_context", "delete must carry exactly one of room, group, or dm", 0)
 		return
 	}
-
-	// Search group DM DBs
-	groups, err := s.store.GetUserGroups(c.UserID)
+	sig, err := actionauth.DecodeEd25519Signature(msg.Signature)
 	if err != nil {
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "delete", "delete missing or malformed signature",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "delete signature missing or malformed", CorrID: msg.CorrID})
 		return
 	}
 
-	for _, g := range groups {
-		db, err := s.store.GroupDB(g.ID)
-		if err != nil {
-			continue
-		}
-		var sender string
-		err = db.QueryRow(`SELECT sender FROM messages WHERE id = ? AND deleted = 0`, msg.ID).Scan(&sender)
-		if err != nil {
-			continue
-		}
-
-		// DMs: own messages only, no admin override
-		if sender != c.UserID {
-			s.respondErrorRef(c, msg.CorrID, protocol.ErrNotAuthorized, "You can only delete your own messages in DMs", msg.ID, 0)
-			return
-		}
-
-		deletedResult, err := s.store.DeleteGroupMessageWithResult(g.ID, msg.ID, c.UserID)
-		if err != nil {
-			s.logger.Error("delete failed", "group", g.ID, "id", msg.ID, "error", err)
-			return
-		}
-		s.cleanupFiles(deletedResult.FileIDs)
-
-		s.broadcastToGroup(g.ID, protocol.Deleted{
-			Type:        "deleted",
-			ID:          msg.ID,
-			ServerOrder: deletedResult.ServerOrder,
-			DeletedBy:   c.UserID,
-			TS:          time.Now().Unix(),
-			Group:       g.ID,
-			CorrID:      msg.CorrID, // Phase 17c
-		})
-		return
-	}
-
-	// Search 1:1 DM DBs
-	dms, err := s.store.GetDirectMessagesForUser(c.UserID)
-	if err != nil {
-		return
-	}
-
-	for _, dm := range dms {
-		db, err := s.store.DMDB(dm.ID)
-		if err != nil {
-			continue
-		}
-		var sender string
-		err = db.QueryRow(`SELECT sender FROM messages WHERE id = ? AND deleted = 0`, msg.ID).Scan(&sender)
-		if err != nil {
-			continue
-		}
-
-		// DMs: own messages only, no admin override
-		if sender != c.UserID {
-			s.respondErrorRef(c, msg.CorrID, protocol.ErrNotAuthorized, "You can only delete your own messages in DMs", msg.ID, 0)
-			return
-		}
-
-		deletedResult, err := s.store.DeleteDMMessageWithResult(dm.ID, msg.ID, c.UserID)
-		if err != nil {
-			s.logger.Error("delete failed", "dm", dm.ID, "id", msg.ID, "error", err)
-			return
-		}
-		s.cleanupFiles(deletedResult.FileIDs)
-
-		// Broadcast to both DM members
-		deleted := protocol.Deleted{
-			Type:        "deleted",
-			ID:          msg.ID,
-			ServerOrder: deletedResult.ServerOrder,
-			DeletedBy:   c.UserID,
-			TS:          time.Now().Unix(),
-			DM:          dm.ID,
-			CorrID:      msg.CorrID, // Phase 17c
-		}
-		// Phase 17 Step 3: lock-release pattern.
-		s.mu.RLock()
-		var targets []*Client
-		for _, client := range s.clients {
-			if client.UserID == dm.UserA || client.UserID == dm.UserB {
-				targets = append(targets, client)
-			}
-		}
-		s.mu.RUnlock()
-		s.fanOut("deleted", deleted, targets)
-		return
+	// Direct-route to the supplied context (replacing the room→group→DM search).
+	switch kind {
+	case "room":
+		s.handleDeleteRoomMessage(c, msg, contextID, sig, isAdmin)
+	case "group":
+		s.handleDeleteGroupMessage(c, msg, contextID, sig)
+	case "dm":
+		s.handleDeleteDMMessage(c, msg, contextID, sig)
 	}
 }
 

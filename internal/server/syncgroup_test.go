@@ -70,15 +70,7 @@ func TestSyncGroup_FiltersPreJoinMessages(t *testing.T) {
 	charlie := testClientFor("charlie", "dev_charlie_1")
 	s.syncGroup(charlie.Client, groupID, 0, 200)
 
-	msgs := charlie.messages()
-	if len(msgs) != 1 {
-		t.Fatalf("expected exactly 1 sync_batch for charlie, got %d", len(msgs))
-	}
-
-	var batch protocol.SyncBatch
-	if err := json.Unmarshal(msgs[0], &batch); err != nil {
-		t.Fatalf("parse sync_batch: %v", err)
-	}
+	batch := onlySyncBatch(t, charlie.messages())
 	if batch.Type != "sync_batch" {
 		t.Errorf("type = %q, want sync_batch", batch.Type)
 	}
@@ -134,15 +126,7 @@ func TestSyncGroup_FiltersPreJoinEvents(t *testing.T) {
 	charlie := testClientFor("charlie", "dev_charlie_1")
 	s.syncGroup(charlie.Client, groupID, 0, 200)
 
-	msgs := charlie.messages()
-	if len(msgs) != 1 {
-		t.Fatalf("expected exactly 1 sync_batch, got %d", len(msgs))
-	}
-
-	var batch protocol.SyncBatch
-	if err := json.Unmarshal(msgs[0], &batch); err != nil {
-		t.Fatalf("parse sync_batch: %v", err)
-	}
+	batch := onlySyncBatch(t, charlie.messages())
 
 	// Zero pre-join events, exactly one post-join event.
 	if len(batch.Events) != 1 {
@@ -213,15 +197,7 @@ func TestSyncGroup_ReAddResetsJoinedAt(t *testing.T) {
 	charlie := testClientFor("charlie", "dev_charlie_1")
 	s.syncGroup(charlie.Client, groupID, 0, 200)
 
-	msgs := charlie.messages()
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 sync_batch, got %d", len(msgs))
-	}
-
-	var batch protocol.SyncBatch
-	if err := json.Unmarshal(msgs[0], &batch); err != nil {
-		t.Fatalf("parse sync_batch: %v", err)
-	}
+	batch := onlySyncBatch(t, charlie.messages())
 
 	// Charlie should see ONLY m_after_readd — not m_during_first_membership
 	// (which is earlier than the re-add joined_at) and definitely not
@@ -313,15 +289,7 @@ func TestHandleHistory_FiltersPreJoinGroupMessages(t *testing.T) {
 	raw, _ := json.Marshal(req)
 	s.handleHistory(charlie.Client, raw)
 
-	msgs := charlie.messages()
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 history_result, got %d", len(msgs))
-	}
-
-	var hr protocol.HistoryResult
-	if err := json.Unmarshal(msgs[0], &hr); err != nil {
-		t.Fatalf("parse history_result: %v", err)
-	}
+	hr := onlyHistoryResult(t, charlie.messages())
 	if hr.Type != "history_result" {
 		t.Errorf("type = %q, want history_result", hr.Type)
 	}
@@ -376,15 +344,7 @@ func TestSyncGroup_ExistingMemberSeesAllPostJoin(t *testing.T) {
 	alice := testClientFor("alice", "dev_alice_1")
 	s.syncGroup(alice.Client, groupID, 0, 200)
 
-	msgs := alice.messages()
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 sync_batch, got %d", len(msgs))
-	}
-
-	var batch protocol.SyncBatch
-	if err := json.Unmarshal(msgs[0], &batch); err != nil {
-		t.Fatalf("parse: %v", err)
-	}
+	batch := onlySyncBatch(t, alice.messages())
 	if len(batch.Messages) != 2 {
 		t.Errorf("expected 2 messages for creator, got %d (over-filter regression)", len(batch.Messages))
 	}

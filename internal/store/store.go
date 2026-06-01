@@ -880,7 +880,8 @@ func (s *Store) initMessageDB(db *sql.DB) error {
 			signature TEXT,
 			wrapped_keys TEXT,
 			deleted   INTEGER NOT NULL DEFAULT 0,
-			edited_at INTEGER NOT NULL DEFAULT 0
+			edited_at INTEGER NOT NULL DEFAULT 0,
+			delete_signature TEXT
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);

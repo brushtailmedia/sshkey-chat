@@ -60,7 +60,7 @@ func TestServerOrder_MonotonicPerConversationAndTombstonePreserved(t *testing.T)
 
 	// Soft-delete m1; the tombstone keeps its original server_order and the
 	// delete result exposes that order for live deleted broadcasts.
-	deleted, err := s.DeleteRoomMessageWithResult(roomA, "m1", "bob")
+	deleted, err := s.DeleteRoomMessageWithResult(roomA, "m1", "bob", "sig_m1_test")
 	if err != nil {
 		t.Fatalf("delete m1: %v", err)
 	}
@@ -80,6 +80,11 @@ func TestServerOrder_MonotonicPerConversationAndTombstonePreserved(t *testing.T)
 			}
 			if m.ServerOrder != o1 {
 				t.Errorf("tombstone server_order = %d, want preserved %d", m.ServerOrder, o1)
+			}
+			// F6: the persisted delete_signature survives the write→scan path
+			// (guards the five-SELECT/scan lockstep).
+			if m.DeleteSignature != "sig_m1_test" {
+				t.Errorf("tombstone delete_signature = %q, want %q (write→scan round-trip)", m.DeleteSignature, "sig_m1_test")
 			}
 		}
 	}

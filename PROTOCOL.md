@@ -278,20 +278,44 @@ Client stores each user's public key fingerprint on first encounter. On subseque
 
 ### Safety Numbers
 
-```
-safety_number = SHA256(sort(alice_pubkey_bytes, bob_pubkey_bytes))
-display as: "1234 5678 9012 3456 7890 1234"
+Clients derive the out-of-band safety number locally from the two account Ed25519
+public keys. The server does not compute, send, or verify this value.
+
+```text
+safety_number = zero_pad_32_decimal(
+    uint_be(SHA256(sort_lex(raw_ed25519_key_a, raw_ed25519_key_b))) mod 10^32
+)
+display as:
+1234 5678 9012 3456
+7890 1234 5678 9012
 ```
 
-Sort raw public key bytes lexicographically. Truncate SHA256 to 24 digits, displayed as six groups of four. Users compare via phone or in person.
+Algorithm:
 
-### Member List Attestation (F7)
+1. Parse each SSH public key and extract the raw 32-byte Ed25519 public key.
+2. Sort the two raw public keys lexicographically.
+3. Concatenate the sorted keys.
+4. Compute SHA-256 over the 64-byte concatenation.
+5. Interpret the digest as a big-endian unsigned integer.
+6. Reduce modulo `10^32`.
+7. Format as exactly 32 zero-padded decimal digits.
+8. Display as 8 groups of 4 digits, conventionally 2 rows x 4 columns.
+
+The value is symmetric: both users see the same digits when verifying each other.
+It binds the pair of account public keys only; it does not include display names,
+user IDs, device IDs, or server names.
+
+### Signed Room Member Attestation
 
 During epoch rotation the generating client computes `member_hash = SHA256(sort(member_usernames))` over the set it wrapped the new epoch key for **and signs `(room, epoch, member_hash)`** with its identity key (`SignEpochRoster`, domain `epoch_roster:v1`), sending both `member_hash` and `member_sig` in `epoch_rotate`. The server stores them per `(room, epoch)` and **forwards `generator` + `member_hash` + `member_sig` unchanged** with every current-epoch `epoch_key` it delivers (live distribution, on-connect, state-fix). The server performs no verification — it treats the signature as opaque.
 
 Each receiving member, before adopting a current-epoch key, **verifies the signature against the generator's pinned key, then recomputes `SHA256(sort(local_roster))` and compares**. The signature is essential: an *unsigned* hash would be forgeable by the relay (it could rewrite it per-victim to match each member's roster). On any failure — missing/invalid signature, unresolvable generator, or a member-set mismatch that persists after one `room_members` refresh — the member **fail-closes**: it does NOT adopt the key (the room is undecryptable for that epoch) and surfaces a tampering warning, rather than silently accepting an epoch key that may have been wrapped for a hidden reader. This makes covert (shadow-reader) injection detectable; an operator who legitimately adds a member does so visibly in the roster.
 
-**Sync/history keys are exempt**: epoch keys delivered in `sync_batch` / `history_result` are historical-decryption-only, skip verification, and **must never advance the current epoch** — only a verified `epoch_key` establishes the current epoch. (Were that not enforced, a malicious server could deliver the current epoch's key via the sync path to bypass verification.)
+**Sync/history keys are historical-decryption-only.** Epoch keys delivered inside `sync_batch` or `history_result` are used only to decrypt older room messages and reactions. They do not establish, confirm, or advance the current room epoch.
+
+The first-party server currently sends only `room`, `epoch`, and `wrapped_key` for `SyncEpochKey`. The attestation fields (`generator`, `member_hash`, `member_sig`) are reserved for future provenance/debugging and are not part of the sync/history acceptance path.
+
+Clients MUST NOT require those attestation fields on `SyncEpochKey`, MUST NOT verify them against the current roster, and MUST NOT use a sync/history key to advance `currentEpoch`. Only a current-epoch `epoch_key` with a valid signed member attestation may establish the current room epoch.
 
 This is a **detection/transparency** property layered on the operator-controlled room membership model; it does not change who may be a member.
 
@@ -562,7 +586,7 @@ Clients process each entry by running the same purge path as `group_deleted`. Th
 On connect, the server sends the current epoch key for each room:
 
 ```json
-{"type":"epoch_key","room":"room_V1StGXR8_Z5jdHi6B","epoch":3,"wrapped_key":"base64..."}
+{"type":"epoch_key","room":"room_V1StGXR8_Z5jdHi6B","epoch":3,"wrapped_key":"base64...","generator":"usr_alice","member_hash":"SHA256:abc123...","member_sig":"base64..."}
 ```
 
 **Rotation flow (server-triggered, client-executed):**
@@ -572,7 +596,7 @@ On connect, the server sends the current epoch key for each room:
 {"type":"epoch_trigger","room":"room_V1StGXR8_Z5jdHi6B","new_epoch":4,"members":[{"user":"usr_alice","pubkey":"ssh-ed25519 AAAA..."},{"user":"usr_bob","pubkey":"ssh-ed25519 AAAA..."}]}
 
 // Client -> Server (wrap new key for all members)
-{"type":"epoch_rotate","room":"room_V1StGXR8_Z5jdHi6B","epoch":4,"wrapped_keys":{"usr_alice":"base64...","usr_bob":"base64..."},"member_hash":"SHA256:abc123..."}
+{"type":"epoch_rotate","room":"room_V1StGXR8_Z5jdHi6B","epoch":4,"wrapped_keys":{"usr_alice":"base64...","usr_bob":"base64..."},"member_hash":"SHA256:abc123...","member_sig":"base64..."}
 
 // Server -> Client (confirmed -- you may now use this epoch)
 {"type":"epoch_confirmed","room":"room_V1StGXR8_Z5jdHi6B","epoch":4}
@@ -595,7 +619,7 @@ On connect, the server sends the current epoch key for each room:
 {"type":"sync_complete","synced_to":"2026-04-03T14:22:00Z"}
 ```
 
-Room sync batches include epoch keys needed to decrypt that batch and reactions for the messages in that batch. DM messages carry their own `wrapped_keys` inline. Epoch key deduplication is the client's responsibility -- skip keys you already have.
+Room sync batches include epoch keys needed to decrypt that batch and reactions for the messages in that batch. These `SyncEpochKey` entries are historical-decryption-only: they do not carry required attestation metadata and must never establish or advance the current room epoch. DM messages carry their own `wrapped_keys` inline. Epoch key deduplication is the client's responsibility -- skip keys you already have.
 
 **Phase 14: `events` field.** Group DM sync batches may carry an `events` array containing recent `group_event` rows that happened while the client was offline (admin actions like join, leave, promote, demote, rename). Clients route each entry through the same dispatch path used for live `group_event` broadcasts, so persisted replay and live delivery produce identical in-memory state + local DB rows. The `sinceTS` watermark is shared between messages and events — one timestamp, both sources. Non-group sync batches (rooms, 1:1 DMs) omit the field.
 
@@ -1724,12 +1748,13 @@ Client A (triggers rotation)                Server
   │                                            │
   │  1. Generate random 256-bit epoch key      │
   │  2. Wrap for each member in the list       │
-  │  3. Hash member list for verification      │
+  │  3. Hash and sign member list              │
   │                                            │
   ├─ {"type":"epoch_rotate","room":"room_abc", ─┤
   │   "epoch":4,                               │
   │   "wrapped_keys":{"usr_alice":"...","usr_bob":"..."},│
-  │   "member_hash":"SHA256:abc..."}            │
+  │   "member_hash":"SHA256:abc...",            │
+  │   "member_sig":"base64..."}                 │
   │                                            │
   │◀─ {"type":"epoch_confirmed",              ─┤
   │    "room":"room_abc","epoch":4}             │
@@ -1738,7 +1763,10 @@ Client A (triggers rotation)                Server
   │                                            │
   │  All members receive epoch_key:            │
   │◀─ {"type":"epoch_key","room":"room_abc",  ─┤
-  │    "epoch":4,"wrapped_key":"..."}           │
+  │    "epoch":4,"wrapped_key":"...",           │
+  │    "generator":"usr_alice",                 │
+  │    "member_hash":"SHA256:abc...",           │
+  │    "member_sig":"base64..."}                │
 ```
 
 **Critical:** Do NOT use the new epoch key for anything until `epoch_confirmed` is received. If the server rejects the rotation (e.g., another client's rotation was accepted first — `epoch_conflict`), discard the key entirely.

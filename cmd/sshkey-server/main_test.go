@@ -656,10 +656,8 @@ func TestHistory(t *testing.T) {
 		Limit:  2,
 	})
 
-	msgType, raw := alice.readMessage()
-	if msgType != "history_result" {
-		t.Fatalf("expected history_result, got %s", msgType)
-	}
+	// F6 §5b#17: actor-profile frames may precede the history_result — skip them.
+	raw, _ := alice.drainUntil("history_result")
 
 	var result protocol.HistoryResult
 	json.Unmarshal(raw, &result)

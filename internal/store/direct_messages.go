@@ -295,7 +295,7 @@ func (s *Store) GetDMHistoryBeforeForUser(dmID, userID, beforeID string, limit i
 
 // DeleteDMMessage marks a 1:1 DM message as deleted. Returns file IDs for cleanup.
 func (s *Store) DeleteDMMessage(dmID, msgID, deletedBy string) ([]string, error) {
-	result, err := s.DeleteDMMessageWithResult(dmID, msgID, deletedBy)
+	result, err := s.DeleteDMMessageWithResult(dmID, msgID, deletedBy, "")
 	if err != nil {
 		return nil, err
 	}
@@ -304,12 +304,12 @@ func (s *Store) DeleteDMMessage(dmID, msgID, deletedBy string) ([]string, error)
 
 // DeleteDMMessageWithResult marks a 1:1 DM message as deleted and returns
 // cleanup metadata plus the original server_order for live tombstone broadcasts.
-func (s *Store) DeleteDMMessageWithResult(dmID, msgID, deletedBy string) (DeleteMessageResult, error) {
+func (s *Store) DeleteDMMessageWithResult(dmID, msgID, deletedBy, deleteSignature string) (DeleteMessageResult, error) {
 	db, err := s.DMDB(dmID)
 	if err != nil {
 		return DeleteMessageResult{}, err
 	}
-	return deleteMessage(db, msgID, deletedBy)
+	return deleteMessage(db, msgID, deletedBy, deleteSignature)
 }
 
 // GetDMReactionsForMessages returns reactions on messages in a 1:1 DM.

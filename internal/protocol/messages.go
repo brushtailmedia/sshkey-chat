@@ -49,9 +49,10 @@ type SyncEpochKey struct {
 	Room       string `json:"room"`
 	Epoch      int64  `json:"epoch"`
 	WrappedKey string `json:"wrapped_key"` // base64, wrapped for the recipient
-	// F7 attestation — populated when available. Sync/history keys are
-	// historical-decryption-only and the client skip-verifies them, so these
-	// are informational/forward-compatible (carried, not relied upon).
+	// Reserved for future provenance/debugging. The first-party server currently
+	// omits these fields on sync/history keys. Clients must treat SyncEpochKey as
+	// historical-decryption-only: do not require or verify these fields, and never
+	// use this frame to adopt/advance the current room epoch.
 	Generator  string `json:"generator,omitempty"`
 	MemberHash string `json:"member_hash,omitempty"`
 	MemberSig  string `json:"member_sig,omitempty"`
@@ -805,9 +806,13 @@ type DMInfo struct {
 // Message deletion
 
 type Delete struct {
-	Type   string `json:"type"`              // "delete"
-	ID     string `json:"id"`                // message ID to delete
-	CorrID string `json:"corr_id,omitempty"` // Phase 17c
+	Type      string `json:"type"`                // "delete"
+	ID        string `json:"id"`                  // message ID to delete
+	Room      string `json:"room,omitempty"`      // F6: exactly one of room/group/dm — the context the signature binds + the server routes by
+	Group     string `json:"group,omitempty"`     // F6
+	DM        string `json:"dm,omitempty"`        // F6
+	Signature string `json:"signature,omitempty"` // F6: SignDelete over (kind, contextID, id); server verifies + forwards
+	CorrID    string `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 type Deleted struct {
@@ -816,10 +821,11 @@ type Deleted struct {
 	ServerOrder int64  `json:"server_order,omitempty"` // preserved from the original message (tombstone keeps its position)
 	DeletedBy   string `json:"deleted_by"`
 	TS          int64  `json:"ts"`
-	Room        string `json:"room,omitempty"`    // set for room messages
-	Group       string `json:"group,omitempty"`   // set for group DM messages
-	DM          string `json:"dm,omitempty"`      // set for 1:1 DM messages
-	CorrID      string `json:"corr_id,omitempty"` // Phase 17c: originator-only ack echo
+	Room        string `json:"room,omitempty"`      // set for room messages
+	Group       string `json:"group,omitempty"`     // set for group DM messages
+	DM          string `json:"dm,omitempty"`        // set for 1:1 DM messages
+	Signature   string `json:"signature,omitempty"` // F6: relayed delete author signature (clients verify; persisted + re-emitted on catch-up)
+	CorrID      string `json:"corr_id,omitempty"`   // Phase 17c: originator-only ack echo
 }
 
 // Typing indicators (capability: typing)
@@ -877,7 +883,11 @@ type Reaction struct {
 type Unreact struct {
 	Type       string `json:"type"` // "unreact"
 	ReactionID string `json:"reaction_id"`
-	CorrID     string `json:"corr_id,omitempty"` // Phase 17c
+	Room       string `json:"room,omitempty"`      // F6 unreact:v2 retrofit: exactly one of room/group/dm
+	Group      string `json:"group,omitempty"`     // F6 unreact:v2
+	DM         string `json:"dm,omitempty"`        // F6 unreact:v2
+	Signature  string `json:"signature,omitempty"` // F6: client SignUnreact (v1: reaction_id; v2: kind, contextID, reaction_id); relayed opaquely
+	CorrID     string `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 type ReactionRemoved struct {
@@ -888,7 +898,8 @@ type ReactionRemoved struct {
 	Group      string `json:"group,omitempty"`
 	DM         string `json:"dm,omitempty"`
 	User       string `json:"user"`
-	CorrID     string `json:"corr_id,omitempty"` // Phase 17c
+	Signature  string `json:"signature,omitempty"` // F6: relayed un-react author signature (server does not verify)
+	CorrID     string `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 // Pinned messages (rooms only)

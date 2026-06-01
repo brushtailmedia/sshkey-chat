@@ -460,9 +460,8 @@ func TestAutoRevoke_LaunchGateRepresentativeFlow_NoMisbehaviorSignals(t *testing
 	}); err != nil {
 		t.Fatalf("history request: %v", err)
 	}
-	if mt, _ = alice.readMessage(); mt != "history_result" {
-		t.Fatalf("expected history_result, got %s", mt)
-	}
+	// F6 §5b#17: actor-profile frames may precede the history_result — skip them.
+	alice.drainUntil("history_result")
 
 	if err := alice.enc.Encode(protocol.RoomMembers{
 		Type: "room_members",

@@ -99,19 +99,20 @@ func TestHandleDelete_LiveDeletedBroadcastCarriesServerOrder(t *testing.T) {
 	t.Run("room", func(t *testing.T) {
 		s := newTestServer(t)
 		generalID := s.store.RoomDisplayNameToID("general")
+		priv := seedKeyedUser(t, s, "dave", "Dave", false, []string{"general"})
 		order, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
-			ID: "msg_live_room_order", Sender: "alice", TS: 100, Epoch: 1, Payload: "p", Signature: "s",
+			ID: "msg_live_room_order", Sender: "dave", TS: 100, Epoch: 1, Payload: "p", Signature: "s",
 		})
 		if err != nil {
 			t.Fatalf("insert room message: %v", err)
 		}
-		alice := testClientFor("alice", "dev_alice_live_room_delete")
-		register(s, alice)
+		dave := testClientFor("dave", "dev_dave_live_room_delete")
+		register(s, dave)
 
-		raw, _ := json.Marshal(protocol.Delete{Type: "delete", ID: "msg_live_room_order"})
-		s.handleDelete(alice.Client, raw)
+		raw, _ := json.Marshal(signedDelete("room", generalID, "msg_live_room_order", priv))
+		s.handleDelete(dave.Client, raw)
 
-		deleted := requireDeleted(t, alice, "msg_live_room_order")
+		deleted := requireDeleted(t, dave, "msg_live_room_order")
 		if deleted.Room != generalID {
 			t.Errorf("deleted room = %q, want %q", deleted.Room, generalID)
 		}
@@ -122,28 +123,29 @@ func TestHandleDelete_LiveDeletedBroadcastCarriesServerOrder(t *testing.T) {
 
 	t.Run("group", func(t *testing.T) {
 		s := newTestServer(t)
+		priv := seedKeyedUser(t, s, "dave", "Dave", false, nil)
 		groupID := store.GenerateID("group_")
-		if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "Test"); err != nil {
+		if err := s.store.CreateGroup(groupID, "dave", []string{"dave", "bob"}, "Test"); err != nil {
 			t.Fatalf("create group: %v", err)
 		}
 		order, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 			ID:          "msg_live_group_order",
-			Sender:      "alice",
+			Sender:      "dave",
 			TS:          100,
 			Payload:     "p",
 			Signature:   "s",
-			WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+			WrappedKeys: map[string]string{"dave": "wa", "bob": "wb"},
 		})
 		if err != nil {
 			t.Fatalf("insert group message: %v", err)
 		}
-		alice := testClientFor("alice", "dev_alice_live_group_delete")
-		register(s, alice)
+		dave := testClientFor("dave", "dev_dave_live_group_delete")
+		register(s, dave)
 
-		raw, _ := json.Marshal(protocol.Delete{Type: "delete", ID: "msg_live_group_order"})
-		s.handleDelete(alice.Client, raw)
+		raw, _ := json.Marshal(signedDelete("group", groupID, "msg_live_group_order", priv))
+		s.handleDelete(dave.Client, raw)
 
-		deleted := requireDeleted(t, alice, "msg_live_group_order")
+		deleted := requireDeleted(t, dave, "msg_live_group_order")
 		if deleted.Group != groupID {
 			t.Errorf("deleted group = %q, want %q", deleted.Group, groupID)
 		}
@@ -154,28 +156,29 @@ func TestHandleDelete_LiveDeletedBroadcastCarriesServerOrder(t *testing.T) {
 
 	t.Run("dm", func(t *testing.T) {
 		s := newTestServer(t)
-		dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+		priv := seedKeyedUser(t, s, "dave", "Dave", false, nil)
+		dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "dave", "bob")
 		if err != nil {
 			t.Fatalf("create dm: %v", err)
 		}
 		order, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
 			ID:          "msg_live_dm_order",
-			Sender:      "alice",
+			Sender:      "dave",
 			TS:          100,
 			Payload:     "p",
 			Signature:   "s",
-			WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+			WrappedKeys: map[string]string{"dave": "wa", "bob": "wb"},
 		})
 		if err != nil {
 			t.Fatalf("insert dm message: %v", err)
 		}
-		alice := testClientFor("alice", "dev_alice_live_dm_delete")
-		register(s, alice)
+		dave := testClientFor("dave", "dev_dave_live_dm_delete")
+		register(s, dave)
 
-		raw, _ := json.Marshal(protocol.Delete{Type: "delete", ID: "msg_live_dm_order"})
-		s.handleDelete(alice.Client, raw)
+		raw, _ := json.Marshal(signedDelete("dm", dm.ID, "msg_live_dm_order", priv))
+		s.handleDelete(dave.Client, raw)
 
-		deleted := requireDeleted(t, alice, "msg_live_dm_order")
+		deleted := requireDeleted(t, dave, "msg_live_dm_order")
 		if deleted.DM != dm.ID {
 			t.Errorf("deleted dm = %q, want %q", deleted.DM, dm.ID)
 		}
