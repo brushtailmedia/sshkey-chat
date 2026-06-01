@@ -259,6 +259,7 @@ type testClient struct {
 	ch   ssh.Channel
 	conn *ssh.Client // underlying SSH connection — used by tests that need to open additional session channels (e.g. the shared download channel in the legacy-path download tests)
 	t    *testing.T
+	priv ed25519.PrivateKey // raw key for signing F6 action requests (delete / unreact) in tests
 }
 
 func (e *testEnv) connect(keyPath, deviceID string) *testClient {
@@ -291,12 +292,22 @@ func (e *testEnv) connect(keyPath, deviceID string) *testClient {
 	}
 	go ssh.DiscardRequests(reqs)
 
+	var clientPriv ed25519.PrivateKey
+	if rawKey, perr := ssh.ParseRawPrivateKey(keyData); perr == nil {
+		switch k := rawKey.(type) {
+		case *ed25519.PrivateKey:
+			clientPriv = *k
+		case ed25519.PrivateKey:
+			clientPriv = k
+		}
+	}
 	tc := &testClient{
 		enc:  protocol.NewEncoder(ch),
 		dec:  protocol.NewDecoder(ch),
 		ch:   ch,
 		conn: conn,
 		t:    e.t,
+		priv: clientPriv,
 	}
 
 	// Read server_hello

@@ -676,14 +676,38 @@ Owned responses: an **accepted** `history` request (valid `corr_id`, exactly one
 ### Message Deletion
 
 ```json
-// Client -> Server (context-free — the server looks up the message ID to determine which room/group/dm it belongs to)
-{"type":"delete","id":"msg_abc123"}
+// Client -> Server (exactly one of room/group/dm; signature binds the same context)
+{"type":"delete","id":"msg_abc123","room":"room_V1StGXR8_Z5jdHi6B",
+ "signature":"base64..."}
+{"type":"delete","id":"msg_def456","group":"group_xK9mQ2pR",
+ "signature":"base64..."}
+{"type":"delete","id":"msg_ghi789","dm":"dm_yL0nR3qS",
+ "signature":"base64..."}
 
-// Server -> Client (broadcast — the server fills in exactly one of room/group/dm based on the looked-up context)
-{"type":"deleted","id":"msg_abc123","deleted_by":"usr_alice","ts":1712345679,"room":"room_V1StGXR8_Z5jdHi6B"}
-{"type":"deleted","id":"msg_def456","deleted_by":"usr_alice","ts":1712345679,"group":"group_xK9mQ2pR"}
-{"type":"deleted","id":"msg_ghi789","deleted_by":"usr_alice","ts":1712345679,"dm":"dm_yL0nR3qS"}
+// Server -> Client (broadcast — relays the verified delete signature)
+{"type":"deleted","id":"msg_abc123","deleted_by":"usr_alice","ts":1712345679,
+ "room":"room_V1StGXR8_Z5jdHi6B","signature":"base64..."}
+{"type":"deleted","id":"msg_def456","deleted_by":"usr_alice","ts":1712345679,
+ "group":"group_xK9mQ2pR","signature":"base64..."}
+{"type":"deleted","id":"msg_ghi789","deleted_by":"usr_alice","ts":1712345679,
+ "dm":"dm_yL0nR3qS","signature":"base64..."}
 ```
+
+Delete signatures use the `delete:v1` canonical form:
+
+```text
+Sign("delete:v1" ||
+     u32_be(len(kind)) || kind ||
+     u32_be(len(context_id)) || context_id ||
+     u32_be(len(msg_id)) || msg_id)
+```
+
+`kind` is exactly one of `room`, `group`, or `dm`; `context_id` is the
+corresponding room/group/DM ID. The server verifies the signature against the
+authenticated session user's account key before soft-deleting, persists the
+signature with the tombstone, and re-emits it in `sync_batch` and
+`history_result`. Clients MUST verify the `deleted` tombstone signature against
+`deleted_by` before applying it locally.
 
 **Permissions:**
 - **Rooms:** own messages only, or any message if the caller is a server admin
@@ -831,13 +855,29 @@ Reactions carry exactly one context field (`room`, `group`, or `dm`) matching th
  "user":"usr_alice","ts":1712345680,"epoch":3,
  "payload":"base64...","signature":"base64..."}
 
-// Client -> Server (remove — reaction_id alone is enough, the server looks up the context)
-{"type":"unreact","reaction_id":"react_7kQ2mR"}
+// Client -> Server (remove — exactly one of room/group/dm; signature binds the same context)
+{"type":"unreact","reaction_id":"react_7kQ2mR","room":"room_V1StGXR8_Z5jdHi6B",
+ "signature":"base64..."}
 
-// Server -> Client (broadcast — server fills in the context field)
+// Server -> Client (broadcast — relays the verified un-react signature)
 {"type":"reaction_removed","reaction_id":"react_7kQ2mR","id":"msg_abc123",
- "room":"room_V1StGXR8_Z5jdHi6B","user":"usr_alice"}
+ "room":"room_V1StGXR8_Z5jdHi6B","user":"usr_alice","signature":"base64..."}
 ```
+
+Un-react signatures use the `unreact:v2` canonical form:
+
+```text
+Sign("unreact:v2" ||
+     u32_be(len(kind)) || kind ||
+     u32_be(len(context_id)) || context_id ||
+     u32_be(len(reaction_id)) || reaction_id)
+```
+
+`kind` and `context_id` have the same meaning as delete signatures. The server
+resolves the reaction, confirms it lives in the signed context, verifies the
+signature against the authenticated session user's account key, then deletes
+and broadcasts. Clients verify `reaction_removed.signature` against
+`reaction_removed.user` before removing the local reaction.
 
 **Encrypted reaction payload:** `{"emoji":"...","target":"msg_abc123","seq":43,"device_id":"dev_..."}`. Verify `target` matches the envelope `id` on decryption.
 

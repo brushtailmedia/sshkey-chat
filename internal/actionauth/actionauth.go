@@ -64,6 +64,30 @@ func VerifyDelete(pub ed25519.PublicKey, kind, contextID, msgID string, sig []by
 	return ed25519.Verify(pub, BuildDeleteCanonical(kind, contextID, msgID), sig)
 }
 
+// BuildUnreactCanonical builds the byte string the client signs for a
+// reaction-removal (F6 unreact:v2). Normative form (kind ∈ {"room","group",
+// "dm"}; contextID is the room/group/DM id):
+//
+//	"unreact:v2" || u32_be(len(kind)) || kind || u32_be(len(contextID)) || contextID || u32_be(len(reactionID)) || reactionID
+func BuildUnreactCanonical(kind, contextID, reactionID string) []byte {
+	const tag = "unreact:v2"
+	out := make([]byte, 0, len(tag)+4+len(kind)+4+len(contextID)+4+len(reactionID))
+	out = append(out, tag...)
+	out = AppendField(out, []byte(kind))
+	out = AppendField(out, []byte(contextID))
+	return AppendField(out, []byte(reactionID))
+}
+
+// VerifyUnreact reports whether sig is a valid Ed25519 signature by pub over the
+// BuildUnreactCanonical form. Guards key/sig sizes so a malformed input cannot
+// panic ed25519.Verify.
+func VerifyUnreact(pub ed25519.PublicKey, kind, contextID, reactionID string, sig []byte) bool {
+	if len(pub) != ed25519.PublicKeySize || len(sig) != ed25519.SignatureSize {
+		return false
+	}
+	return ed25519.Verify(pub, BuildUnreactCanonical(kind, contextID, reactionID), sig)
+}
+
 // ParseSSHEd25519PubKey extracts an ed25519.PublicKey from an SSH
 // authorized_keys-format string (the format users.Key is stored in). Returns an
 // error for an unparseable or non-Ed25519 key. Independent of, but byte-for-byte

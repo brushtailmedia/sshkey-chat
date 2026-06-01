@@ -1608,6 +1608,22 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	// F6 unreact:v2 — syntactic checks before any DB work: exactly one context
+	// and a syntactically valid signature. The signature is cryptographically
+	// verified below, after the reaction is resolved, against the supplied
+	// context (a data-integrity gate; clients re-verify on receipt).
+	kind, contextID, ctxOK := exactlyOneContext(msg.Room, msg.Group, msg.DM)
+	if !ctxOK {
+		s.respondError(c, msg.CorrID, "invalid_context", "unreact must carry exactly one of room, group, or dm", 0)
+		return
+	}
+	sig, sigErr := actionauth.DecodeEd25519Signature(msg.Signature)
+	if sigErr != nil {
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "unreact", "unreact missing or malformed signature",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "unreact signature missing or malformed", CorrID: msg.CorrID})
+		return
+	}
+
 	// Search room DBs, group DBs, and DM DBs for this reaction.
 	//
 	// Phase 12 note: GetUserRoomIDs filters WHERE r.retired = 0, so
@@ -1622,6 +1638,7 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 	// 15 concern (admin CLI audit may generalize this).
 	var targetID, room, group, dmID, user string
 	var found bool
+	var foundDB *sql.DB
 
 	rooms := s.store.GetUserRoomIDs(c.UserID)
 
@@ -1634,12 +1651,7 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 			Scan(&targetID, &user)
 		if err == nil && user == c.UserID {
 			room = r
-			// Phase 17c Step 4 bug #5 fix: abort on DELETE failure.
-			if _, err := db.Exec(`DELETE FROM reactions WHERE reaction_id = ?`, msg.ReactionID); err != nil {
-				s.logger.Error("failed to delete reaction (room)", "room", r, "reaction_id", msg.ReactionID, "error", err)
-				s.respondError(c, msg.CorrID, protocol.CodeInternal, "", 0)
-				return
-			}
+			foundDB = db // F6: resolve only — delete happens after the verify gate
 			found = true
 			break
 		}
@@ -1657,12 +1669,7 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 					Scan(&targetID, &user)
 				if err == nil && user == c.UserID {
 					group = g.ID
-					// Phase 17c Step 4 bug #5 fix.
-					if _, err := db.Exec(`DELETE FROM reactions WHERE reaction_id = ?`, msg.ReactionID); err != nil {
-						s.logger.Error("failed to delete reaction (group)", "group", g.ID, "reaction_id", msg.ReactionID, "error", err)
-						s.respondError(c, msg.CorrID, protocol.CodeInternal, "", 0)
-						return
-					}
+					foundDB = db
 					found = true
 					break
 				}
@@ -1682,12 +1689,7 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 					Scan(&targetID, &user)
 				if err == nil && user == c.UserID {
 					dmID = dm.ID
-					// Phase 17c Step 4 bug #5 fix.
-					if _, err := db.Exec(`DELETE FROM reactions WHERE reaction_id = ?`, msg.ReactionID); err != nil {
-						s.logger.Error("failed to delete reaction (dm)", "dm", dm.ID, "reaction_id", msg.ReactionID, "error", err)
-						s.respondError(c, msg.CorrID, protocol.CodeInternal, "", 0)
-						return
-					}
+					foundDB = db
 					found = true
 					break
 				}
@@ -1699,6 +1701,28 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	// F6: the reaction must actually live in the supplied (signed) context — a
+	// request signed for one context must not remove a reaction in another.
+	foundKind, foundContextID, _ := exactlyOneContext(room, group, dmID)
+	if foundKind != kind || foundContextID != contextID {
+		return
+	}
+
+	// F6: verify the un-react signature against the session user's stored key
+	// (data-integrity gate) before the destructive delete + relay.
+	if !s.verifyUnreactSignature(c.UserID, kind, contextID, msg.ReactionID, sig) {
+		s.rejectAndLog(c, counters.SignalMalformedFrame, "unreact", "unreact signature verification failed",
+			&protocol.Error{Type: "error", Code: "invalid_message", Message: "unreact signature verification failed", CorrID: msg.CorrID})
+		return
+	}
+
+	// Resolved + verified — now perform the destructive delete.
+	if _, err := foundDB.Exec(`DELETE FROM reactions WHERE reaction_id = ?`, msg.ReactionID); err != nil {
+		s.logger.Error("failed to delete reaction", "reaction_id", msg.ReactionID, "error", err)
+		s.respondError(c, msg.CorrID, protocol.CodeInternal, "", 0)
+		return
+	}
+
 	removed := protocol.ReactionRemoved{
 		Type:       "reaction_removed",
 		ReactionID: msg.ReactionID,
@@ -1707,7 +1731,7 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 		Group:      group,
 		DM:         dmID,
 		User:       c.UserID,
-		Signature:  msg.Signature, // F6: relay the author's un-react signature opaquely (server does not verify)
+		Signature:  msg.Signature, // F6: relay the verified un-react signature for client verify-or-drop
 		CorrID:     msg.CorrID,    // Phase 17c
 	}
 

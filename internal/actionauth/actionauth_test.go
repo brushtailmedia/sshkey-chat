@@ -46,6 +46,39 @@ func TestVerifyDelete_RoundTripAndBinding(t *testing.T) {
 	}
 }
 
+func TestVerifyUnreact_RoundTripAndBinding(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const kind, ctx, rid = "room", "rm_general", "react_1"
+	sig := ed25519.Sign(priv, BuildUnreactCanonical(kind, ctx, rid))
+
+	if !VerifyUnreact(pub, kind, ctx, rid, sig) {
+		t.Fatal("valid un-react signature must verify")
+	}
+	if VerifyUnreact(pub, "group", ctx, rid, sig) {
+		t.Error("different kind must fail")
+	}
+	if VerifyUnreact(pub, kind, "rm_other", rid, sig) {
+		t.Error("different context must fail")
+	}
+	if VerifyUnreact(pub, kind, ctx, "react_other", sig) {
+		t.Error("different reaction_id must fail (replay/retarget blocked)")
+	}
+	otherPub, _, _ := ed25519.GenerateKey(nil)
+	if VerifyUnreact(otherPub, kind, ctx, rid, sig) {
+		t.Error("different key must fail")
+	}
+	// Domain tag present + must not cross-verify as delete:v1.
+	if got := BuildUnreactCanonical(kind, ctx, rid); string(got[:len("unreact:v2")]) != "unreact:v2" {
+		t.Errorf("missing unreact:v2 tag: %q", got)
+	}
+	if VerifyDelete(pub, kind, ctx, rid, sig) {
+		t.Error("unreact:v2 signature must not cross-verify as delete:v1")
+	}
+}
+
 func TestBuildDeleteCanonical_DomainAndBoundary(t *testing.T) {
 	c := BuildDeleteCanonical("room", "rm", "msg")
 	if string(c[:len("delete:v1")]) != "delete:v1" {
@@ -141,6 +174,61 @@ func TestDeleteConformanceVectors(t *testing.T) {
 			t.Fatalf("%s: bad signature b64", v.Note)
 		}
 		if !VerifyDelete(pub, v.Kind, v.ContextID, v.MsgID, sig) {
+			t.Errorf("%s: golden signature failed to verify — canonical-form drift from the client", v.Note)
+		}
+	}
+}
+
+// TestUnreactConformanceVectors is the unreact:v2 sibling of the delete vector
+// test. The unreact canonical form reuses the exact same length-prefixed
+// AppendField machinery (already pinned by the delete vector) — what THIS adds is
+// a cross-repo lock on the parts that differ: the "unreact:v2" domain tag and the
+// (kind, contextID, reaction_id) field order. A tag typo or field reorder made on
+// only one side of the repo boundary passes both repos' same-repo unit tests but
+// fails here, exactly as it would silently reject every legitimate un-react.
+func TestUnreactConformanceVectors(t *testing.T) {
+	raw, err := os.ReadFile("testdata/unreact_conformance_vectors.json")
+	if err != nil {
+		t.Fatalf("read vectors: %v", err)
+	}
+	var doc struct {
+		Tag     string `json:"tag"`
+		Vectors []struct {
+			Note         string `json:"note"`
+			SeedB64      string `json:"seed_b64"`
+			Kind         string `json:"kind"`
+			ContextID    string `json:"context_id"`
+			ReactionID   string `json:"reaction_id"`
+			CanonicalB64 string `json:"canonical_b64"`
+			SignatureB64 string `json:"signature_b64"`
+		} `json:"vectors"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal vectors: %v", err)
+	}
+	if doc.Tag != "unreact:v2" {
+		t.Fatalf("unexpected tag %q", doc.Tag)
+	}
+	if len(doc.Vectors) == 0 {
+		t.Fatal("no vectors loaded")
+	}
+	for _, v := range doc.Vectors {
+		seed, err := base64.StdEncoding.DecodeString(v.SeedB64)
+		if err != nil || len(seed) != ed25519.SeedSize {
+			t.Fatalf("%s: bad seed", v.Note)
+		}
+		priv := ed25519.NewKeyFromSeed(seed)
+		pub := priv.Public().(ed25519.PublicKey)
+
+		wantCanon, _ := base64.StdEncoding.DecodeString(v.CanonicalB64)
+		if got := BuildUnreactCanonical(v.Kind, v.ContextID, v.ReactionID); string(got) != string(wantCanon) {
+			t.Errorf("%s: canonical mismatch\n got  %x\n want %x", v.Note, got, wantCanon)
+		}
+		sig, err := base64.StdEncoding.DecodeString(v.SignatureB64)
+		if err != nil {
+			t.Fatalf("%s: bad signature b64", v.Note)
+		}
+		if !VerifyUnreact(pub, v.Kind, v.ContextID, v.ReactionID, sig) {
 			t.Errorf("%s: golden signature failed to verify — canonical-form drift from the client", v.Note)
 		}
 	}

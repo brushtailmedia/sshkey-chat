@@ -46,6 +46,21 @@ func (s *Server) verifyDeleteSignature(userID, kind, contextID, msgID string, si
 	return actionauth.VerifyDelete(pub, kind, contextID, msgID, sig)
 }
 
+// verifyUnreactSignature verifies the client's un-react signature against the
+// session user's stored key — the same data-integrity gate as delete (F6
+// unreact:v2). Not the security boundary; clients re-verify on receipt.
+func (s *Server) verifyUnreactSignature(userID, kind, contextID, reactionID string, sig []byte) bool {
+	user := s.store.GetUserByID(userID)
+	if user == nil {
+		return false
+	}
+	pub, err := actionauth.ParseSSHEd25519PubKey(user.Key)
+	if err != nil {
+		return false
+	}
+	return actionauth.VerifyUnreact(pub, kind, contextID, reactionID, sig)
+}
+
 // rejectDeleteBadSig rejects a delete whose signature failed verification. It
 // runs only after the privacy/authz gates have passed (the caller is proven a
 // member and the message's author or a room admin), so naming the failure
@@ -105,7 +120,7 @@ func (s *Server) handleDeleteRoomMessage(c *Client, msg protocol.Delete, roomID 
 
 	// Best-effort audit of a room-admin delete of ANOTHER user's message.
 	if isAdmin && targetSender != c.UserID && s.audit != nil {
-		s.audit.Log(c.UserID, "room-admin-delete",
+		s.audit.Log(c.UserID, "room_admin_delete",
 			"target="+targetSender+" room="+roomID+" id="+msg.ID+" corr="+msg.CorrID)
 	}
 

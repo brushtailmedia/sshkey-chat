@@ -109,7 +109,8 @@ func TestHandleDelete_LiveDeletedBroadcastCarriesServerOrder(t *testing.T) {
 		dave := testClientFor("dave", "dev_dave_live_room_delete")
 		register(s, dave)
 
-		raw, _ := json.Marshal(signedDelete("room", generalID, "msg_live_room_order", priv))
+		req := signedDelete("room", generalID, "msg_live_room_order", priv)
+		raw, _ := json.Marshal(req)
 		s.handleDelete(dave.Client, raw)
 
 		deleted := requireDeleted(t, dave, "msg_live_room_order")
@@ -118,6 +119,9 @@ func TestHandleDelete_LiveDeletedBroadcastCarriesServerOrder(t *testing.T) {
 		}
 		if deleted.ServerOrder != order {
 			t.Errorf("live room deleted server_order = %d, want %d", deleted.ServerOrder, order)
+		}
+		if deleted.Signature != req.Signature {
+			t.Errorf("live room deleted signature = %q, want forwarded %q", deleted.Signature, req.Signature)
 		}
 	})
 
@@ -142,7 +146,8 @@ func TestHandleDelete_LiveDeletedBroadcastCarriesServerOrder(t *testing.T) {
 		dave := testClientFor("dave", "dev_dave_live_group_delete")
 		register(s, dave)
 
-		raw, _ := json.Marshal(signedDelete("group", groupID, "msg_live_group_order", priv))
+		req := signedDelete("group", groupID, "msg_live_group_order", priv)
+		raw, _ := json.Marshal(req)
 		s.handleDelete(dave.Client, raw)
 
 		deleted := requireDeleted(t, dave, "msg_live_group_order")
@@ -151,6 +156,9 @@ func TestHandleDelete_LiveDeletedBroadcastCarriesServerOrder(t *testing.T) {
 		}
 		if deleted.ServerOrder != order {
 			t.Errorf("live group deleted server_order = %d, want %d", deleted.ServerOrder, order)
+		}
+		if deleted.Signature != req.Signature {
+			t.Errorf("live group deleted signature = %q, want forwarded %q", deleted.Signature, req.Signature)
 		}
 	})
 
@@ -175,7 +183,8 @@ func TestHandleDelete_LiveDeletedBroadcastCarriesServerOrder(t *testing.T) {
 		dave := testClientFor("dave", "dev_dave_live_dm_delete")
 		register(s, dave)
 
-		raw, _ := json.Marshal(signedDelete("dm", dm.ID, "msg_live_dm_order", priv))
+		req := signedDelete("dm", dm.ID, "msg_live_dm_order", priv)
+		raw, _ := json.Marshal(req)
 		s.handleDelete(dave.Client, raw)
 
 		deleted := requireDeleted(t, dave, "msg_live_dm_order")
@@ -184,6 +193,9 @@ func TestHandleDelete_LiveDeletedBroadcastCarriesServerOrder(t *testing.T) {
 		}
 		if deleted.ServerOrder != order {
 			t.Errorf("live dm deleted server_order = %d, want %d", deleted.ServerOrder, order)
+		}
+		if deleted.Signature != req.Signature {
+			t.Errorf("live dm deleted signature = %q, want forwarded %q", deleted.Signature, req.Signature)
 		}
 	})
 }

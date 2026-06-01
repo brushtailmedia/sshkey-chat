@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +12,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/brushtailmedia/sshkey-chat/internal/actionauth"
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
@@ -290,9 +293,12 @@ func TestAutoRevoke_LaunchGateRepresentativeFlow_NoMisbehaviorSignals(t *testing
 		t.Fatalf("bob expected reaction, got %s", mt)
 	}
 
+	unreactSig := ed25519.Sign(alice.priv, actionauth.BuildUnreactCanonical("room", roomID, reaction.ReactionID))
 	if err := alice.enc.Encode(protocol.Unreact{
 		Type:       "unreact",
 		ReactionID: reaction.ReactionID,
+		Room:       roomID,
+		Signature:  base64.StdEncoding.EncodeToString(unreactSig),
 	}); err != nil {
 		t.Fatalf("unreact: %v", err)
 	}

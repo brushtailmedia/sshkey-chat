@@ -96,6 +96,52 @@ func seedRoomMsg(t *testing.T, s *Server, roomID, msgID, sender string) {
 	}
 }
 
+func signedUnreact(kind, contextID, reactionID string, priv ed25519.PrivateKey) protocol.Unreact {
+	sig := ed25519.Sign(priv, actionauth.BuildUnreactCanonical(kind, contextID, reactionID))
+	u := protocol.Unreact{Type: "unreact", ReactionID: reactionID, Signature: base64.StdEncoding.EncodeToString(sig)}
+	switch kind {
+	case "room":
+		u.Room = contextID
+	case "group":
+		u.Group = contextID
+	case "dm":
+		u.DM = contextID
+	}
+	return u
+}
+
+func sendUnreact(s *Server, cc *captureClient, u protocol.Unreact) {
+	raw, _ := json.Marshal(u)
+	s.handleUnreact(cc.Client, raw)
+}
+
+func seedRoomReaction(t *testing.T, s *Server, roomID, msgID, reactionID, user string) {
+	t.Helper()
+	db, err := s.store.RoomDB(roomID)
+	if err != nil {
+		t.Fatalf("room db: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO reactions (reaction_id, message_id, user, ts, epoch, payload, signature) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		reactionID, msgID, user, int64(101), int64(1), "payload", "sig",
+	); err != nil {
+		t.Fatalf("insert room reaction: %v", err)
+	}
+}
+
+func roomReactionExists(t *testing.T, s *Server, roomID, reactionID string) bool {
+	t.Helper()
+	db, err := s.store.RoomDB(roomID)
+	if err != nil {
+		t.Fatalf("room db: %v", err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE reaction_id = ?`, reactionID).Scan(&n); err != nil {
+		t.Fatalf("count reaction: %v", err)
+	}
+	return n > 0
+}
+
 func TestHandleDelete_RoomSignedAccept(t *testing.T) {
 	s := newTestServer(t)
 	general := s.store.RoomDisplayNameToID("general")
@@ -212,6 +258,87 @@ func TestHandleDelete_RoomAdminDeletesOther(t *testing.T) {
 	}
 	if !hasDeletedBroadcast(mod, "m_modtarget") {
 		t.Error("expected a deleted broadcast for the admin delete")
+	}
+}
+
+func TestHandleUnreact_ContextBoundValidSignatureDeletes(t *testing.T) {
+	s := newTestServer(t)
+	general := s.store.RoomDisplayNameToID("general")
+	priv := seedKeyedUser(t, s, "dave", "Dave", false, []string{"general"})
+	seedRoomMsg(t, s, general, "m_react_ok", "dave")
+	seedRoomReaction(t, s, general, "m_react_ok", "react_ok", "dave")
+	dave := testClientFor("dave", "dev_dave_unreact_ok")
+	registerClient(s, dave)
+
+	sendUnreact(s, dave, signedUnreact("room", general, "react_ok", priv))
+
+	if roomReactionExists(t, s, general, "react_ok") {
+		t.Error("valid signed unreact should delete the reaction")
+	}
+}
+
+func TestHandleUnreact_RejectsInvalidSignatureBeforeDelete(t *testing.T) {
+	s := newTestServer(t)
+	general := s.store.RoomDisplayNameToID("general")
+	priv := seedKeyedUser(t, s, "dave", "Dave", false, []string{"general"})
+	seedRoomMsg(t, s, general, "m_react_bad_sig", "dave")
+	seedRoomReaction(t, s, general, "m_react_bad_sig", "react_bad_sig", "dave")
+	dave := testClientFor("dave", "dev_dave_unreact_bad_sig")
+	registerClient(s, dave)
+
+	// Valid length/base64, but signed for a different reaction_id.
+	req := signedUnreact("room", general, "some_other_react", priv)
+	req.ReactionID = "react_bad_sig"
+	sendUnreact(s, dave, req)
+
+	if !roomReactionExists(t, s, general, "react_bad_sig") {
+		t.Error("cryptographically-invalid unreact must not delete the reaction")
+	}
+	if code := firstErrorCode(dave); code != "invalid_message" {
+		t.Errorf("error code = %q, want invalid_message", code)
+	}
+}
+
+func TestHandleUnreact_RejectsWrongContextBeforeDelete(t *testing.T) {
+	s := newTestServer(t)
+	general := s.store.RoomDisplayNameToID("general")
+	priv := seedKeyedUser(t, s, "dave", "Dave", false, []string{"general"})
+	groupID := store.GenerateID("group_")
+	if err := s.store.CreateGroup(groupID, "dave", []string{"dave", "bob"}, "Test"); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	seedRoomMsg(t, s, general, "m_react_wrong_ctx", "dave")
+	seedRoomReaction(t, s, general, "m_react_wrong_ctx", "react_wrong_ctx", "dave")
+	dave := testClientFor("dave", "dev_dave_unreact_wrong_ctx")
+	registerClient(s, dave)
+
+	// The reaction lives in the room, but the request is signed/sent for a group.
+	sendUnreact(s, dave, signedUnreact("group", groupID, "react_wrong_ctx", priv))
+
+	if !roomReactionExists(t, s, general, "react_wrong_ctx") {
+		t.Error("wrong-context unreact must not delete the reaction")
+	}
+}
+
+func TestHandleUnreact_RejectsZeroAndMultiContext(t *testing.T) {
+	s := newTestServer(t)
+	general := s.store.RoomDisplayNameToID("general")
+	priv := seedKeyedUser(t, s, "dave", "Dave", false, []string{"general"})
+	seedRoomMsg(t, s, general, "m_react_ctx_shape", "dave")
+	seedRoomReaction(t, s, general, "m_react_ctx_shape", "react_ctx_shape", "dave")
+	dave := testClientFor("dave", "dev_dave_unreact_ctx_shape")
+	registerClient(s, dave)
+
+	zero := signedUnreact("room", general, "react_ctx_shape", priv)
+	zero.Room = ""
+	sendUnreact(s, dave, zero)
+
+	multi := signedUnreact("room", general, "react_ctx_shape", priv)
+	multi.Group = store.GenerateID("group_")
+	sendUnreact(s, dave, multi)
+
+	if !roomReactionExists(t, s, general, "react_ctx_shape") {
+		t.Error("zero/multi-context unreact must not delete the reaction")
 	}
 }
 

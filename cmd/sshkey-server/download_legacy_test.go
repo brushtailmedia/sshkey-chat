@@ -22,6 +22,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -159,12 +160,22 @@ func (e *testEnv) connectLegacy(keyPath, deviceID string) *legacyClient {
 		e.t.Fatalf("open Ch3 (upload): %v", err)
 	}
 	go ssh.DiscardRequests(req3)
+	var clientPriv ed25519.PrivateKey
+	if rawKey, perr := ssh.ParseRawPrivateKey(keyData); perr == nil {
+		switch k := rawKey.(type) {
+		case *ed25519.PrivateKey:
+			clientPriv = *k
+		case ed25519.PrivateKey:
+			clientPriv = k
+		}
+	}
 	tc := &testClient{
 		enc:  protocol.NewEncoder(ch1),
 		dec:  protocol.NewDecoder(ch1),
 		ch:   ch1,
 		conn: conn,
 		t:    e.t,
+		priv: clientPriv,
 	}
 
 	// Handshake: server_hello, client_hello, welcome, drain to sync_complete.
