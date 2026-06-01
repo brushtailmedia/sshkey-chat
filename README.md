@@ -71,7 +71,16 @@ The server is an untrusted **relay** — it cannot read message content (it hold
 
 ## Quick start
 
-### Docker (recommended)
+### Docker (untested)
+
+> ⚠️ **While the app has been tested a Docker install of it has not been tested yet.** This is the *intended* default path, but
+> to date only the **binaries** have been run and verified.
+> Treat the Docker flow below as **experimental** for now: it may need fixes before it runs
+> cleanly on every host. One known rough edge: on a non-root Linux host the
+> bind-mounted config dir (`./docker/config`) can block first-boot host-key
+> generation, because the container runs as UID/GID 2222. **If you want a proven
+> setup today, use the binary or systemd install** (see *Install* and *Deploy
+> (systemd)* below). Bug reports and fixes for the Docker path are very welcome.
 
 ```bash
 # 1. Initialize config + SQLite state (interactive; press Enter to accept defaults)
