@@ -3356,7 +3356,19 @@ func (s *Server) handleSetProfile(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Update avatar in data.db profiles table
+	// Update avatar in data.db profiles table.
+	//
+	// KNOWN LATENT BUG — intentionally NOT fixed in isolation. This write is
+	// unconditional (it always SETs avatar_id, even when msg.AvatarID == "") and
+	// ignores its error, so a display-name-only set_profile overwrites avatar_id
+	// with "". Harmless today: the only set_profile client is sshkey-term, which
+	// has no avatar UI and never sends a non-empty AvatarID, so avatar_id is always
+	// "". Avatars are planned for the sshkey-app client (a separate client, not yet
+	// built). The correct fix — omitted ("keep") vs explicit-clear semantics
+	// (*string or a dedicated set_avatar verb), a guarded write, and a checked
+	// error — is a protocol decision that needs the app's profile model, so it
+	// belongs with that future avatar work, not a blind fix here. Context: sshkey-
+	// term docs/planning/completed/set-profile-corr-id.md (avatar scoped out).
 	if s.store != nil {
 		s.store.DataDB().Exec(`
 			INSERT INTO profiles (user, avatar_id) VALUES (?, ?)
