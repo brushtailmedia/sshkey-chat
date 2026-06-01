@@ -73,7 +73,7 @@ The server is an untrusted **relay** — it cannot read message content (it hold
 
 ### Docker (untested)
 
-> ⚠️ **While the app has been tested a Docker install of it has not been tested yet.** This is the *intended* default path, but
+> ⚠️ **The Docker install of this app has not been tested yet.** This is the *intended* default path, but
 > to date only the **binaries** have been run and verified.
 > Treat the Docker flow below as **experimental** for now: it may need fixes before it runs
 > cleanly on every host. One known rough edge: on a non-root Linux host the
