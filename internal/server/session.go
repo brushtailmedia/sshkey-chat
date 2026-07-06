@@ -251,9 +251,10 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 	}
 
 	defer func() {
-		s.mu.Lock()
-		delete(s.clients, clientHello.DeviceID)
-		s.mu.Unlock()
+		// Guarded: only remove the route if this session still owns it — a
+		// reconnected session with the same device_id may have replaced it
+		// (see unregisterClient).
+		s.unregisterClient(clientHello.DeviceID, client)
 
 		// Clean up any pending uploads for this user. If the client
 		// disconnected mid-upload, these entries would leak in the map

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **A reconnect with the same device could silently stop receiving broadcasts (session-routing teardown race).** `s.clients` is keyed by `device_id`, and a reconnecting client's new session **overwrites** the routing entry while the dead session can linger until keepalive notices (~90s vs the client's ~1s retry). The old session's teardown then ran an **unguarded** `delete(s.clients, deviceID)` — removing the *live* session's route, so the reconnected client stayed connected but received **no broadcasts or DMs** until its next reconnect, and was invisible to revocation kicks (which fan out over the same map). Teardown is now the guarded `unregisterClient(deviceID, client)`: it removes the entry **only if this session still owns it**, and logs (debug) when it skips a route owned by a newer session — making the race frequency observable. Tests: `internal/server/unregister_client_test.go` (stale teardown leaves the live route; owner teardown removes it; absent-route no-op) and `cmd/sshkey-server/duplicate_device_race_test.go` (end-to-end over SSH: reconnect with the same `device_id`, kill the old session, and the live session still receives room broadcasts — verified failing against the unguarded delete). Remaining, tracked separately (`docs/planning/open/device-identity-transparency.md` §4.5): the cross-user variant (the map key is `device_id` alone, so an authenticated peer who learned a victim's `device_id` from the payload leak could clobber their route) needs the Tier 1.5 `(user, device_id)` session registry; the per-user upload-cleanup in the same teardown shares the race window.
+
 ## [v0.4.0] - 2026-06-02
 
 ### Security

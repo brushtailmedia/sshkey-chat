@@ -273,10 +273,13 @@ sudo cp sshkey-server sshkey-ctl /usr/local/bin/
 # Create service user
 sudo useradd -r -s /usr/sbin/nologin sshkey
 
-# Create directories with correct ownership
+# Create directories owned by the service user. BOTH must be writable by
+# `sshkey`: the server writes SQLite state + uploads under /var, and generates
+# its host_key under /etc (the config dir) on first boot — so /etc/sshkey-chat
+# must be service-owned too, not left root-owned by `sudo mkdir`.
 sudo mkdir -p /etc/sshkey-chat /var/sshkey-chat
-sudo chown sshkey:sshkey /var/sshkey-chat
-sudo chmod 750 /var/sshkey-chat
+sudo chown sshkey:sshkey /etc/sshkey-chat /var/sshkey-chat
+sudo chmod 750 /etc/sshkey-chat /var/sshkey-chat
 
 # Initialize config + SQLite state (idempotent)
 sudo sshkey-ctl --config /etc/sshkey-chat --data /var/sshkey-chat init --yes

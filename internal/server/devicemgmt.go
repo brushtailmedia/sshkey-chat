@@ -33,6 +33,28 @@ func (s *Server) notifyNewDevice(userID, newDeviceID string) {
 	}, targets)
 }
 
+// unregisterClient removes a session's routing entry from s.clients — but only
+// if the entry still belongs to that session. Registration overwrites by
+// device_id (a reconnecting client's new session replaces the old route while
+// the dead session can linger until keepalive notices), so a stale session's
+// teardown running AFTER the replacement must not delete the live session's
+// entry. Unguarded, it did exactly that: the newer session stayed connected but
+// vanished from every fan-out (silent broadcast/DM starvation until its next
+// reconnect) and from revocation kicks. See
+// docs/planning/open/device-identity-transparency.md §4.5.
+func (s *Server) unregisterClient(deviceID string, c *Client) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.clients[deviceID] == c {
+		delete(s.clients, deviceID)
+		return
+	}
+	// Route absent or owned by a newer session — nothing to remove. Logged so
+	// the reconnect-race frequency is observable in the wild.
+	s.logger.Debug("stale session teardown: route owned by a newer session",
+		"device", deviceID)
+}
+
 // handleListDevices returns the list of devices registered for the
 // authenticated user. Revocation status is included so the UI can render
 // previously-revoked devices separately.
