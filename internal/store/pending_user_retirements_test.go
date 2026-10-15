@@ -124,8 +124,8 @@ func TestRecordPendingUserRetirement_PreservesOrder(t *testing.T) {
 }
 
 // TestRecordPendingUserRetirement_EmptyReason verifies that an empty
-// reason string is accepted. The schema has DEFAULT '' so this should
-// just store empty.
+// reason string is accepted. The column's DEFAULT is the empty string,
+// so this should just store empty.
 func TestRecordPendingUserRetirement_EmptyReason(t *testing.T) {
 	dir := t.TempDir()
 	st, err := Open(dir)

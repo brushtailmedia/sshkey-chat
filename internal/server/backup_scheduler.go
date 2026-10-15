@@ -67,10 +67,10 @@ const backupStatsFile = ".backup-stats.json"
 // backupStats is the persisted record of scheduler outcomes. Read by
 // sshkey-ctl status; written by the scheduler after each attempt.
 type backupStats struct {
-	FailuresTotal   int64 `json:"failures_total"`
-	SuccessesTotal  int64 `json:"successes_total"`
-	LastSuccessUnix int64 `json:"last_success_unix,omitempty"`
-	LastFailureUnix int64 `json:"last_failure_unix,omitempty"`
+	FailuresTotal   int64  `json:"failures_total"`
+	SuccessesTotal  int64  `json:"successes_total"`
+	LastSuccessUnix int64  `json:"last_success_unix,omitempty"`
+	LastFailureUnix int64  `json:"last_failure_unix,omitempty"`
 	LastErrorMsg    string `json:"last_error_msg,omitempty"`
 }
 
@@ -285,7 +285,7 @@ func applyRetention(destDir string, cfg config.ParsedBackupConfig) error {
 	}
 
 	type tarballInfo struct {
-		path string
+		path  string
 		mtime time.Time
 	}
 	var tarballs []tarballInfo

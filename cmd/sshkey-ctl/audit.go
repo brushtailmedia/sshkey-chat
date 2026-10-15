@@ -33,11 +33,12 @@ const defaultAuditLogLimit = 50
 // the `audit-log` CLI command.
 //
 // Flags:
-//   --since DURATION   show only entries at or after now-DURATION
-//                      (e.g. "24h", "7d", "30m"). Default: no
-//                      time filter.
-//   --limit N          cap output to the most recent N entries.
-//                      Default: 50. Pass 0 for unlimited.
+//
+//	--since DURATION   show only entries at or after now-DURATION
+//	                   (e.g. "24h", "7d", "30m"). Default: no
+//	                   time filter.
+//	--limit N          cap output to the most recent N entries.
+//	                   Default: 50. Pass 0 for unlimited.
 //
 // Output format matches the on-disk audit.log line format exactly,
 // so operators see the same thing whether they run audit-log or

@@ -772,4 +772,3 @@ func TestHandleRetirement_LastAdminAutoPromotesOldestMember(t *testing.T) {
 		t.Errorf("successor = %q, want bob or carol", admins[0])
 	}
 }
-

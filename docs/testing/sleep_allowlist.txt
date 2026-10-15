@@ -16,3 +16,4 @@ internal/server/idle_watchdog_test.go:189 | phase22 | intentional single tick wa
 internal/server/idle_watchdog_test.go:232 | phase22 | watchdog timeout boundary
 internal/server/send_queue_test.go:117 | phase22 | queue/writer goroutine interleave window
 internal/server/send_queue_test.go:347 | phase22 | queue/writer goroutine interleave window
+cmd/sshkey-server/duplicate_device_race_test.go:91 | reconnect-race (9a4c4b6) | wait for the server to finish tearing down closed session 1 before asserting session 2's route survived; the teardown has no exported completion signal to poll (s.clients is unexported, only a Debug log marks it), and the race under test is precisely teardown-after-replacement

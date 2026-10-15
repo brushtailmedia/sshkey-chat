@@ -255,7 +255,7 @@ func TestCheck_BoundaryEquality(t *testing.T) {
 	c.setNowFn(func() int64 { return v })
 
 	c.Inc(SignalMalformedFrame, "dev_a") // ts=1000
-	v = 1060                              // now at t=1060
+	v = 1060                             // now at t=1060
 	// window=60 → since = 1060 - 60 = 1000. Event at 1000 is inside.
 	if !c.Check(SignalMalformedFrame, "dev_a", 1, 60) {
 		t.Error("event at exact window boundary (ts == now-windowSec) = false, want true (inclusive)")

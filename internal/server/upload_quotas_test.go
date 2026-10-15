@@ -102,10 +102,10 @@ func TestIsSustainedPattern(t *testing.T) {
 	dayBefore := dateOffsetUTC(2)
 
 	cases := []struct {
-		name           string
-		recent         []store.DailyUploadRow
-		consecutive    int
-		want           bool
+		name        string
+		recent      []store.DailyUploadRow
+		consecutive int
+		want        bool
 	}{
 		{
 			name:        "two contiguous days at warn → sustained=true",

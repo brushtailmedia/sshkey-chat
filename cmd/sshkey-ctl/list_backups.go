@@ -43,10 +43,10 @@ func cmdListBackups(configDir, dataDir string, args []string) error {
 	}
 
 	type backupEntry struct {
-		name      string
-		size      int64
-		mtime     time.Time
-		label     string
+		name  string
+		size  int64
+		mtime time.Time
+		label string
 	}
 	var backups []backupEntry
 	for _, e := range entries {
@@ -102,12 +102,13 @@ func cmdListBackups(configDir, dataDir string, args []string) error {
 }
 
 // formatAge returns a short human-readable age string. Examples:
-//   0s         → "just now"
-//   45s        → "45s"
-//   3m20s      → "3m"
-//   2h15m      → "2h"
-//   3d4h       → "3d"
-//   45d        → "45d"
+//
+//	0s         → "just now"
+//	45s        → "45s"
+//	3m20s      → "3m"
+//	2h15m      → "2h"
+//	3d4h       → "3d"
+//	45d        → "45d"
 //
 // Operators want at-a-glance "how old" — single unit precision is
 // enough; if they need exact, the timestamp is in the filename.
@@ -127,4 +128,3 @@ func formatAge(d time.Duration) string {
 	days := int(d.Hours()) / 24
 	return fmt.Sprintf("%dd", days)
 }
-

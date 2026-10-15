@@ -41,7 +41,7 @@ func (n *noopChannel) Close() error {
 	n.closed.Add(1)
 	return nil
 }
-func (n *noopChannel) CloseWrite() error                                            { return nil }
+func (n *noopChannel) CloseWrite() error { return nil }
 func (n *noopChannel) SendRequest(name string, wantReply bool, payload []byte) (bool, error) {
 	return false, nil
 }

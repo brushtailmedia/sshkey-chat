@@ -94,12 +94,12 @@ type UserQuotaSection struct {
 // this — never the raw section — so size strings parse exactly once
 // at startup.
 type ParsedUserQuota struct {
-	Enabled              bool
-	AllowExemptUsers     bool
-	WarnBytes            int64
-	BlockBytes           int64
-	FlagConsecutiveDays  int
-	RetentionDays        int
+	Enabled             bool
+	AllowExemptUsers    bool
+	WarnBytes           int64
+	BlockBytes          int64
+	FlagConsecutiveDays int
+	RetentionDays       int
 }
 
 // ParseAndValidate parses the size strings and enforces the validation

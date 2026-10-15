@@ -104,10 +104,11 @@ func cmdUserQuotaExempt(configDir, dataDir string, args []string) error {
 // quota_block event. No-op-but-explicit when quotas are disabled.
 //
 // Usage:
-//   sshkey-ctl quota-report                    # last 7 days, top 10
-//   sshkey-ctl quota-report --days 30          # last 30 days
-//   sshkey-ctl quota-report --top 5            # top 5 only
-//   sshkey-ctl quota-report --days 14 --top 20 # both
+//
+//	sshkey-ctl quota-report                    # last 7 days, top 10
+//	sshkey-ctl quota-report --days 30          # last 30 days
+//	sshkey-ctl quota-report --top 5            # top 5 only
+//	sshkey-ctl quota-report --days 14 --top 20 # both
 func cmdQuotaReport(dataDir string, args []string) error {
 	days := 7
 	top := 10

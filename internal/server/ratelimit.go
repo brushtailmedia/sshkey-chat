@@ -12,8 +12,8 @@ type rateLimiter struct {
 }
 
 type bucket struct {
-	tokens    float64
-	maxTokens float64
+	tokens     float64
+	maxTokens  float64
 	refillRate float64 // tokens per second
 	lastRefill time.Time
 }

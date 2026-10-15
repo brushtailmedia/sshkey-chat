@@ -54,7 +54,7 @@ const autoRevokePollInterval = 10 * time.Second
 // human descriptions. The full reason string embedded in the
 // device_revoked event (and rendered verbatim by the TUI) is:
 //
-//   "Automatic revocation: <description> (<count> events in <window>s)"
+//	"Automatic revocation: <description> (<count> events in <window>s)"
 //
 // Signals missing from this map fall back to a generic "signal X"
 // prefix — this shouldn't happen for correctly-configured signals but

@@ -62,8 +62,8 @@ func TestDistinctKeys_SameDeviceDifferentSignals(t *testing.T) {
 
 func TestConcurrentInc_SameKey(t *testing.T) {
 	c := New()
-	const N = 20   // goroutines
-	const M = 500  // iterations each
+	const N = 20  // goroutines
+	const M = 500 // iterations each
 
 	var wg sync.WaitGroup
 	wg.Add(N)

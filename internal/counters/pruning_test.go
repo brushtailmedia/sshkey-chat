@@ -379,7 +379,7 @@ func TestPruning_ReaddedAfterStaleGetsFreshStart(t *testing.T) {
 	for i := 0; i < initialPruneSize-1; i++ {
 		c.Inc(SignalMalformedFrame, fmt.Sprintf("dev_filler_%d", i))
 	}
-	now.Store(1000 + 3601) // age everything
+	now.Store(1000 + 3601)                     // age everything
 	c.Inc(SignalMalformedFrame, "dev_trigger") // slow path → prune
 
 	// Physical confirm: dev_a should be gone.

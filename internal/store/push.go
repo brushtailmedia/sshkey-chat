@@ -56,4 +56,3 @@ func (s *Store) DeactivatePushToken(user, deviceID string) error {
 	)
 	return err
 }
-
