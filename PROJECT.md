@@ -29,9 +29,9 @@ Server machine
 │   └── server.toml         -- server config (port, retention settings)
 └── /var/sshkey-chat/
     ├── audit.log           -- append-only log of admin actions
-    ├── host_key            -- server SSH host key (generated on first run if missing)
     ├── sshkey-server.pid   -- lockfile (PID + start time; cleaned on graceful shutdown)
     └── data/               -- SQLite DBs (users.db, rooms.db, room-*.db, group-*.db, dm-*.db, data.db)
+                               + host_key (server SSH host key, generated on first run if missing)
 ```
 
 **Port separation:**
@@ -60,7 +60,7 @@ Server machine
 
 ### Server Host Key (TOFU)
 
-The server has its own SSH host key (generated on first run, stored in `/etc/sshkey-chat/`). Clients use trust-on-first-use, same as regular SSH:
+The server has its own SSH host key (generated on first run, stored at `data/host_key` in the data dir — `/var/sshkey-chat/data/` — so the config dir can stay read-only). Clients use trust-on-first-use, same as regular SSH:
 
 - **First connect:** client prompts the user to accept the server's host key fingerprint. On accept, stored in the client's per-server config.
 - **Subsequent connects:** client verifies the server's key matches the stored fingerprint. Mismatch = hard warning, connection refused until the user explicitly re-trusts. Prevents MITM.

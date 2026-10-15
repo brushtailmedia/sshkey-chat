@@ -82,7 +82,11 @@ type BackupSection struct {
 	// config via external systems (git, ansible) can opt out to avoid
 	// duplicate sources of truth. host_key is ALWAYS included when
 	// IncludeConfigFiles is true because restore-to-new-machine
-	// without it breaks every client's SSH pinning.
+	// without it breaks every client's SSH pinning. The key is stored
+	// under the data dir (<data>/data/host_key) and archived as
+	// data/host_key; opting out means a restore regenerates it (every
+	// client re-pins) — which is the point for data-only backups
+	// handed to a third party: the unencrypted key stays out.
 	IncludeConfigFiles bool `toml:"include_config_files"`
 }
 

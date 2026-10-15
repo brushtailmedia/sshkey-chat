@@ -11,7 +11,7 @@ package backup
 //   - Run: tarball contents match expected layout
 //   - Run: integrity_check failure aborts with no tarball left behind
 //   - Run: missing DataDir → error
-//   - Run: missing required host_key (with IncludeConfigFiles) → error
+//   - Run: missing required data/host_key (with IncludeConfigFiles) → error
 //   - Run: absent optional aux file (audit.log missing) → skipped cleanly
 //   - Run: temp-file + staging dir cleaned up on failure
 //   - Run: NowFn injection produces deterministic timestamps
@@ -164,7 +164,8 @@ func mustWriteFile(t *testing.T, path string, content string, mode os.FileMode) 
 
 // (fx *fixture) seedAllArtefacts creates the full set of files Run
 // should pick up: 3 core DBs, 2 context DBs, 2 attachment blobs, and
-// all 3 aux files (audit.log, host_key, server.toml).
+// all 3 aux files (audit.log and host_key under the data dir,
+// server.toml under the config dir).
 func (fx *fixture) seedAllArtefacts() {
 	t := fx.t
 	// Core DBs
@@ -179,7 +180,7 @@ func (fx *fixture) seedAllArtefacts() {
 	mustWriteFile(t, filepath.Join(fx.dataDir, "data", "files", "file_blob2"), "blob2 content", 0644)
 	// Aux files
 	mustWriteFile(t, filepath.Join(fx.dataDir, "audit.log"), "audit line 1\n", 0644)
-	mustWriteFile(t, filepath.Join(fx.configDir, "host_key"), "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----\n", 0600)
+	mustWriteFile(t, filepath.Join(fx.dataDir, "data", "host_key"), "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----\n", 0600)
 	mustWriteFile(t, filepath.Join(fx.configDir, "server.toml"), "[server]\nport = 2222\n", 0644)
 }
 
@@ -266,7 +267,7 @@ func TestRun_HappyPath(t *testing.T) {
 		"data/files/file_blob1",
 		"data/files/file_blob2",
 		"data/audit.log",
-		"config/host_key",
+		"data/host_key",
 		"config/server.toml",
 	}
 	got := readTarballEntries(t, res.Path)
@@ -397,6 +398,12 @@ func TestRun_ExcludeConfigFiles(t *testing.T) {
 		if strings.HasPrefix(entry, "config/") {
 			t.Errorf("tarball should not contain config/ entries when IncludeConfigFiles=false, got: %s", entry)
 		}
+		// Revised semantics (2026-07-06): the host key is archived under
+		// data/ but stays gated on IncludeConfigFiles — a data-only
+		// backup must never carry the unencrypted secret.
+		if entry == "data/host_key" {
+			t.Errorf("data-only backup must exclude the host key (unencrypted secret), got: %s", entry)
+		}
 	}
 }
 
@@ -441,7 +448,7 @@ func TestRun_MissingHostKeyIsFatal(t *testing.T) {
 	fx := newFixture(t)
 	fx.seedAllArtefacts()
 	// Remove host_key — IncludeConfigFiles requires it.
-	if err := os.Remove(filepath.Join(fx.configDir, "host_key")); err != nil {
+	if err := os.Remove(filepath.Join(fx.dataDir, "data", "host_key")); err != nil {
 		t.Fatalf("remove host_key: %v", err)
 	}
 

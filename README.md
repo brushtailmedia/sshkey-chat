@@ -58,7 +58,7 @@ The SSH transport pins a modern algorithm allowlist (post-quantum-hybrid key exc
 
 The server is an untrusted **relay** — it cannot read message content (it holds no message keys, epoch keys, or user private keys). Two pieces of server-side state are nonetheless stored **unencrypted on disk**, protected by filesystem permissions rather than encryption. These are **accepted design choices for now**, documented here so operators can make an informed deployment decision, and revisable in future:
 
-- **Host private key — unencrypted (`host_key`, mode `0600`).** The server's Ed25519 SSH host key is written without a passphrase so the server can start unattended (the standard SSH host-key model). *Implication:* anyone who can read the config directory can take the host key and impersonate the server to clients — on a client's first connect, or after a client resets its trust-on-first-use record. *Mitigation:* restrict the config directory and treat host-filesystem access as equivalent to server compromise. A future option is an encrypted host key unlocked by a boot-time secret.
+- **Host private key — unencrypted (`host_key`, mode `0600`).** The server's Ed25519 SSH host key is written without a passphrase so the server can start unattended (the standard SSH host-key model). *Implication:* anyone who can read the data directory can take the host key and impersonate the server to clients — on a client's first connect, or after a client resets its trust-on-first-use record. *Mitigation:* restrict the data directory and treat host-filesystem access as equivalent to server compromise. A future option is an encrypted host key unlocked by a boot-time secret.
 
 - **Database + backups — unencrypted (plaintext SQLite).** The server database stores **no secrets** — only public keys, fingerprints, opaque ciphertext (message payloads it cannot decrypt), and per-recipient wrapped keys it cannot unwrap; there is no plaintext message body, user private key, or unwrapped epoch key. It does, however, hold **metadata** in the clear: who is in which room / group / DM, fingerprints, and message timing and size. Backups carry the same data. *Implication:* anyone who can read the data directory (or a backup) learns the social graph and metadata — the same information the operator inherently sees, but now also at rest. *Mitigation:* restrict the data directory and backup location; use full-disk encryption if metadata-at-rest is in your threat model. (The client-side database, by contrast, *is* encrypted — SQLCipher — because it holds unwrapped keys.)
 
@@ -76,9 +76,10 @@ The server is an untrusted **relay** — it cannot read message content (it hold
 > ⚠️ **The Docker install of this app has not been tested yet.** This is the *intended* default path, but
 > to date only the **binaries** have been run and verified.
 > Treat the Docker flow below as **experimental** for now: it may need fixes before it runs
-> cleanly on every host. One known rough edge: on a non-root Linux host the
-> bind-mounted config dir (`./docker/config`) can block first-boot host-key
-> generation, because the container runs as UID/GID 2222. **If you want a proven
+> cleanly on every host. One known rough edge: the container runs as UID/GID 2222,
+> so on a non-root Linux host a bind-mounted **data** dir needs an ownership
+> preflight (`chown -R 2222:2222`) before first boot. (A bind-mounted config dir
+> no longer blocks first boot — the host key now lives in the data dir.) **If you want a proven
 > setup today, use the binary or systemd install** (see *Install* and *Deploy
 > (systemd)* below). Bug reports and fixes for the Docker path are very welcome.
 
@@ -260,7 +261,7 @@ The admin's private key never touches the server — only the public key, transf
 ./sshkey-server -config /etc/sshkey-chat -data /var/sshkey-chat
 ```
 
-The server generates an Ed25519 host key on first run and stores it in the config directory.
+The server generates an Ed25519 host key on first run and stores it at `data/host_key` inside the data directory (so the config directory can stay read-only).
 
 ### Deploy (systemd)
 
@@ -273,13 +274,13 @@ sudo cp sshkey-server sshkey-ctl /usr/local/bin/
 # Create service user
 sudo useradd -r -s /usr/sbin/nologin sshkey
 
-# Create directories owned by the service user. BOTH must be writable by
-# `sshkey`: the server writes SQLite state + uploads under /var, and generates
-# its host_key under /etc (the config dir) on first boot — so /etc/sshkey-chat
-# must be service-owned too, not left root-owned by `sudo mkdir`.
+# Create directories. Only /var/sshkey-chat (data) must be writable by
+# the service user — the host key lives in the data dir, so
+# /etc/sshkey-chat (config) stays root-owned; group-read lets the
+# service read server.toml.
 sudo mkdir -p /etc/sshkey-chat /var/sshkey-chat
-sudo chown sshkey:sshkey /etc/sshkey-chat /var/sshkey-chat
-sudo chmod 750 /etc/sshkey-chat /var/sshkey-chat
+sudo chown root:sshkey /etc/sshkey-chat && sudo chmod 750 /etc/sshkey-chat
+sudo chown sshkey:sshkey /var/sshkey-chat && sudo chmod 750 /var/sshkey-chat
 
 # Initialize config + SQLite state (idempotent)
 sudo sshkey-ctl --config /etc/sshkey-chat --data /var/sshkey-chat init --yes

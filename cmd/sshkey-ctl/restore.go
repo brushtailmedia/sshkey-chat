@@ -308,7 +308,7 @@ func moveToSafety(dataDir, configDir string, entries []string, safetyDir string)
 }
 
 // tarEntryToSourcePath maps a validated tarball entry name (e.g.,
-// "data/data.db" or "config/host_key") to its on-disk source path
+// "data/data.db", "data/host_key" or "config/server.toml") to its on-disk source path
 // under dataDir or configDir. Returns false for entries that don't
 // match either prefix (validation should have caught these — defensive).
 func tarEntryToSourcePath(entry, dataDir, configDir string) (string, bool) {

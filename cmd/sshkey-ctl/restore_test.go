@@ -25,20 +25,109 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"database/sql"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
 	_ "modernc.org/sqlite"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/backup"
+	"github.com/brushtailmedia/sshkey-chat/internal/config"
+	"github.com/brushtailmedia/sshkey-chat/internal/server"
 	"github.com/brushtailmedia/sshkey-chat/internal/sqlitedsn"
 )
+
+// TestCmdRestore_HostKeyRoundTrip is the non-negotiable relocation gate:
+// the path the server reads/writes, the path backup reads, and the path
+// restore writes must all be <dataDir>/data/host_key. If any disagrees,
+// the server regenerates its host key after a restore and every client's
+// TOFU pin breaks. Proves: backup -> restore-to-fresh-dirs -> byte-identical
+// key + stable fingerprint + a real server.New reload does NOT rewrite it.
+func TestCmdRestore_HostKeyRoundTrip(t *testing.T) {
+	configDir, dataDir := setupRestoreFixture(t)
+
+	// Replace the fixture's fake key with a REAL Ed25519 key, exactly
+	// the shape the server generates (loadOrGenerateHostKey).
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	blk, err := ssh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	keyBytes := pem.EncodeToMemory(blk)
+	keyPath := filepath.Join(dataDir, "data", "host_key")
+	if err := os.WriteFile(keyPath, keyBytes, 0600); err != nil {
+		t.Fatalf("write host key: %v", err)
+	}
+	origSigner, err := ssh.ParsePrivateKey(keyBytes)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	origFP := ssh.FingerprintSHA256(origSigner.PublicKey())
+
+	tarball := produceBackup(t, configDir, dataDir, "hostkey-gate")
+
+	// Restore into completely FRESH dirs (restore-to-new-machine).
+	configDir2 := t.TempDir()
+	dataDir2 := t.TempDir()
+	if err := cmdRestore(configDir2, dataDir2, []string{tarball, "--no-pre-backup"}); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	restoredPath := filepath.Join(dataDir2, "data", "host_key")
+	restored, err := os.ReadFile(restoredPath)
+	if err != nil {
+		t.Fatalf("restored key missing at %s: %v", restoredPath, err)
+	}
+	if !bytes.Equal(restored, keyBytes) {
+		t.Fatal("restored host key is not byte-identical to the original")
+	}
+	if info, err := os.Stat(restoredPath); err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("restored key mode = %v (err %v), want 0600", info.Mode().Perm(), err)
+	}
+	restoredSigner, err := ssh.ParsePrivateKey(restored)
+	if err != nil {
+		t.Fatalf("parse restored: %v", err)
+	}
+	if fp := ssh.FingerprintSHA256(restoredSigner.PublicKey()); fp != origFP {
+		t.Fatalf("fingerprint drifted: %s != %s", fp, origFP)
+	}
+
+	// Reload: boot a real server against the restored dirs. It must LOAD
+	// the key (not regenerate) — proven by the file staying byte-identical.
+	cfg, err := config.Load(configDir2) // restored config/server.toml
+	if err != nil {
+		t.Fatalf("load restored config: %v", err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	s, err := server.New(cfg, logger, dataDir2)
+	if err != nil {
+		t.Fatalf("server.New on restored state: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Remove(filepath.Join(dataDir2, "sshkey-server.pid"))
+	})
+	_ = s // Close() assumes listeners; the lockfile is removed in cleanup instead.
+	after, err := os.ReadFile(restoredPath)
+	if err != nil {
+		t.Fatalf("re-read after boot: %v", err)
+	}
+	if !bytes.Equal(after, keyBytes) {
+		t.Fatal("server boot REWROTE the host key — load path disagrees with restore path")
+	}
+}
 
 // setupRestoreFixture builds a config + data dir with real SQLite
 // content so backup → tamper → restore round-trips end-to-end. Returns
@@ -59,18 +148,19 @@ enabled = false
 `), 0644); err != nil {
 		t.Fatalf("write server.toml: %v", err)
 	}
-	// host_key — required when IncludeConfigFiles=true (the default).
-	// Real-looking content; we never parse it as SSH in restore tests.
-	if err := os.WriteFile(filepath.Join(configDir, "host_key"),
-		[]byte("-----BEGIN OPENSSH PRIVATE KEY-----\nfake test key\n-----END OPENSSH PRIVATE KEY-----\n"),
-		0600); err != nil {
-		t.Fatalf("write host_key: %v", err)
-	}
-
 	// data/ subdir with three real SQLite DBs.
 	dataRoot := filepath.Join(dataDir, "data")
 	if err := os.MkdirAll(dataRoot, 0755); err != nil {
 		t.Fatalf("mkdir data: %v", err)
+	}
+	// host_key — required when IncludeConfigFiles=true (the default). It
+	// lives in the DATA dir (relocate-host-key). Real-looking content; the
+	// round-trip gate test overwrites it with a real key, nothing else
+	// parses it.
+	if err := os.WriteFile(filepath.Join(dataRoot, "host_key"),
+		[]byte("-----BEGIN OPENSSH PRIVATE KEY-----\nfake test key\n-----END OPENSSH PRIVATE KEY-----\n"),
+		0600); err != nil {
+		t.Fatalf("write host_key: %v", err)
 	}
 	for _, name := range []string{"data.db", "rooms.db", "users.db"} {
 		path := filepath.Join(dataRoot, name)
@@ -443,14 +533,15 @@ func TestValidateTarball_EmptyTarballRejected(t *testing.T) {
 func TestValidateTarball_HappyPath(t *testing.T) {
 	path := makeTarball(t, []struct{ name, content string }{
 		{"data/data.db", "fake content"},
-		{"config/host_key", "fake key"},
+		{"data/host_key", "fake key"},
+		{"config/server.toml", "fake toml"},
 	})
 	entries, err := validateTarball(path)
 	if err != nil {
 		t.Fatalf("expected ok, got: %v", err)
 	}
-	if len(entries) != 2 {
-		t.Errorf("expected 2 entries, got %d", len(entries))
+	if len(entries) != 3 {
+		t.Errorf("expected 3 entries, got %d", len(entries))
 	}
 }
 

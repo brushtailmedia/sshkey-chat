@@ -970,7 +970,14 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 // loadOrGenerateHostKey loads the host key from disk or generates a new one.
 func (s *Server) loadOrGenerateHostKey() (ssh.Signer, error) {
-	keyPath := filepath.Join(s.cfg.Dir, "host_key")
+	// Host key lives in the DATA dir (data/ subdir, next to the SQLite
+	// DBs) so the CONFIG dir can stay root-owned/read-only. The data/
+	// subdir choice reuses the backup archive's data/ prefix and the
+	// restore mapper unchanged (data/host_key <-> <dataDir>/data/host_key).
+	if s.dataDir == "" {
+		return nil, fmt.Errorf("host key requires a data directory")
+	}
+	keyPath := filepath.Join(s.dataDir, "data", "host_key")
 
 	// Try to load existing key
 	keyData, err := os.ReadFile(keyPath)
@@ -997,6 +1004,12 @@ func (s *Server) loadOrGenerateHostKey() (ssh.Signer, error) {
 	}
 
 	keyData = pem.EncodeToMemory(pemBlock)
+	// store.Open also creates <dataDir>/data (mode 0750, store.go), but key
+	// generation must not depend on the store having run first. Same mode
+	// so the dir's permissions don't depend on which path created it.
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0750); err != nil {
+		return nil, fmt.Errorf("create host key dir: %w", err)
+	}
 	if err := os.WriteFile(keyPath, keyData, 0600); err != nil {
 		return nil, fmt.Errorf("write host key: %w", err)
 	}

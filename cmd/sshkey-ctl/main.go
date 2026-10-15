@@ -136,7 +136,7 @@ func run() error {
 	case "status":
 		return cmdStatus(configDir, dataDir)
 	case "host-key":
-		return cmdHostKey(configDir)
+		return cmdHostKey(dataDir)
 	case "purge":
 		return cmdPurge(dataDir, cmdArgs)
 	case "backup":
@@ -1779,8 +1779,10 @@ func formatBytes(b int64) string {
 	}
 }
 
-func cmdHostKey(configDir string) error {
-	keyPath := filepath.Join(configDir, "host_key")
+func cmdHostKey(dataDir string) error {
+	// The host key lives in the DATA dir (relocate-host-key) — same path
+	// the server reads/writes and backup/restore use.
+	keyPath := filepath.Join(dataDir, "data", "host_key")
 	data, err := os.ReadFile(keyPath)
 	if err != nil {
 		return fmt.Errorf("no host key found at %s: %w", keyPath, err)

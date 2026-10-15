@@ -20,8 +20,8 @@
 //	    room-*.db, group-*.db, dm-*.db  (Online Backup API snapshots)
 //	    files/<fileID>                  (plain file copy)
 //	    audit.log                       (plain file copy)
+//	    host_key                        (plain file copy, mode 0600; only when IncludeConfigFiles)
 //	  config/
-//	    host_key                        (plain file copy, mode 0600 preserved)
 //	    server.toml                     (plain file copy)
 //
 // The tarball lands atomically via temp-file + rename: partial writes
@@ -50,8 +50,8 @@ type Options struct {
 	// attachment blobs under data/files/, and the audit log.
 	DataDir string
 
-	// ConfigDir is the server's config directory — source of host_key
-	// and server.toml. Only required when IncludeConfigFiles is true.
+	// ConfigDir is the server's config directory — source of server.toml.
+	// Only required when IncludeConfigFiles is true.
 	ConfigDir string
 
 	// DestDir is the directory that receives the final tarball. Must
@@ -68,10 +68,13 @@ type Options struct {
 	// Compress gzip-compresses the tarball. Phase 19 default true.
 	Compress bool
 
-	// IncludeConfigFiles bundles host_key + server.toml under
-	// config/ in the tarball. Host key is critical for restore-to-
-	// new-machine (see Phase 19 decision #2); server.toml is
-	// included for full-state recovery. Phase 19 default true.
+	// IncludeConfigFiles bundles the host key (from
+	// <DataDir>/data/host_key, archived as data/host_key) + server.toml
+	// (archived as config/server.toml). The host key is critical for
+	// restore-to-new-machine (see Phase 19 decision #2); it stays behind
+	// this flag because it is an unencrypted secret — data-only backups
+	// exclude it deliberately. server.toml is included for full-state
+	// recovery. Phase 19 default true.
 	IncludeConfigFiles bool
 
 	// NowFn returns the current time for timestamps in filenames.
@@ -251,7 +254,13 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	if opts.IncludeConfigFiles {
 		aux = append(aux,
-			auxFile{filepath.Join(opts.ConfigDir, "host_key"), "config/host_key", true},
+			// 2026-07-06 security decision: the host key is SOURCED from
+			// the data dir and ARCHIVED under data/, but stays gated on
+			// IncludeConfigFiles — a data-only backup deliberately
+			// excludes the unencrypted host key (server-impersonation
+			// secret), while a full backup preserves server identity
+			// for restore-to-new-machine.
+			auxFile{filepath.Join(opts.DataDir, "data", "host_key"), "data/host_key", true},
 			auxFile{filepath.Join(opts.ConfigDir, "server.toml"), "config/server.toml", true},
 		)
 	}

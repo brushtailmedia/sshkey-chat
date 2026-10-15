@@ -49,14 +49,13 @@ enabled = false
 `), 0644); err != nil {
 		t.Fatalf("write server.toml: %v", err)
 	}
-	// Required by config.LoadServerConfig path traversal — write a
-	// fake host_key so backup with IncludeConfigFiles=true (the
-	// default) doesn't bail on the required-file check.
-	if err := os.WriteFile(filepath.Join(configDir, "host_key"), []byte("fake"), 0600); err != nil {
+	dataDir := setupDataDir(t, map[string]store.RoomSeed{"general": {}}, users)
+	// Write a fake host_key under the DATA dir (relocate-host-key) so backup
+	// with IncludeConfigFiles=true (the default) doesn't bail on the
+	// required-file check. setupDataDir opened the store, so data/ exists.
+	if err := os.WriteFile(filepath.Join(dataDir, "data", "host_key"), []byte("fake"), 0600); err != nil {
 		t.Fatalf("write host_key: %v", err)
 	}
-
-	dataDir := setupDataDir(t, map[string]store.RoomSeed{"general": {}}, users)
 	return configDir, dataDir
 }
 
@@ -126,7 +125,7 @@ func TestCmdBackup_HappyPath(t *testing.T) {
 		"data/data.db":       false,
 		"data/rooms.db":      false,
 		"data/users.db":      false,
-		"config/host_key":    false,
+		"data/host_key":      false,
 		"config/server.toml": false,
 	}
 	for _, e := range entries {

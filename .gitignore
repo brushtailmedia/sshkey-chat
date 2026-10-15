@@ -47,7 +47,6 @@ firebase-sa.json
 .env
 
 # Docker runtime
-docker/config/host_key
 docker/keys/*
 !docker/keys/.gitkeep
 

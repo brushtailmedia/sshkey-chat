@@ -16,8 +16,8 @@ backup-<YYYYMMDD-HHMMSS>[-<label>].tar.gz
     room-*.db, group-*.db, dm-*.db       (SQLite Online Backup snapshots)
     files/<fileID>                       (attachment blobs — plain copy)
     audit.log                            (server audit log)
+    host_key                             (SSH server host key, mode 0600 preserved; only when include_config_files = true)
   config/
-    host_key                             (SSH server host key, mode 0600 preserved)
     server.toml                          (server config; opt out via include_config_files)
 ```
 
@@ -232,7 +232,10 @@ SSH host-key warnings.
 ```bash
 # On the new machine:
 mkdir -p /etc/sshkey-chat /var/sshkey-chat/data /var/sshkey-chat/data/files
-chown -R sshkey-chat:sshkey-chat /var/sshkey-chat /etc/sshkey-chat
+# Only the data dir needs service ownership (the host key is restored to
+# data/host_key); the config dir stays root-owned, group-readable.
+chown -R sshkey:sshkey /var/sshkey-chat
+chown root:sshkey /etc/sshkey-chat && chmod 750 /etc/sshkey-chat
 sshkey-ctl restore /tmp/backup-20260419-143022.tar.gz --no-pre-backup
 systemctl start sshkey-chat
 ```
@@ -251,8 +254,7 @@ intact. Recovery options:
 ```bash
 SAFETY=/var/sshkey-chat/pre-restore-20260419-151533
 cd $SAFETY
-rsync -a data/ /var/sshkey-chat/data/
-cp config/host_key /etc/sshkey-chat/host_key
+rsync -a data/ /var/sshkey-chat/data/      # includes data/host_key
 cp config/server.toml /etc/sshkey-chat/server.toml
 mv audit.log /var/sshkey-chat/audit.log
 systemctl start sshkey-chat
@@ -282,7 +284,7 @@ retention_count = 10                  # keep at most N tarballs (0 = unlimited)
 retention_age = "720h"                # delete tarballs older than this (empty = no age cap)
 compress = true                       # gzip the tarball
 skip_if_idle = true                   # skip scheduler tick if no write activity since last backup
-include_config_files = true           # bundle host_key + server.toml into config/
+include_config_files = true           # bundle host_key (as data/host_key) + server.toml (as config/server.toml)
 ```
 
 **Retention semantics:** OR — a tarball is deleted if it exceeds
@@ -303,6 +305,12 @@ Terraform, NixOS) can opt out to avoid duplicate sources of truth.
 `host_key` is also affected — if you opt out, the host_key won't be
 in the tarball, and restore-to-a-new-machine will produce a fresh
 host key that triggers SSH host-key warnings on every client.
+
+> **Full backups contain the server's UNENCRYPTED private host key**
+> (`data/host_key`). Anyone holding such a tarball can impersonate the
+> server to clients. Store config-inclusive backups with the same care as
+> the data directory itself; use `include_config_files = false` when
+> handing a data-only snapshot to a third party.
 
 ## Monitoring
 
