@@ -405,7 +405,7 @@ func (s *Store) SetAdmin(userID string, admin bool) error {
 }
 
 // UsersDB returns the underlying users database connection.
-func (s *Store) UsersDB() *sql.DB {
+func (s *Store) UsersDB() *DB {
 	return s.usersDB
 }
 

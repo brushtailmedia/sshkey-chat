@@ -1379,7 +1379,7 @@ func (s *Server) handleRead(c *Client, raw json.RawMessage) {
 //
 // The check is a single indexed point query on the primary key so
 // the overhead is negligible even at high reaction rates.
-func (s *Server) isReactableMessage(db *sql.DB, msgID string) bool {
+func (s *Server) isReactableMessage(db *store.DB, msgID string) bool {
 	var deleted int
 	err := db.QueryRow(`SELECT deleted FROM messages WHERE id = ?`, msgID).Scan(&deleted)
 	if err != nil {
@@ -1652,7 +1652,7 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 	// 15 concern (admin CLI audit may generalize this).
 	var targetID, room, group, dmID, user string
 	var found bool
-	var foundDB *sql.DB
+	var foundDB *store.DB
 
 	rooms := s.store.GetUserRoomIDs(c.UserID)
 
@@ -2328,7 +2328,7 @@ func (s *Server) performGroupLeave(groupID, userID, reason, by, initiatedBy stri
 		}
 
 		// Last-member cleanup: if removing this user emptied the group,
-		// drop the row + group-<id>.db file + cached *sql.DB handle.
+		// drop the row + group-<id>.db file + cached *store.DB handle.
 		// Idempotent — safe under concurrent calls. Phase 17 Step 4.f:
 		// cascade file_contexts + eager physical-file GC BEFORE the store
 		// teardown so the file_id lookup still works.

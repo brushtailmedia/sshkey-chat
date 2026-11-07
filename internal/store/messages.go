@@ -52,7 +52,7 @@ func (s *Store) InsertGroupMessage(groupID string, msg StoredMessage) (int64, er
 // insertMessage inserts a message and returns the assigned server_order (the
 // AUTOINCREMENT rowid). LastInsertId on the same Exec result is bound to this
 // insert — not a loose later lookup — so it is the committed commit order.
-func insertMessage(db *sql.DB, msg StoredMessage) (int64, error) {
+func insertMessage(db *DB, msg StoredMessage) (int64, error) {
 	fileIDs := encodeStringSlice(msg.FileIDs)
 	wrappedKeys := encodeMap(msg.WrappedKeys)
 
@@ -105,7 +105,7 @@ func (s *Store) GetGroupMessagesSince(groupID string, sinceTS int64, limit int) 
 	return getMessagesSince(db, sinceTS, limit)
 }
 
-func getMessages(db *sql.DB, beforeTS int64, limit int) ([]StoredMessage, error) {
+func getMessages(db *DB, beforeTS int64, limit int) ([]StoredMessage, error) {
 	var rows *sql.Rows
 	var err error
 
@@ -134,7 +134,7 @@ func getMessages(db *sql.DB, beforeTS int64, limit int) ([]StoredMessage, error)
 	return scanMessages(rows)
 }
 
-func getMessagesSince(db *sql.DB, sinceTS int64, limit int) ([]StoredMessage, error) {
+func getMessagesSince(db *DB, sinceTS int64, limit int) ([]StoredMessage, error) {
 	// server_order ASC == commit order (oldest-first), so sync_batch rows are
 	// emitted in chronological commit order. server_order == rowid here (S5).
 	rows, err := db.Query(`
@@ -262,7 +262,7 @@ func (s *Store) UpdateDMMessageEdited(dmID, msgID, newPayload, newSignature stri
 // a tombstoned row must return the same error as an edit on a truly
 // missing row, so the handler can collapse both into the byte-identical
 // "unknown" wire response for the privacy invariant.
-func updatePerContextMessageEdited(db *sql.DB, msgID, newPayload, newSignature string, editedAt int64) error {
+func updatePerContextMessageEdited(db *DB, msgID, newPayload, newSignature string, editedAt int64) error {
 	result, err := db.Exec(
 		`UPDATE messages SET payload = ?, signature = ?, edited_at = ? WHERE id = ? AND deleted = 0`,
 		newPayload, newSignature, editedAt, msgID,
@@ -309,7 +309,7 @@ func (s *Store) UpdateDMMessageEditedWithKeys(dmID, msgID, newPayload, newSignat
 	return updatePerContextMessageEditedWithKeys(db, msgID, newPayload, newSignature, newWrappedKeysJSON, editedAt)
 }
 
-func updatePerContextMessageEditedWithKeys(db *sql.DB, msgID, newPayload, newSignature, newWrappedKeysJSON string, editedAt int64) error {
+func updatePerContextMessageEditedWithKeys(db *DB, msgID, newPayload, newSignature, newWrappedKeysJSON string, editedAt int64) error {
 	result, err := db.Exec(
 		`UPDATE messages SET payload = ?, signature = ?, wrapped_keys = ?, edited_at = ? WHERE id = ? AND deleted = 0`,
 		newPayload, newSignature, newWrappedKeysJSON, editedAt, msgID,
@@ -365,7 +365,7 @@ func (s *Store) GetUserMostRecentMessageIDDM(dmID, userID string) (msgID string,
 // tiebreaker when two messages land at the same unix-second timestamp. On the
 // server server_order == rowid (INTEGER PRIMARY KEY), so this is the same
 // commit-order query the comment always intended, stated explicitly (S5).
-func getUserMostRecentMessageID(db *sql.DB, userID string) (string, int64, error) {
+func getUserMostRecentMessageID(db *DB, userID string) (string, int64, error) {
 	var id string
 	var ts int64
 	err := db.QueryRow(
@@ -412,7 +412,7 @@ func (s *Store) GetDMMessageByID(dmID, msgID string) (*StoredMessage, error) {
 	return getMessageByID(db, msgID)
 }
 
-func getMessageByID(db *sql.DB, msgID string) (*StoredMessage, error) {
+func getMessageByID(db *DB, msgID string) (*StoredMessage, error) {
 	rows, err := db.Query(
 		`SELECT id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys, deleted, edited_at, server_order, delete_signature
 		 FROM messages WHERE id = ? LIMIT 1`,
@@ -440,7 +440,7 @@ func getMessageByID(db *sql.DB, msgID string) (*StoredMessage, error) {
 // emit a second tombstone. deleteSignature is the client's Ed25519 signature
 // over the delete request (F6), persisted in a new column so catch-up/history
 // replay can re-emit it for client verify-or-drop.
-func deleteMessage(db *sql.DB, msgID, deletedBy, deleteSignature string) (DeleteMessageResult, error) {
+func deleteMessage(db *DB, msgID, deletedBy, deleteSignature string) (DeleteMessageResult, error) {
 	// Read metadata for a STILL-LIVE row (deleted = 0) before clearing payload.
 	var fileIDsStr sql.NullString
 	var serverOrder int64
@@ -476,7 +476,7 @@ func deleteMessage(db *sql.DB, msgID, deletedBy, deleteSignature string) (Delete
 }
 
 // DeleteReactionsForMessage removes all reactions for a single message id.
-func DeleteReactionsForMessage(db *sql.DB, msgID string) error {
+func DeleteReactionsForMessage(db *DB, msgID string) error {
 	_, err := db.Exec(`DELETE FROM reactions WHERE message_id = ?`, msgID)
 	return err
 }
@@ -522,7 +522,7 @@ func (s *Store) GetGroupHistoryBefore(groupID, beforeID string, joinedAt int64, 
 // no rows — when beforeID is empty or does not resolve to a visible row in this
 // context; the caller turns that into a correlated invalid_cursor. visGate may be
 // empty (no visibility restriction); visArgs are its bound parameters.
-func getHistoryBefore(db *sql.DB, beforeID, visGate string, visArgs []any, limit int) (msgs []StoredMessage, hasMore, cursorOK bool, err error) {
+func getHistoryBefore(db *DB, beforeID, visGate string, visArgs []any, limit int) (msgs []StoredMessage, hasMore, cursorOK bool, err error) {
 	if beforeID == "" {
 		return nil, false, false, nil // empty cursor -> invalid_cursor
 	}
@@ -613,7 +613,7 @@ func (s *Store) GetGroupReactionsForMessages(groupID string, messageIDs []string
 	return getReactionsForMessages(db, messageIDs)
 }
 
-func getReactionsForMessages(db *sql.DB, messageIDs []string) ([]StoredReaction, error) {
+func getReactionsForMessages(db *DB, messageIDs []string) ([]StoredReaction, error) {
 	if len(messageIDs) == 0 {
 		return nil, nil
 	}

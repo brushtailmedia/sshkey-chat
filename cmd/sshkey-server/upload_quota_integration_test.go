@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -116,7 +115,7 @@ func mustOpenStore(t *testing.T, dataDir string) *store.Store {
 	return st
 }
 
-func rowCount(t *testing.T, db *sql.DB, table string) int {
+func rowCount(t *testing.T, db *store.DB, table string) int {
 	t.Helper()
 	var n int
 	query := "SELECT COUNT(*) FROM " + table

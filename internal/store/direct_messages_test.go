@@ -7,7 +7,7 @@ import (
 )
 
 // TestDeleteDirectMessage_RemovesRowAndFile verifies that DeleteDirectMessage
-// drops the row from direct_messages, evicts the cached *sql.DB handle, and
+// drops the row from direct_messages, evicts the cached *DB handle, and
 // unlinks the dm-<id>.db file (plus its WAL/SHM sidecars).
 func TestDeleteDirectMessage_RemovesRowAndFile(t *testing.T) {
 	dir := t.TempDir()

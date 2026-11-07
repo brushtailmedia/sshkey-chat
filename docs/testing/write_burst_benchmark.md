@@ -42,6 +42,66 @@ approximates a Linux barrier-honoring fsync on the same hardware.
 
 (A first run minutes earlier agreed within normal variance: A5 max 741 ms, C3 max 1.76 s.)
 
+## Store-write Part 1 — 2026-11-08, same machine, N=2000
+
+Part 1 changed every handle the store opens (`internal/store/db.go`): the
+pool is capped at `handleConns` = 2 connections, and `Exec`/`Begin` take a
+per-handle write mutex, so one writer runs at a time and one read can overlap
+it. `openBenchDB` opens the same shape; `SSHKEY_BENCH_UNCAPPED=1` opens the
+raw pre-Part-1 pool everywhere to reproduce the baseline. Scenario **D1** was
+added — 16 writers inserting while 4 readers page history through the
+production pager on the same file, reported per population, in four handle
+shapes — and the choice of shape was made from its numbers in ten runs.
+
+### The exploration (runs 1–8): cap alone, then cap plus mutex, then pool size
+
+| Shape under test | A5 16 writers, worst op | D1 writers ops/s · worst | D1 readers p99 · worst |
+|---|---|---|---|
+| uncapped (baseline) | 640 ms | 1,700–3,900 · 430 ms–1.13 s | 1.1 ms · 3–383 ms |
+| 1 connection, no mutex | 7.6–11.8 ms | 9,200–9,600 · 11–16 ms (one run 389 ms) | 10–12 ms · 13–14 ms (one run 387 ms) |
+| 1 connection + write mutex | 4.7–7.0 ms | 1,700–2,100 · 13–47 ms | 2.6–7.4 ms · 4–32 ms |
+| **2 connections + write mutex (chosen)** | 4.7–6.1 ms | **3,400–3,550 · 6.7–8.3 ms** | **1.3–1.4 ms · 1.8–2.7 ms** |
+| 4 connections + write mutex | — | 3,300–4,200 · 7.1–11.3 ms | 1.0–1.3 ms · 1.4–2.2 ms |
+
+### As applied (runs 9–10, the chosen shape)
+
+| Scenario | ops/s | p99 | max |
+|---|---|---|---|
+| A5 room insert, 16 writers same file (was 3,070 / 640 ms) | 11,630–12,420 | 3.3–4.1 ms | **4.7–6.1 ms** |
+| A7 room insert, 16 writers + an outer Go mutex (reference) | 12,420–12,430 | 1.8–1.9 ms | 2.7–2.8 ms |
+| B1 8 rooms, 1 writer each, aggregate | 19,200–21,350 | 0.9–1.9 ms | 2.2–2.9 ms |
+| C3 read_positions, 50 goroutines, FULL (was 695 / 2.86 s) | 5,900–6,000 | 228–234 ms | 228–234 ms |
+| C4 read_positions, 50 goroutines, NORMAL | 42,700–43,100 | 2.6–2.7 ms | 2.7–3.2 ms |
+| D1 writers, 16 + 4 history readers | 3,400–3,410 | 6.3–6.4 ms | 6.8–7.3 ms |
+| D1 readers, 100-row page while 16 write | 6,600–6,670 pages/s | 1.3–1.4 ms | 1.8–2.7 ms |
+
+7. **The cap removes the pathology.** No busy-ladder sleep is left in the
+   process: the sixteen-writer worst case fell from 640 ms to about 5 ms at
+   the same throughput, and D1's writers from half a second or more to
+   7 ms.
+8. **The mutex buys the tail.** With the cap alone the worst op was 8–12 ms,
+   because `database/sql` hands a freed connection to a *random* waiter;
+   `sync.Mutex` goes first-in-first-out after a millisecond, and the
+   combination lands within 2 ms of the outer-mutex reference.
+9. **Two connections, not one, once reads are in the picture.** With one
+   connection and the mutex, the single admitted writer queued behind
+   every reader at the pool and writers fell to ~2,000 ops/s with 13–47 ms
+   worst waits. A second connection lets a read overlap the writer, as
+   WAL allows: writers 3,400 ops/s at 7 ms worst, reads at 2 ms worst,
+   nearly the four-connection numbers for half the descriptors. Under a
+   continuous read hammer writers get about a quarter of A7's throughput
+   — a fairness split that favours reads, which is the right way round for
+   a chat server — while both populations' tails stay in single-digit
+   milliseconds.
+10. **The ~230–300 ms stalls in the C shape are fsync, not scheduling.**
+    They appear only under `synchronous=FULL`, never in the NORMAL twins
+    (C4, C6, A6, A8 — tight in every run), and they hit every serialisation
+    shape, including an outer mutex alone (C5, 413 ms in one run). One op
+    pays a long flush and everyone queued behind it pays with it. The C
+    shape is the per-viewer receipt upsert into `data.db`, which Part 2
+    removes from `data.db`; the NORMAL decision (§ Recommended order, 3) is
+    the other lever, to be taken on the deployment disk.
+
 ## What it shows
 
 1. **The pure-Go SQLite driver is not a bottleneck.** A4 puts the CPU floor at

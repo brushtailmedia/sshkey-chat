@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -1844,7 +1843,7 @@ func cmdPurge(dataDir string, args []string) error {
 			continue
 		}
 
-		var db *sql.DB
+		var db *store.DB
 		if strings.HasPrefix(name, "room-") {
 			roomName := strings.TrimPrefix(strings.TrimSuffix(name, ".db"), "room-")
 			db, err = st.RoomDB(roomName)

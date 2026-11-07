@@ -3,6 +3,7 @@ package sqlitedsn
 import (
 	"context"
 	"database/sql"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -291,4 +292,115 @@ func TestReadOnly_LiveWALWithWriterAlive(t *testing.T) {
 	if _, err := r.Exec(`INSERT INTO t VALUES (3,'nope')`); !isReadOnlyErr(err) {
 		t.Errorf("write through read-only handle: err = %v, want a readonly error", err)
 	}
+}
+
+// foreign_keys is per-connection like busy_timeout (store-write Part 1): prove
+// the DSN form reaches a second pooled connection, which a one-off Exec never
+// did.
+func TestWritable_ForeignKeysOnMultipleConnections(t *testing.T) {
+	dsn, err := Writable(filepath.Join(t.TempDir(), "w.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := openProbe(t, dsn)
+	ctx := context.Background()
+	c1, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c1.Close()
+	c2, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	for i, c := range []*sql.Conn{c1, c2} {
+		var fk int
+		if err := c.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&fk); err != nil {
+			t.Fatalf("conn %d: %v", i, err)
+		}
+		if fk != 1 {
+			t.Errorf("conn %d foreign_keys = %d, want 1", i, fk)
+		}
+	}
+}
+
+// immediateProbeDSN is a second, independent handle on the same file — the
+// shape of another process — with no busy wait, so a held write lock is
+// reported at once instead of after five seconds.
+func immediateProbeDSN(t *testing.T, path string) string {
+	t.Helper()
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := url.Values{}
+	q.Add("_pragma", "busy_timeout(0)")
+	q.Set("_txlock", "immediate")
+	u := url.URL{Scheme: "file", Path: abs, RawQuery: q.Encode()}
+	return u.String()
+}
+
+func isBusyErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "locked") || strings.Contains(s, "busy")
+}
+
+// Writable's transactions take the write lock at BEGIN: a transaction that has
+// written nothing yet already excludes another writer, so a later upgrade can
+// never fail with the unretryable busy error a deferred transaction gets. The
+// control shows the same probe succeeding against a deferred transaction.
+func TestWritable_TransactionsBeginImmediate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "w.db")
+	dsn, err := Writable(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := openProbe(t, dsn)
+	if _, err := db.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	probe := openProbe(t, immediateProbeDSN(t, path))
+
+	tx, err := db.Begin() // nothing written yet
+	if err != nil {
+		t.Fatal(err)
+	}
+	ptx, err := probe.Begin()
+	if err == nil {
+		_ = ptx.Rollback()
+		t.Fatal("another writer could BEGIN IMMEDIATE while a Writable transaction was open: BEGIN is not immediate")
+	}
+	if !isBusyErr(err) {
+		t.Fatalf("probe BEGIN error = %v, want a busy/locked error", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	ptx, err = probe.Begin()
+	if err != nil {
+		t.Fatalf("probe BEGIN after commit: %v", err)
+	}
+	_ = ptx.Rollback()
+
+	// Control: a deferred transaction on the same file holds no write lock
+	// until it writes, so the probe gets in.
+	deferredDSN := strings.Replace(dsn, "_txlock=immediate", "_txlock=deferred", 1)
+	if deferredDSN == dsn {
+		t.Fatal("test setup: Writable DSN does not carry _txlock=immediate")
+	}
+	ddb := openProbe(t, deferredDSN)
+	dtx, err := ddb.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ptx, err = probe.Begin()
+	if err != nil {
+		t.Fatalf("control: probe BEGIN against a deferred transaction failed: %v", err)
+	}
+	_ = ptx.Rollback()
+	_ = dtx.Rollback()
 }

@@ -32,12 +32,31 @@ import (
 // applied it, so contended writers failed immediately instead of waiting.
 const busyTimeoutMS = 5000
 
-// Writable builds a read-write DSN: WAL journal mode plus a 5s busy timeout,
-// both applied to every connection the pool opens.
+// Writable builds a read-write DSN: WAL journal mode, a 5s busy timeout and
+// foreign-key enforcement, all applied to every connection the pool opens,
+// plus immediate write transactions.
+//
+// foreign_keys is per-connection like busy_timeout, so it belongs here too
+// (store-write Part 1, 2026-11-08): the store used to set it with one Exec
+// after open, which reached only the connection that happened to run it —
+// a latent gap with an uncapped pool and a certainty with the store's
+// two-connection handles, whose second connection would have had foreign
+// keys off. The schema has three foreign-key constraints.
+//
+// _txlock=immediate makes every transaction take SQLite's write lock at
+// BEGIN instead of at its first write. A deferred transaction that reads
+// first and then upgrades can fail with a busy error that the busy handler
+// cannot retry (in WAL, SQLITE_BUSY_SNAPSHOT); an immediate one simply waits
+// out busy_timeout like any other writer. In-process the store's write
+// mutex already admits one writer at a time; this covers the other
+// processes that take the write lock — sshkey-ctl and the backup package.
+// The store opens no read-only transactions, so there is nothing to lose.
 func Writable(path string) (string, error) {
 	q := url.Values{}
 	q.Add("_pragma", "journal_mode(WAL)")
 	q.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", busyTimeoutMS))
+	q.Add("_pragma", "foreign_keys(1)")
+	q.Set("_txlock", "immediate")
 	return buildFileURI(path, q)
 }
 

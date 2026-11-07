@@ -48,7 +48,7 @@ func (s *Store) ensurePendingKeysSchema() error {
 // columnExists reports whether table has a column named col. SQLite's PRAGMA
 // cannot bind an identifier, so the table name is interpolated directly:
 // callers MUST pass an internal, constant table name — never user input.
-func columnExists(db *sql.DB, table, col string) bool {
+func columnExists(db *DB, table, col string) bool {
 	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
 	if err != nil {
 		return false

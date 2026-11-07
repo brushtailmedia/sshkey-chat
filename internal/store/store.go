@@ -27,14 +27,14 @@ import (
 // Store manages all server-side SQLite databases.
 type Store struct {
 	dir     string
-	dataDB  *sql.DB
-	roomsDB *sql.DB // rooms.db — room identity + membership
-	usersDB *sql.DB // users.db — user identity + auth
+	dataDB  *DB
+	roomsDB *DB // rooms.db — room identity + membership
+	usersDB *DB // users.db — user identity + auth
 
 	mu       sync.RWMutex
-	roomDBs  map[string]*sql.DB // room nanoid -> message DB
-	groupDBs map[string]*sql.DB // group DM ID -> message DB
-	dmDBs    map[string]*sql.DB // 1:1 DM ID -> message DB
+	roomDBs  map[string]*DB // room nanoid -> message DB
+	groupDBs map[string]*DB // group DM ID -> message DB
+	dmDBs    map[string]*DB // 1:1 DM ID -> message DB
 }
 
 // Open creates or opens all databases in the given data directory.
@@ -53,9 +53,9 @@ func Open(dir string) (*Store, error) {
 
 	s := &Store{
 		dir:      dataRoot,
-		roomDBs:  make(map[string]*sql.DB),
-		groupDBs: make(map[string]*sql.DB),
-		dmDBs:    make(map[string]*sql.DB),
+		roomDBs:  make(map[string]*DB),
+		groupDBs: make(map[string]*DB),
+		dmDBs:    make(map[string]*DB),
 	}
 
 	dataDB, err := s.openDB("data.db")
@@ -107,7 +107,7 @@ func (s *Store) Close() error {
 	var firstErr error
 
 	// Checkpoint WAL on all databases before closing
-	checkpoint := func(db *sql.DB) {
+	checkpoint := func(db *DB) {
 		db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 	}
 
@@ -181,7 +181,7 @@ func (s *Store) GetFileHash(fileID string) (string, error) {
 }
 
 // RoomsDB returns the rooms identity database for direct queries.
-func (s *Store) RoomsDB() *sql.DB {
+func (s *Store) RoomsDB() *DB {
 	return s.roomsDB
 }
 
@@ -199,12 +199,13 @@ func (s *Store) DeleteFileHash(fileID string) {
 // waiting.) s.dir is already absolute (see Open), so the helper's file: URI is
 // well-formed.
 //
-// The explicit PRAGMA Execs below are deliberate, not leftover duplication:
-//   - journal_mode=WAL is a checked startup assertion that WAL actually engaged
-//     (journal mode is persistent, so re-asserting it is cheap).
-//   - foreign_keys=ON is left exactly as it was — foreign-key behavior is
-//     intentionally out of scope for the DSN fix, so it stays a per-connection Exec.
-func (s *Store) openDB(name string) (*sql.DB, error) {
+// The explicit PRAGMA Exec below is a checked startup assertion that WAL
+// actually engaged (journal mode is persistent, so re-asserting it is cheap).
+// foreign_keys moved into the DSN with Part 1 (2026-11-08): as a one-off Exec
+// it reached only the connection that ran it, and with two connections per
+// handle the second one had foreign keys off. The read below asserts the
+// DSN setting took on the connection that answers.
+func (s *Store) openDB(name string) (*DB, error) {
 	dsn, err := sqlitedsn.Writable(filepath.Join(s.dir, name))
 	if err != nil {
 		return nil, fmt.Errorf("build dsn for %s: %w", name, err)
@@ -213,21 +214,58 @@ func (s *Store) openDB(name string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A capped pool per file (store-write Part 1, 2026-11-08).
+	//
+	// Why: SQLite allows one writer per file at a time in any journal mode,
+	// and with an uncapped pool every extra connection that meets the write
+	// lock sleeps on SQLite's busy-handler back-off ladder (1, 2, 5, 10, 15,
+	// 20, 25 … ms) instead of queueing. The write-burst benchmark
+	// (docs/testing/write_burst_benchmark.md) measured 16 writers into one
+	// room file falling from 11,500 to 3,070 ops/s with a 640 ms worst wait,
+	// and 50 goroutines writing read positions into data.db falling to 695
+	// ops/s with a 2.86 s worst wait — in either synchronous mode. With a
+	// capped pool database/sql hands a freed connection straight to the next
+	// waiter, the write mutex in db.go makes that queue first-in-first-out
+	// (worst wait about 3 ms for sixteen writers in the same benchmark), and
+	// each file holds handleConns db + wal + shm descriptor sets instead of
+	// one per pooled connection. handleConns is two: one connection for the
+	// serialised writer and one so a read can overlap it (see db.go for the
+	// measurement that chose it).
+	//
+	// What it forbids: never call a Store method, or issue a query on this
+	// handle, while holding a Tx or an open rows cursor on the same handle —
+	// a write inside a Tx waits for the mutex its caller holds, forever, and
+	// a read inside one works only while the second connection happens to
+	// be free. The nested-db guard (.github/scripts/check_nested_db_use.sh,
+	// run in CI) enforces the rule: every Begin site uses only tx.* until
+	// Commit, no db-level Prepare, no second query while a cursor is open.
+	//
+	// sshkey-ctl and the backup package open their own handles in their own
+	// processes; they are not covered by this cap and keep relying on
+	// busy_timeout, which is right for rare, separate-process access.
+	db.SetMaxOpenConns(handleConns)
+	db.SetMaxIdleConns(handleConns)
 	// Startup assertion that WAL engaged (see doc comment).
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("enable WAL: %w", err)
 	}
-	// Foreign keys: unchanged behavior, intentionally out of scope for the DSN fix.
-	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
+	// Foreign keys come from the DSN on every connection; assert it took.
+	var fk int
+	if err := db.QueryRow("PRAGMA foreign_keys").Scan(&fk); err != nil || fk != 1 {
 		db.Close()
-		return nil, fmt.Errorf("enable foreign keys: %w", err)
+		if err == nil {
+			err = fmt.Errorf("foreign_keys = %d", fk)
+		}
+		return nil, fmt.Errorf("foreign keys not enabled by the DSN: %w", err)
 	}
-	return db, nil
+	// The write mutex (db.go) completes Part 1: the cap makes writers
+	// queue instead of sleep, the mutex makes the queue first-in-first-out.
+	return newDB(db, true), nil
 }
 
 // RoomDB returns (or creates) the database for a room.
-func (s *Store) RoomDB(room string) (*sql.DB, error) {
+func (s *Store) RoomDB(room string) (*DB, error) {
 	// Phase 17 Step 4a: path-traversal defense. `room` flows into a
 	// `filepath.Join`-equivalent construction at the openDB site below;
 	// a malformed ID like "../../etc/passwd" without this check escapes
@@ -266,7 +304,7 @@ func (s *Store) RoomDB(room string) (*sql.DB, error) {
 }
 
 // GroupDB returns (or creates) the database for a group DM.
-func (s *Store) GroupDB(groupID string) (*sql.DB, error) {
+func (s *Store) GroupDB(groupID string) (*DB, error) {
 	// Phase 17 Step 4a: path-traversal defense. See RoomDB comment.
 	if err := ValidateNanoID(groupID, "group_"); err != nil {
 		return nil, fmt.Errorf("GroupDB: %w", err)
@@ -299,7 +337,7 @@ func (s *Store) GroupDB(groupID string) (*sql.DB, error) {
 }
 
 // DMDB returns (or creates) the database for a 1:1 DM.
-func (s *Store) DMDB(dmID string) (*sql.DB, error) {
+func (s *Store) DMDB(dmID string) (*DB, error) {
 	// Phase 17 Step 4a: path-traversal defense. See RoomDB comment.
 	if err := ValidateNanoID(dmID, "dm_"); err != nil {
 		return nil, fmt.Errorf("DMDB: %w", err)
@@ -332,7 +370,7 @@ func (s *Store) DMDB(dmID string) (*sql.DB, error) {
 }
 
 // DataDB returns the data database for direct queries.
-func (s *Store) DataDB() *sql.DB {
+func (s *Store) DataDB() *DB {
 	return s.dataDB
 }
 
@@ -862,7 +900,7 @@ func (s *Store) initDataDB() error {
 }
 
 // initMessageDB creates the schema for room/conversation message databases.
-func (s *Store) initMessageDB(db *sql.DB) error {
+func (s *Store) initMessageDB(db *DB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS messages (
 			-- server_order is the server's authoritative per-conversation commit

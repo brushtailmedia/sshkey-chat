@@ -11,11 +11,22 @@ package store
 //	SSHKEY_WRITE_BENCH=1 $GO test ./internal/store -run TestWriteBurstReport -v -count=1 -timeout 30m
 //	SSHKEY_BENCH_N=5000        # ops per scenario (default 2000)
 //	SSHKEY_BENCH_DIR=/var/tmp  # disk to measure (default: os temp dir)
+//	SSHKEY_BENCH_UNCAPPED=1    # open every handle with an uncapped pool (the
+//	                           # pre-Part-1 behaviour) to reproduce the baseline
 //
 // Scenarios compare synchronous=FULL (today's default: an fsync per commit)
 // against synchronous=NORMAL (fsync only at checkpoint), single-transaction
 // batching, same-file writer contention, cross-file parallelism (the per-room
-// sharding), and the read-receipt amplification into the shared data.db.
+// sharding), the read-receipt amplification into the shared data.db, and
+// (D1) writers and history readers sharing one file — the cost of the
+// one-connection cap, which serialises reads behind writes that WAL would
+// otherwise let overlap.
+//
+// Since store-write Part 1 every handle the store opens is capped at one
+// connection (store.go openDB). openBenchDB applies the same cap so the
+// matrix measures production behaviour; SSHKEY_BENCH_UNCAPPED=1 removes it
+// everywhere (and the C scenarios swap the Store's data.db handle for a
+// bench-opened one so the knob reaches them too).
 //
 // macOS caveat: plain fsync does not flush the drive's write cache, so FULL
 // looks cheap here; the fullfsync(ON) scenario forces F_FULLFSYNC and
@@ -39,7 +50,7 @@ import (
 )
 
 // benchInsertSQL mirrors insertMessage's statement for the single-transaction
-// batch scenario (insertMessage takes a *sql.DB, so it cannot run inside a
+// batch scenario (insertMessage takes a *DB, so it cannot run inside a
 // tx). KEEP IN SYNC with messages.go insertMessage.
 const benchInsertSQL = `
 		INSERT INTO messages (id, sender, ts, epoch, payload, file_ids, signature, wrapped_keys)
@@ -109,10 +120,25 @@ func benchMsg(i int) StoredMessage {
 	}
 }
 
+// benchCapped reports whether handles get the production one-connection cap
+// (default) or an uncapped pool (SSHKEY_BENCH_UNCAPPED=1, the pre-Part-1
+// behaviour, for reproducing the baseline).
+func benchCapped() bool { return os.Getenv("SSHKEY_BENCH_UNCAPPED") == "" }
+
 // openBenchDB opens path exactly as the store does (sqlitedsn.Writable +
-// WAL + foreign_keys) plus any extra `_pragma=` settings applied to every
-// pooled connection — the only correct way to change synchronous or fullfsync.
-func openBenchDB(t *testing.T, path string, pragmas ...string) *sql.DB {
+// WAL + foreign_keys + the Part 1 handle: a one-connection pool and the
+// write mutex, unless SSHKEY_BENCH_UNCAPPED=1) plus any extra `_pragma=`
+// settings applied to every pooled connection — the only correct way to
+// change synchronous or fullfsync.
+func openBenchDB(t *testing.T, path string, pragmas ...string) *DB {
+	t.Helper()
+	return openBenchDBWith(t, path, benchCapped(), pragmas...)
+}
+
+// openBenchDBWith is openBenchDB with the Part 1 handle chosen explicitly
+// (capped pool + serialised writes, or the raw pre-Part-1 pool), for the
+// scenarios that compare the two in one run.
+func openBenchDBWith(t *testing.T, path string, capped bool, pragmas ...string) *DB {
 	t.Helper()
 	dsn, err := sqlitedsn.Writable(path)
 	if err != nil {
@@ -134,12 +160,37 @@ func openBenchDB(t *testing.T, path string, pragmas ...string) *sql.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{"PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON"} {
-		if _, err := db.Exec(p); err != nil {
-			t.Fatalf("%s: %v", p, err)
-		}
+	if capped {
+		db.SetMaxOpenConns(handleConns)
+		db.SetMaxIdleConns(handleConns)
 	}
-	return db
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		t.Fatalf("assert WAL: %v", err)
+	}
+	var fk int
+	if err := db.QueryRow("PRAGMA foreign_keys").Scan(&fk); err != nil || fk != 1 {
+		t.Fatalf("foreign keys not enabled by the DSN: fk=%d err=%v", fk, err)
+	}
+	return newDB(db, capped)
+}
+
+// swapDataDB replaces a Store's data.db handle with a bench-opened one, so
+// the C scenarios honour the cap knob (the Store's own handle is always
+// capped since Part 1) and can carry extra pragmas.
+func swapDataDB(t *testing.T, s *Store, pragmas ...string) {
+	t.Helper()
+	nd := openBenchDB(t, filepath.Join(s.dir, "data.db"), pragmas...)
+	old := s.dataDB
+	s.dataDB = nd
+	_ = old.Close()
+}
+
+// capLabel names the pool mode in scenario titles and the header line.
+func capLabel(capped bool) string {
+	if capped {
+		return "capped"
+	}
+	return "uncapped"
 }
 
 // newRoomFiles creates k room DBs with the PRODUCTION schema (via a real
@@ -236,8 +287,8 @@ func TestWriteBurstReport(t *testing.T) {
 		t.Log(r.line())
 	}
 
-	t.Logf("write-burst benchmark: %s/%s %s | dir=%s | N=%d | %d concurrent writers | %d readers",
-		runtime.GOOS, runtime.GOARCH, runtime.Version(), dir, n, writers, readers)
+	t.Logf("write-burst benchmark: %s/%s %s | dir=%s | N=%d | %d concurrent writers | %d readers | pool %s",
+		runtime.GOOS, runtime.GOARCH, runtime.Version(), dir, n, writers, readers, capLabel(benchCapped()))
 
 	// ---- A. one room file: synchronous mode + batching + contention ----
 	rooms := newRoomFiles(t, filepath.Join(dir, "a"), 6)
@@ -328,11 +379,16 @@ func TestWriteBurstReport(t *testing.T) {
 		}))
 	}
 
+	// (A9, the cap plus an outer Go write mutex, was measured on 2026-11-08
+	// while choosing the handle's shape — 2.7 ms worst case against 8–12 ms
+	// for the cap alone — and is now what every capped handle is, so A5
+	// capped IS that shape and A9 is retired. See the results doc.)
+
 	// ---- B. the per-room sharding: 8 files, one writer each ----
 	{
 		const k = 8
 		shards := newRoomFiles(t, filepath.Join(dir, "b"), k)
-		dbs := make([]*sql.DB, k)
+		dbs := make([]*DB, k)
 		for i := range shards {
 			dbs[i] = openBenchDB(t, shards[i])
 			defer dbs[i].Close()
@@ -354,6 +410,7 @@ func TestWriteBurstReport(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer s.Close()
+		swapDataDB(t, s)
 		record(runSeq(fmt.Sprintf("C1 read_positions | FULL | %d readers sequential", readers), perReader*readers, func(i int) error {
 			m, r := i/readers, i%readers
 			return s.SetReadPosition(fmt.Sprintf("usr_reader%02d", r), fmt.Sprintf("dev_reader%02d", r), roomForReceipts, "", "", msgID(m))
@@ -366,10 +423,7 @@ func TestWriteBurstReport(t *testing.T) {
 		}
 		defer s.Close()
 		// Swap data.db's handle for one whose every connection runs NORMAL.
-		nd := openBenchDB(t, filepath.Join(s.dir, "data.db"), "synchronous(NORMAL)")
-		old := s.dataDB
-		s.dataDB = nd
-		_ = old.Close()
+		swapDataDB(t, s, "synchronous(NORMAL)")
 		record(runSeq(fmt.Sprintf("C2 read_positions | NORMAL | %d readers sequential", readers), perReader*readers, func(i int) error {
 			m, r := i/readers, i%readers
 			return s.SetReadPosition(fmt.Sprintf("usr_reader%02d", r), fmt.Sprintf("dev_reader%02d", r), roomForReceipts, "", "", msgID(m))
@@ -381,6 +435,7 @@ func TestWriteBurstReport(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer s.Close()
+		swapDataDB(t, s)
 		record(runConc(fmt.Sprintf("C3 read_positions | FULL | %d reader goroutines", readers), perReader*readers, readers, func(i int) error {
 			r, m := i/perReader, i%perReader
 			return s.SetReadPosition(fmt.Sprintf("usr_reader%02d", r), fmt.Sprintf("dev_reader%02d", r), roomForReceipts, "", "", msgID(m))
@@ -392,10 +447,7 @@ func TestWriteBurstReport(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer s.Close()
-		nd := openBenchDB(t, filepath.Join(s.dir, "data.db"), "synchronous(NORMAL)")
-		old := s.dataDB
-		s.dataDB = nd
-		_ = old.Close()
+		swapDataDB(t, s, "synchronous(NORMAL)")
 		record(runConc(fmt.Sprintf("C4 read_positions | NORMAL | %d reader goroutines", readers), perReader*readers, readers, func(i int) error {
 			r, m := i/perReader, i%perReader
 			return s.SetReadPosition(fmt.Sprintf("usr_reader%02d", r), fmt.Sprintf("dev_reader%02d", r), roomForReceipts, "", "", msgID(m))
@@ -416,10 +468,9 @@ func TestWriteBurstReport(t *testing.T) {
 		}
 		defer s.Close()
 		if v.normal {
-			nd := openBenchDB(t, filepath.Join(s.dir, "data.db"), "synchronous(NORMAL)")
-			old := s.dataDB
-			s.dataDB = nd
-			_ = old.Close()
+			swapDataDB(t, s, "synchronous(NORMAL)")
+		} else {
+			swapDataDB(t, s)
 		}
 		var mu sync.Mutex
 		record(runConc(v.name, perReader*readers, readers, func(i int) error {
@@ -428,6 +479,90 @@ func TestWriteBurstReport(t *testing.T) {
 			defer mu.Unlock()
 			return s.SetReadPosition(fmt.Sprintf("usr_reader%02d", r), fmt.Sprintf("dev_reader%02d", r), roomForReceipts, "", "", msgID(m))
 		}))
+	}
+
+	// (C7, the cap plus an outer Go write mutex on data.db, was likewise
+	// measured on 2026-11-08 and retired: C3 capped is now that shape.)
+
+	// ---- D. mixed: writers and history readers on ONE room file ----
+	// The cost of the one-connection handle is that a read waits behind
+	// writes to the same file (WAL would let them overlap). D1 measures it:
+	// 16 writers insert N messages while 4 readers page history through the
+	// production pager (getHistoryBefore, a 100-row page below a cursor) as
+	// fast as they can, with the two populations reported separately. Each
+	// file is seeded with 300 rows so the cursor resolves and a full page
+	// exists before the first write. Four handle shapes: the production one
+	// (a pool of handleConns, serialised writes), the same with a single
+	// connection, the raw pre-Part-1 pool, and a pool of 4 with serialised
+	// writes — the measurement that chose handleConns.
+	for _, mode := range []struct {
+		label     string
+		serialize bool
+		pool      int // 0 = leave as openBenchDBWith set it
+	}{
+		{"capped (production)", true, 0},
+		{"pool 1 + write mutex", true, 1},
+		{"uncapped", false, 0},
+		{"pool 4 + write mutex", true, 4},
+	} {
+		files := newRoomFiles(t, filepath.Join(dir, "d-"+strings.NewReplacer(" ", "_", "(", "", ")", "").Replace(mode.label)), 1)
+		db := openBenchDBWith(t, files[0], mode.serialize)
+		if mode.pool > 0 {
+			db.SetMaxOpenConns(mode.pool)
+			db.SetMaxIdleConns(mode.pool)
+		}
+		defer db.Close()
+		capLabelFor := func() string { return mode.label }
+		const seed = 300
+		for i := 0; i < seed; i++ {
+			if _, err := insertMessage(db, benchMsg(1_000_000+i)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cursor := benchMsg(1_000_000 + seed - 50).ID // 250 rows below it: a full page
+		const historyReaders = 4
+		stop := make(chan struct{})
+		readerLats := make([][]time.Duration, historyReaders)
+		readerErrs := make([]error, historyReaders)
+		var rwg sync.WaitGroup
+		for r := 0; r < historyReaders; r++ {
+			rwg.Add(1)
+			go func(r int) {
+				defer rwg.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					t0 := time.Now()
+					msgs, _, ok, err := getHistoryBefore(db, cursor, "", nil, 100)
+					if err != nil || !ok || len(msgs) != 100 {
+						readerErrs[r] = fmt.Errorf("history reader %d: err=%v ok=%v rows=%d", r, err, ok, len(msgs))
+						return
+					}
+					readerLats[r] = append(readerLats[r], time.Since(t0))
+				}
+			}(r)
+		}
+		w, err := runConc(fmt.Sprintf("D1w room insert | FULL | %d writers + %d history readers | %s", writers, historyReaders, capLabelFor()), n, writers, func(i int) error {
+			_, err := insertMessage(db, benchMsg(i))
+			return err
+		})
+		close(stop)
+		rwg.Wait()
+		record(w, err)
+		for _, e := range readerErrs {
+			if e != nil {
+				t.Fatal(e)
+			}
+		}
+		rr := benchResult{name: fmt.Sprintf("D1r history page(100) | %d readers while %d write | %s", historyReaders, writers, capLabelFor()), total: w.total}
+		for _, l := range readerLats {
+			rr.lats = append(rr.lats, l...)
+		}
+		rr.ops = len(rr.lats)
+		record(rr, nil)
 	}
 
 	t.Log("---- summary ----")

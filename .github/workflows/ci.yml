@@ -16,6 +16,8 @@ jobs:
       - run: go build ./...
       - name: Sleep Guard
         run: bash .github/scripts/check_test_sleeps.sh
+      - name: Nested DB Guard
+        run: bash .github/scripts/check_nested_db_use.sh
       - name: Test (race)
         run: go test -race -count=1 -p 1 ./...
       - name: Test (short)
