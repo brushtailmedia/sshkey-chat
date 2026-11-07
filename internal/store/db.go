@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"sync"
+	"time"
 )
 
 // handleConns is the connection cap on every handle the store opens: one
@@ -18,6 +19,14 @@ import (
 // mutex below admits one writer at a time, so SQLite's busy handler is
 // never reached in-process.
 const handleConns = 2
+
+// handleIdleTime is how long a pooled connection may sit unused before
+// database/sql closes it. Each open connection holds the database, its
+// write-ahead log and the shared-memory file, so an idle room costs six
+// descriptors for as long as the process lives without this; with it an
+// idle room's connections close and reopen on demand, with every DSN
+// pragma re-applied by the driver. A variable so tests can shorten it.
+var handleIdleTime = 5 * time.Minute
 
 // DB is the store's handle to one SQLite file (store-write Part 1,
 // 2026-11-08). It embeds *sql.DB, so every read method is the standard

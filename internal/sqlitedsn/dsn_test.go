@@ -404,3 +404,96 @@ func TestWritable_TransactionsBeginImmediate(t *testing.T) {
 	_ = ptx.Rollback()
 	_ = dtx.Rollback()
 }
+
+// journal_size_limit is per-connection too: prove the DSN form reaches a
+// second pooled connection and carries the intended value.
+func TestWritable_JournalSizeLimitOnMultipleConnections(t *testing.T) {
+	dsn, err := Writable(filepath.Join(t.TempDir(), "w.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := openProbe(t, dsn)
+	ctx := context.Background()
+	c1, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c1.Close()
+	c2, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	for i, c := range []*sql.Conn{c1, c2} {
+		var limit int64
+		if err := c.QueryRowContext(ctx, "PRAGMA journal_size_limit").Scan(&limit); err != nil {
+			t.Fatalf("conn %d: %v", i, err)
+		}
+		if limit != journalSizeLimitBytes {
+			t.Errorf("conn %d journal_size_limit = %d, want %d", i, limit, journalSizeLimitBytes)
+		}
+	}
+}
+
+// With the limit set, a grown write-ahead log is truncated back under it
+// when the log is next reset — the first write after a checkpoint has
+// copied every frame back — where SQLite would otherwise keep the grown
+// file for reuse. Uses a 64 KiB limit on a probe DSN so a small write
+// grows past it.
+func TestWritable_JournalSizeLimitTruncatesTheLogAfterCheckpoint(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "w.db")
+	dsn, err := Writable(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const limit = 64 * 1024
+	dsn = strings.Replace(dsn, "journal_size_limit%28"+itoa(journalSizeLimitBytes)+"%29", "journal_size_limit%28"+itoa(limit)+"%29", 1)
+	if !strings.Contains(dsn, "journal_size_limit%28"+itoa(limit)+"%29") {
+		t.Fatalf("test setup: could not lower the limit in %q", dsn)
+	}
+	db := openProbe(t, dsn)
+	if _, err := db.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY, body TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Repeat("x", 4096)
+	for i := 0; i < 200; i++ { // ~800 KiB through the log, well past 64 KiB
+		if _, err := db.Exec(`INSERT INTO t (body) VALUES (?)`, body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wal := path + "-wal"
+	grown, err := os.Stat(wal)
+	if err != nil {
+		t.Fatalf("stat wal: %v", err)
+	}
+	if grown.Size() <= limit {
+		t.Fatalf("test setup: wal only %d bytes, want > %d", grown.Size(), limit)
+	}
+	if _, err := db.Exec(`PRAGMA wal_checkpoint(PASSIVE)`); err != nil {
+		t.Fatal(err)
+	}
+	// The truncation happens on the reset, which the next writer performs
+	// once the checkpoint has backfilled the whole log.
+	if _, err := db.Exec(`INSERT INTO t (body) VALUES (?)`, "after"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(wal)
+	if err != nil {
+		t.Fatalf("stat wal after checkpoint and reset: %v", err)
+	}
+	if after.Size() > limit {
+		t.Fatalf("wal is %d bytes after a checkpoint and reset, want <= the %d limit", after.Size(), limit)
+	}
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b []byte
+	for n > 0 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+		n /= 10
+	}
+	return string(b)
+}

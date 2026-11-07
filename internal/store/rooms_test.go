@@ -353,11 +353,17 @@ func TestGetRoomMemberIDsByRoomID_DeterministicOrder(t *testing.T) {
 
 	// Insert out of alphabetical order. joined_at has second granularity,
 	// so same-second inserts tie-break by user_id — the result must be
-	// sorted by user_id within the tie.
+	// sorted by user_id within the tie. The inserts are pinned to one
+	// joined_at afterwards: left to the clock, three inserts straddling a
+	// second boundary (seen once under a parallel race run) would make the
+	// order follow insertion and fail the test for a reason it is not about.
 	for _, uid := range []string{"usr_charlie", "usr_alice", "usr_bob"} {
 		if err := st.AddRoomMember(roomID, uid, 0); err != nil {
 			t.Fatalf("add %s: %v", uid, err)
 		}
+	}
+	if _, err := st.roomsDB.Exec(`UPDATE room_members SET joined_at = ? WHERE room_id = ?`, "2026-01-01 00:00:00", roomID); err != nil {
+		t.Fatalf("pin joined_at: %v", err)
 	}
 
 	first := st.GetRoomMemberIDsByRoomID(roomID)

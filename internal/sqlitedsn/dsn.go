@@ -32,6 +32,10 @@ import (
 // applied it, so contended writers failed immediately instead of waiting.
 const busyTimeoutMS = 5000
 
+// journalSizeLimitBytes is the write-ahead log size a completed checkpoint
+// truncates back to (see Writable).
+const journalSizeLimitBytes = 64 * 1024 * 1024
+
 // Writable builds a read-write DSN: WAL journal mode, a 5s busy timeout and
 // foreign-key enforcement, all applied to every connection the pool opens,
 // plus immediate write transactions.
@@ -51,11 +55,20 @@ const busyTimeoutMS = 5000
 // mutex already admits one writer at a time; this covers the other
 // processes that take the write lock — sshkey-ctl and the backup package.
 // The store opens no read-only transactions, so there is nothing to lose.
+//
+// journal_size_limit caps the write-ahead log file after a checkpoint. A
+// checkpoint cannot reset the log past a reader's snapshot, so under steady
+// traffic the log can grow with uptime and SQLite reuses the grown file
+// rather than shrinking it; with the limit set, the next checkpoint that
+// completes truncates it back. The value is 64 MiB: large enough never to
+// matter at chat rates, small enough that a server that has been up for
+// months is not sitting on a log the size of its history.
 func Writable(path string) (string, error) {
 	q := url.Values{}
 	q.Add("_pragma", "journal_mode(WAL)")
 	q.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", busyTimeoutMS))
 	q.Add("_pragma", "foreign_keys(1)")
+	q.Add("_pragma", fmt.Sprintf("journal_size_limit(%d)", journalSizeLimitBytes))
 	q.Set("_txlock", "immediate")
 	return buildFileURI(path, q)
 }

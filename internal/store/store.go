@@ -245,6 +245,10 @@ func (s *Store) openDB(name string) (*DB, error) {
 	// busy_timeout, which is right for rare, separate-process access.
 	db.SetMaxOpenConns(handleConns)
 	db.SetMaxIdleConns(handleConns)
+	// Idle connections close after handleIdleTime (db.go) so an idle room
+	// does not hold its descriptors for the life of the process; the DSN
+	// re-applies every pragma when one reopens.
+	db.SetConnMaxIdleTime(handleIdleTime)
 	// Startup assertion that WAL engaged (see doc comment).
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		db.Close()
