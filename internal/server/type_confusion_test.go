@@ -3,11 +3,13 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestHandleSend_RoomFieldIntegerRejectedAsMalformed(t *testing.T) {
@@ -80,7 +82,7 @@ func TestHandleSendGroup_WrappedKeysNonMemberKeyNamesRejected(t *testing.T) {
 	raw := json.RawMessage(`{
 		"type":"send_group",
 		"group":"` + groupID + `",
-		"wrapped_keys":{"☃":"abc","hello world":"def"},
+		"wrapped_keys":{"☃":"` + testutil.WrappedKey("abc") + `","hello world":"` + testutil.WrappedKey("def") + `"},
 		"payload":"p",
 		"signature":"s"
 	}`)
@@ -119,7 +121,7 @@ func TestHandleSendDM_WrappedKeysInvalidBase64ValuesStillAccepted(t *testing.T) 
 	raw := json.RawMessage(`{
 		"type":"send_dm",
 		"dm":"` + dm.ID + `",
-		"wrapped_keys":{"alice":"not-base64!@#","bob":"also_not_base64"},
+		"wrapped_keys":{"alice":"` + strings.Repeat("not-base64!@#", 10) + `","bob":"` + strings.Repeat("also_not_base64", 8) + `"},
 		"payload":"p",
 		"signature":"s"
 	}`)

@@ -18,6 +18,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestHandleReact_RejectsTombstonedRoomMessage verifies that reacting
@@ -92,7 +93,7 @@ func TestHandleReact_RejectsTombstonedGroupMessage(t *testing.T) {
 		TS:          100,
 		Payload:     "p",
 		Signature:   "s",
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -110,7 +111,7 @@ func TestHandleReact_RejectsTombstonedGroupMessage(t *testing.T) {
 		ID:          "msg_grt",
 		Group:       groupID,
 		Payload:     "enc",
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 	})
 	s.handleReact(bob.Client, raw)
 
@@ -143,7 +144,7 @@ func TestHandleReact_RejectsTombstonedDMMessage(t *testing.T) {
 		TS:          100,
 		Payload:     "p",
 		Signature:   "s",
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -161,7 +162,7 @@ func TestHandleReact_RejectsTombstonedDMMessage(t *testing.T) {
 		ID:          "msg_drt",
 		DM:          dmID,
 		Payload:     "enc",
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 	})
 	s.handleReact(bob.Client, raw)
 

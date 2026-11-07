@@ -7,7 +7,11 @@ package server
 // upload_start path did. This test exercises one send handler per
 // context type + one edit handler to confirm the pattern is uniformly
 // wired (spot-check across the 6 sites: handleSend, handleSendGroup,
-// handleSendDM, handleEdit, handleEditGroup, handleEditDM).
+// handleSendDM, handleEdit, handleEditGroup, handleEditDM). The two group
+// verbs check the raw frame against the group frame budget (body cap plus
+// a wrapped-key allowance per possible member) rather than the bare 16 KB,
+// so their oversized frame is sized from that budget; frame_budget_test.go
+// covers the body check that holds the parsed payload to 16 KB.
 
 import (
 	"bytes"
@@ -18,21 +22,30 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 )
 
-// oversizedRaw returns a raw JSON blob that's guaranteed to exceed
-// maxPayloadBytes, regardless of what specific verb struct it's
-// intended to decode as. The handler's first check is a raw byte
-// length, so we don't need a well-formed envelope — we just need
-// enough bytes.
-func oversizedRaw() json.RawMessage {
+// oversizedRawOf returns a raw JSON blob of n+1 bytes, regardless of what
+// specific verb struct it's intended to decode as. The handler's first
+// check is a raw byte length, so we don't need a well-formed envelope —
+// we just need enough bytes.
+func oversizedRawOf(n int) json.RawMessage {
 	var buf bytes.Buffer
 	buf.WriteByte('"')
-	// 17 KB of garbage, wrapped in quotes for parser sanity. The
-	// handler checks len(raw) > maxPayloadBytes BEFORE any parse.
-	for i := 0; i < 17*1024; i++ {
+	// Garbage wrapped in quotes for parser sanity. The handler checks
+	// len(raw) against its cap BEFORE any parse.
+	for i := 0; i < n-1; i++ {
 		buf.WriteByte('a')
 	}
 	buf.WriteByte('"')
 	return json.RawMessage(buf.Bytes())
+}
+
+// oversizedRaw is one byte over the bare 16 KB frame cap.
+func oversizedRaw() json.RawMessage {
+	return oversizedRawOf(maxPayloadBytes)
+}
+
+// oversizedGroupRaw is one byte over the group frame budget.
+func oversizedGroupRaw(s *Server) json.RawMessage {
+	return oversizedRawOf(s.groupFrameBudget())
 }
 
 func TestHandleSend_OversizedBodyFiresCounter(t *testing.T) {
@@ -58,7 +71,7 @@ func TestHandleSend_OversizedBodyFiresCounter(t *testing.T) {
 func TestHandleSendGroup_OversizedBodyFiresCounter(t *testing.T) {
 	s := newTestServer(t)
 	alice := testClientFor("alice", "dev_alice_sendgroup_oversized")
-	s.handleSendGroup(alice.Client, oversizedRaw())
+	s.handleSendGroup(alice.Client, oversizedGroupRaw(s))
 
 	if got := s.counters.Get(counters.SignalOversizedBody, "dev_alice_sendgroup_oversized"); got != 1 {
 		t.Errorf("SignalOversizedBody on handleSendGroup = %d, want 1", got)
@@ -88,7 +101,7 @@ func TestHandleEdit_OversizedBodyFiresCounter(t *testing.T) {
 func TestHandleEditGroup_OversizedBodyFiresCounter(t *testing.T) {
 	s := newTestServer(t)
 	alice := testClientFor("alice", "dev_alice_editgroup_oversized")
-	s.handleEditGroup(alice.Client, oversizedRaw())
+	s.handleEditGroup(alice.Client, oversizedGroupRaw(s))
 
 	if got := s.counters.Get(counters.SignalOversizedBody, "dev_alice_editgroup_oversized"); got != 1 {
 		t.Errorf("SignalOversizedBody on handleEditGroup = %d, want 1", got)

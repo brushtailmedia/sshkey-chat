@@ -6,6 +6,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestHandleSend_DuplicatePayloadCreatesDistinctIDs(t *testing.T) {
@@ -78,7 +79,7 @@ func TestHandleSendGroup_DuplicatePayloadCreatesDistinctIDs(t *testing.T) {
 	raw, _ := json.Marshal(protocol.SendGroup{
 		Type:        "send_group",
 		Group:       groupID,
-		WrappedKeys: map[string]string{"alice": "ka", "bob": "kb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("ka"), "bob": testutil.WrappedKey("kb")},
 		Payload:     "same_group_payload",
 		Signature:   "same_group_sig",
 	})
@@ -131,7 +132,7 @@ func TestHandleSendDM_DuplicatePayloadCreatesDistinctIDs(t *testing.T) {
 	raw, _ := json.Marshal(protocol.SendDM{
 		Type:        "send_dm",
 		DM:          dm.ID,
-		WrappedKeys: map[string]string{"alice": "ka", "bob": "kb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("ka"), "bob": testutil.WrappedKey("kb")},
 		Payload:     "same_dm_payload",
 		Signature:   "same_dm_sig",
 	})

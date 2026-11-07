@@ -270,15 +270,31 @@ max_per_user = 10
 # ----------------------------------------------------------------------
 
 [groups]
-# Phase 17 Step 4d: hard cap on group-DM membership. Enforced at
-# create_group and add_to_group; also the upper bound on the
-# wrapped_keys envelope size the server will accept. Default 150
-# matches the pre-Phase-17 hardcoded value and PROTOCOL.md
-# documentation. At 150 members, each send carries ~12KB of per-message
-# wrapped-key material and ~15ms of per-member crypto. Smaller
-# deployments can tune down; larger deployments with hardware to match
-# can tune up.
-max_members = 150
+# Hard cap on group-DM membership. Enforced at create_group and
+# add_to_group; also the upper bound on the wrapped_keys envelope size the
+# server will accept, and the member count the group frame budget is sized
+# for (16 KB body + 160 bytes per possible member). Default 100: a group is
+# a conversation where everyone is addressed by name, and 100 is the
+# product's size rule for every per-person signal (typing in rooms, below,
+# uses the same number). At 100 members each send carries ~15 KB of
+# per-message wrapped-key material and ~10 ms of per-member crypto.
+# Advertised to clients in server_hello. Smaller deployments can tune
+# down; larger deployments with hardware to match can tune up.
+max_members = 100
+
+# ----------------------------------------------------------------------
+# [rooms] — room policy
+# ----------------------------------------------------------------------
+
+[rooms]
+# Typing indicators are relayed in a room only while it has this many
+# members or fewer; above it the server drops typing frames silently (a
+# typing line names a person, and in a room of a thousand it is a
+# thousand-way fan-out nobody reads). Default 100 — the same size rule as
+# group membership. 0 turns typing off in every room; a negative value is
+# a config error. Groups and 1:1 DMs are not affected. Advertised to
+# clients in server_hello; hot-reloadable.
+typing_max_members = 100
 
 # ----------------------------------------------------------------------
 # [rate_limits] — per-user traffic shaping + connection hardening

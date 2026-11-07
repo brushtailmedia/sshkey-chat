@@ -18,6 +18,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestHandleEdit_PrivacyResponsesIdentical locks in the byte-identical
@@ -366,7 +367,7 @@ func TestHandleEditGroup_PrivacyResponsesIdentical(t *testing.T) {
 	// Insert alice's message.
 	if _, err := s.store.InsertGroupMessage(groupPriv, store.StoredMessage{
 		ID: "msg_alice_g", Sender: "alice", TS: 1000, Payload: "p", Signature: "s",
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -375,7 +376,7 @@ func TestHandleEditGroup_PrivacyResponsesIdentical(t *testing.T) {
 	probe1 := testClientFor("alice", "dev_alice_1")
 	raw1, _ := json.Marshal(protocol.EditGroup{
 		Type: "edit_group", ID: "msg_x", Group: store.GenerateID("group_"),
-		WrappedKeys: map[string]string{"alice": "wa"}, Payload: "p", Signature: "s",
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa")}, Payload: "p", Signature: "s",
 	})
 	s.handleEditGroup(probe1.Client, raw1)
 
@@ -383,7 +384,7 @@ func TestHandleEditGroup_PrivacyResponsesIdentical(t *testing.T) {
 	probe2 := testClientFor("carol", "dev_carol_1")
 	raw2, _ := json.Marshal(protocol.EditGroup{
 		Type: "edit_group", ID: "msg_alice_g", Group: groupPriv,
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"}, Payload: "p", Signature: "s",
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
 	})
 	s.handleEditGroup(probe2.Client, raw2)
 
@@ -391,7 +392,7 @@ func TestHandleEditGroup_PrivacyResponsesIdentical(t *testing.T) {
 	probe3 := testClientFor("bob", "dev_bob_1")
 	raw3, _ := json.Marshal(protocol.EditGroup{
 		Type: "edit_group", ID: "msg_nonexistent", Group: groupPriv,
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"}, Payload: "p", Signature: "s",
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
 	})
 	s.handleEditGroup(probe3.Client, raw3)
 
@@ -399,7 +400,7 @@ func TestHandleEditGroup_PrivacyResponsesIdentical(t *testing.T) {
 	probe4 := testClientFor("bob", "dev_bob_2")
 	raw4, _ := json.Marshal(protocol.EditGroup{
 		Type: "edit_group", ID: "msg_alice_g", Group: groupPriv,
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"}, Payload: "p", Signature: "s",
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
 	})
 	s.handleEditGroup(probe4.Client, raw4)
 
@@ -432,7 +433,7 @@ func TestHandleEditGroup_HappyPath(t *testing.T) {
 	}
 	if _, err := s.store.InsertGroupMessage(groupHappy, store.StoredMessage{
 		ID: "msg_gh", Sender: "alice", TS: 500, Payload: "orig", Signature: "orig_sig",
-		WrappedKeys: map[string]string{"alice": "v1a", "bob": "v1b"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("v1a"), "bob": testutil.WrappedKey("v1b")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -444,7 +445,7 @@ func TestHandleEditGroup_HappyPath(t *testing.T) {
 
 	raw, _ := json.Marshal(protocol.EditGroup{
 		Type: "edit_group", ID: "msg_gh", Group: groupHappy,
-		WrappedKeys: map[string]string{"alice": "v2a", "bob": "v2b"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("v2a"), "bob": testutil.WrappedKey("v2b")},
 		Payload:     "new_payload", Signature: "new_sig",
 	})
 	s.handleEditGroup(alice.Client, raw)
@@ -456,7 +457,7 @@ func TestHandleEditGroup_HappyPath(t *testing.T) {
 	if got.Payload != "new_payload" {
 		t.Errorf("payload = %q", got.Payload)
 	}
-	if got.WrappedKeys["alice"] != "v2a" {
+	if got.WrappedKeys["alice"] != testutil.WrappedKey("v2a") {
 		t.Errorf("alice key not rewrapped: %q", got.WrappedKeys["alice"])
 	}
 	if got.EditedAt == 0 {
@@ -479,7 +480,7 @@ func TestHandleEditDM_PrivacyResponsesIdentical(t *testing.T) {
 	dmID := dm.ID
 	if _, err := s.store.InsertDMMessage(dmID, store.StoredMessage{
 		ID: "msg_dm_alice", Sender: "alice", TS: time.Now().Unix(), Payload: "p", Signature: "s",
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -488,7 +489,7 @@ func TestHandleEditDM_PrivacyResponsesIdentical(t *testing.T) {
 	probe1 := testClientFor("alice", "dev_alice_1")
 	raw1, _ := json.Marshal(protocol.EditDM{
 		Type: "edit_dm", ID: "msg_x", DM: store.GenerateID("dm_"),
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"}, Payload: "p", Signature: "s",
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
 	})
 	s.handleEditDM(probe1.Client, raw1)
 
@@ -496,7 +497,7 @@ func TestHandleEditDM_PrivacyResponsesIdentical(t *testing.T) {
 	probe2 := testClientFor("carol", "dev_carol_1")
 	raw2, _ := json.Marshal(protocol.EditDM{
 		Type: "edit_dm", ID: "msg_dm_alice", DM: dmID,
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"}, Payload: "p", Signature: "s",
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
 	})
 	s.handleEditDM(probe2.Client, raw2)
 
@@ -504,7 +505,7 @@ func TestHandleEditDM_PrivacyResponsesIdentical(t *testing.T) {
 	probe3 := testClientFor("bob", "dev_bob_1")
 	raw3, _ := json.Marshal(protocol.EditDM{
 		Type: "edit_dm", ID: "msg_nonexistent", DM: dmID,
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"}, Payload: "p", Signature: "s",
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
 	})
 	s.handleEditDM(probe3.Client, raw3)
 
@@ -512,7 +513,7 @@ func TestHandleEditDM_PrivacyResponsesIdentical(t *testing.T) {
 	probe4 := testClientFor("bob", "dev_bob_2")
 	raw4, _ := json.Marshal(protocol.EditDM{
 		Type: "edit_dm", ID: "msg_dm_alice", DM: dmID,
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"}, Payload: "p", Signature: "s",
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
 	})
 	s.handleEditDM(probe4.Client, raw4)
 
@@ -542,13 +543,13 @@ func TestHandleEditGroup_NotMostRecent_ReturnsSpecificError(t *testing.T) {
 	}
 	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "msg_old", Sender: "alice", TS: 100, Payload: "old", Signature: "s",
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert old: %v", err)
 	}
 	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "msg_new", Sender: "alice", TS: 200, Payload: "new", Signature: "s",
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert new: %v", err)
 	}
@@ -558,7 +559,7 @@ func TestHandleEditGroup_NotMostRecent_ReturnsSpecificError(t *testing.T) {
 		Type:        "edit_group",
 		ID:          "msg_old",
 		Group:       groupID,
-		WrappedKeys: map[string]string{"alice": "wa2", "bob": "wb2"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa2"), "bob": testutil.WrappedKey("wb2")},
 		Payload:     "edited",
 		Signature:   "sig2",
 	})
@@ -589,7 +590,7 @@ func TestHandleEditGroup_DeletedMessage_CollapsedToUnknown(t *testing.T) {
 		Type:        "edit_group",
 		ID:          "msg_missing",
 		Group:       groupID,
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 		Payload:     "p",
 		Signature:   "s",
 	})
@@ -601,7 +602,7 @@ func TestHandleEditGroup_DeletedMessage_CollapsedToUnknown(t *testing.T) {
 
 	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "msg_deleted", Sender: "alice", TS: 123, Payload: "body", Signature: "sig",
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -614,7 +615,7 @@ func TestHandleEditGroup_DeletedMessage_CollapsedToUnknown(t *testing.T) {
 		Type:        "edit_group",
 		ID:          "msg_deleted",
 		Group:       groupID,
-		WrappedKeys: map[string]string{"alice": "wa2", "bob": "wb2"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa2"), "bob": testutil.WrappedKey("wb2")},
 		Payload:     "new",
 		Signature:   "sig2",
 	})
@@ -637,7 +638,7 @@ func TestHandleEditGroup_ClearsReactions(t *testing.T) {
 	}
 	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "msg_group_rx", Sender: "alice", TS: 100, Payload: "body", Signature: "sig",
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -655,7 +656,7 @@ func TestHandleEditGroup_ClearsReactions(t *testing.T) {
 		Type:        "edit_group",
 		ID:          "msg_group_rx",
 		Group:       groupID,
-		WrappedKeys: map[string]string{"alice": "wa2", "bob": "wb2"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa2"), "bob": testutil.WrappedKey("wb2")},
 		Payload:     "new",
 		Signature:   "newsig",
 	})
@@ -679,7 +680,7 @@ func TestHandleEditGroup_InvalidWrappedKeys(t *testing.T) {
 	}
 	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "msg_group_keys", Sender: "alice", TS: 100, Payload: "body", Signature: "sig",
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -689,7 +690,7 @@ func TestHandleEditGroup_InvalidWrappedKeys(t *testing.T) {
 		Type:        "edit_group",
 		ID:          "msg_group_keys",
 		Group:       groupID,
-		WrappedKeys: map[string]string{"alice": "only_one"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("only_one")},
 		Payload:     "new",
 		Signature:   "newsig",
 	})
@@ -717,7 +718,7 @@ func TestHandleEditDM_HappyPath(t *testing.T) {
 	}
 	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
 		ID: "msg_dm_happy", Sender: "alice", TS: 500, Payload: "orig", Signature: "sig",
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -733,7 +734,7 @@ func TestHandleEditDM_HappyPath(t *testing.T) {
 		Type:        "edit_dm",
 		ID:          "msg_dm_happy",
 		DM:          dm.ID,
-		WrappedKeys: map[string]string{"alice": "wa2", "bob": "wb2"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa2"), "bob": testutil.WrappedKey("wb2")},
 		Payload:     "new_payload",
 		Signature:   "new_sig",
 	})
@@ -746,7 +747,7 @@ func TestHandleEditDM_HappyPath(t *testing.T) {
 	if got.Payload != "new_payload" {
 		t.Fatalf("payload = %q, want new_payload", got.Payload)
 	}
-	if got.WrappedKeys["alice"] != "wa2" || got.WrappedKeys["bob"] != "wb2" {
+	if got.WrappedKeys["alice"] != testutil.WrappedKey("wa2") || got.WrappedKeys["bob"] != testutil.WrappedKey("wb2") {
 		t.Fatalf("wrapped keys not updated: %+v", got.WrappedKeys)
 	}
 	if got.EditedAt == 0 {
@@ -778,13 +779,13 @@ func TestHandleEditDM_NotMostRecent(t *testing.T) {
 	}
 	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
 		ID: "msg_dm_old", Sender: "alice", TS: 100, Payload: "old", Signature: "s",
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert old: %v", err)
 	}
 	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
 		ID: "msg_dm_new", Sender: "alice", TS: 200, Payload: "new", Signature: "s",
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert new: %v", err)
 	}
@@ -794,7 +795,7 @@ func TestHandleEditDM_NotMostRecent(t *testing.T) {
 		Type:        "edit_dm",
 		ID:          "msg_dm_old",
 		DM:          dm.ID,
-		WrappedKeys: map[string]string{"alice": "wa2", "bob": "wb2"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa2"), "bob": testutil.WrappedKey("wb2")},
 		Payload:     "edited",
 		Signature:   "sig2",
 	})
@@ -825,7 +826,7 @@ func TestHandleEditDM_DeletedMessage_CollapsedToUnknown(t *testing.T) {
 		Type:        "edit_dm",
 		ID:          "msg_missing",
 		DM:          dm.ID,
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 		Payload:     "p",
 		Signature:   "s",
 	})
@@ -837,7 +838,7 @@ func TestHandleEditDM_DeletedMessage_CollapsedToUnknown(t *testing.T) {
 
 	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
 		ID: "msg_dm_deleted", Sender: "alice", TS: 123, Payload: "body", Signature: "sig",
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -850,7 +851,7 @@ func TestHandleEditDM_DeletedMessage_CollapsedToUnknown(t *testing.T) {
 		Type:        "edit_dm",
 		ID:          "msg_dm_deleted",
 		DM:          dm.ID,
-		WrappedKeys: map[string]string{"alice": "wa2", "bob": "wb2"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa2"), "bob": testutil.WrappedKey("wb2")},
 		Payload:     "new",
 		Signature:   "sig2",
 	})
@@ -873,7 +874,7 @@ func TestHandleEditDM_ClearsReactions(t *testing.T) {
 	}
 	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
 		ID: "msg_dm_rx", Sender: "alice", TS: 100, Payload: "body", Signature: "sig",
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -891,7 +892,7 @@ func TestHandleEditDM_ClearsReactions(t *testing.T) {
 		Type:        "edit_dm",
 		ID:          "msg_dm_rx",
 		DM:          dm.ID,
-		WrappedKeys: map[string]string{"alice": "wa2", "bob": "wb2"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa2"), "bob": testutil.WrappedKey("wb2")},
 		Payload:     "new",
 		Signature:   "newsig",
 	})
@@ -915,7 +916,7 @@ func TestHandleEditDM_FrozenCallerRejected(t *testing.T) {
 	}
 	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
 		ID: "msg_dm_frozen", Sender: "alice", TS: 100, Payload: "body", Signature: "sig",
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -926,7 +927,7 @@ func TestHandleEditDM_FrozenCallerRejected(t *testing.T) {
 		Type:        "edit_dm",
 		ID:          "msg_any",
 		DM:          store.GenerateID("dm_"),
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 		Payload:     "p",
 		Signature:   "s",
 	})
@@ -945,7 +946,7 @@ func TestHandleEditDM_FrozenCallerRejected(t *testing.T) {
 		Type:        "edit_dm",
 		ID:          "msg_dm_frozen",
 		DM:          dm.ID,
-		WrappedKeys: map[string]string{"alice": "wa2", "bob": "wb2"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa2"), "bob": testutil.WrappedKey("wb2")},
 		Payload:     "new",
 		Signature:   "newsig",
 	})
@@ -991,7 +992,7 @@ func editOutcome(t *testing.T, cc *captureClient, handle func()) string {
 // all three verbs and every attempt counts against it.
 func TestHandleEdit_TimeWindow_BoundaryInAllContexts(t *testing.T) {
 	const sent = 1_000_000
-	keys := map[string]string{"alice": "wa2", "bob": "wb2"}
+	keys := map[string]string{"alice": testutil.WrappedKey("wa2"), "bob": testutil.WrappedKey("wb2")}
 	for _, ctx := range []string{"room", "group", "dm"} {
 		s := newTestServer(t)
 		alice := testClientFor("alice", "dev_alice_window_"+ctx)
@@ -1015,7 +1016,7 @@ func TestHandleEdit_TimeWindow_BoundaryInAllContexts(t *testing.T) {
 			if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "window"); err != nil {
 				t.Fatalf("CreateGroup: %v", err)
 			}
-			if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{ID: "msg_g", Sender: "alice", TS: sent, Payload: "p", Signature: "s", WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"}}); err != nil {
+			if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{ID: "msg_g", Sender: "alice", TS: sent, Payload: "p", Signature: "s", WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")}}); err != nil {
 				t.Fatal(err)
 			}
 			attempt = func() {
@@ -1027,7 +1028,7 @@ func TestHandleEdit_TimeWindow_BoundaryInAllContexts(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CreateOrGetDirectMessage: %v", err)
 			}
-			if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{ID: "msg_d", Sender: "alice", TS: sent, Payload: "p", Signature: "s", WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"}}); err != nil {
+			if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{ID: "msg_d", Sender: "alice", TS: sent, Payload: "p", Signature: "s", WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")}}); err != nil {
 				t.Fatal(err)
 			}
 			attempt = func() {

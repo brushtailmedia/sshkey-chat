@@ -17,6 +17,7 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func waitForClientDisconnect(t *testing.T, tc *testClient, timeout time.Duration) {
@@ -317,8 +318,8 @@ func TestAutoRevoke_LaunchGateRepresentativeFlow_NoMisbehaviorSignals(t *testing
 		Type:  "send_group",
 		Group: groupID,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": "wg_alice",
-			"usr_bob_test":   "wg_bob",
+			"usr_alice_test": testutil.WrappedKey("wg_alice"),
+			"usr_bob_test":   testutil.WrappedKey("wg_bob"),
 		},
 		Payload:   "group_payload",
 		Signature: "group_sig",
@@ -341,8 +342,8 @@ func TestAutoRevoke_LaunchGateRepresentativeFlow_NoMisbehaviorSignals(t *testing
 		ID:    groupMsg.ID,
 		Group: groupID,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": "wg_alice_e",
-			"usr_bob_test":   "wg_bob_e",
+			"usr_alice_test": testutil.WrappedKey("wg_alice_e"),
+			"usr_bob_test":   testutil.WrappedKey("wg_bob_e"),
 		},
 		Payload:   "group_payload_edit",
 		Signature: "group_sig_edit",
@@ -381,8 +382,8 @@ func TestAutoRevoke_LaunchGateRepresentativeFlow_NoMisbehaviorSignals(t *testing
 		Type: "send_dm",
 		DM:   createdDM.DM,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": "wdm_alice",
-			"usr_bob_test":   "wdm_bob",
+			"usr_alice_test": testutil.WrappedKey("wdm_alice"),
+			"usr_bob_test":   testutil.WrappedKey("wdm_bob"),
 		},
 		Payload:   "dm_payload",
 		Signature: "dm_sig",
@@ -406,8 +407,8 @@ func TestAutoRevoke_LaunchGateRepresentativeFlow_NoMisbehaviorSignals(t *testing
 		ID:   dmMsg.ID,
 		DM:   createdDM.DM,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": "wdm_alice_e",
-			"usr_bob_test":   "wdm_bob_e",
+			"usr_alice_test": testutil.WrappedKey("wdm_alice_e"),
+			"usr_bob_test":   testutil.WrappedKey("wdm_bob_e"),
 		},
 		Payload:   "dm_payload_edit",
 		Signature: "dm_sig_edit",

@@ -45,12 +45,14 @@ func (s *Server) handleSession(userID string, conn *ssh.ServerConn, ch ssh.Chann
 	enc := newSafeEncoder(protocol.NewEncoder(ch))
 	dec := protocol.NewDecoder(ch)
 
-	// Step 1: Send server_hello
+	// Step 1: Send server_hello — with this server's size rules, so the
+	// client never hard-codes a limit the operator may have changed.
 	err := enc.Encode(protocol.ServerHello{
 		Type:     "server_hello",
 		Protocol: "sshkey-chat",
 		Version:  1,
 		ServerID: s.cfg.Server.Server.Bind,
+		Limits:   s.serverLimits(),
 	})
 	if err != nil {
 		s.logger.Error("failed to send server_hello", "user", userID, "error", err)
@@ -362,6 +364,7 @@ func (s *Server) sendRoomList(c *Client) {
 			Name:    displayName,
 			Topic:   topic,
 			Members: members,
+			Typing:  s.roomTypingEnabled(len(members)), // from the list already fetched
 		})
 	}
 
@@ -1030,15 +1033,13 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 
 // handleSendGroup processes a group DM message.
 func (s *Server) handleSendGroup(c *Client, raw json.RawMessage) {
-	if len(raw) > maxPayloadBytes {
-		// Phase 17 Step 4c gap-closure: count Channel 1 oversized-body
-		// rejections so Phase 17b sees density across all send/edit
-		// verbs (was only fired at handleUploadStart). 16KB envelope
-		// cap is a hard protocol bound — no legitimate client produces
-		// >16KB per message.
-		s.rejectAndLog(c, counters.SignalOversizedBody, "send_group",
-			fmt.Sprintf("raw=%d bytes exceeds maxPayloadBytes=%d", len(raw), maxPayloadBytes), nil)
-		s.respondError(c, "", protocol.ErrMessageTooLarge, "Message exceeds 16KB limit", 0)
+	// Phase 17 Step 4c gap-closure: count Channel 1 oversized-body
+	// rejections so Phase 17b sees density across all send/edit verbs.
+	// A group frame carries a wrapped key per member on top of the body,
+	// so the pre-parse check is the frame budget (body cap + an allowance
+	// per possible member) and the 16 KB rule is applied to the parsed
+	// body below — see groupFrameBudget.
+	if !s.checkGroupFrameSize(c, raw, "send_group") {
 		return
 	}
 
@@ -1046,6 +1047,9 @@ func (s *Server) handleSendGroup(c *Client, raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		s.rejectAndLog(c, counters.SignalMalformedFrame, "send_group", "malformed send_group frame",
 			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed send_group"})
+		return
+	}
+	if !s.checkBodySize(c, msg.Payload, "send_group") {
 		return
 	}
 	if !s.validateCorrIDOrReject(c, "send_group", msg.CorrID) {
@@ -1223,6 +1227,22 @@ func (s *Server) handleTyping(c *Client, raw json.RawMessage) {
 		}
 	}
 
+	// Room typing policy: one member fetch per frame, shared with the
+	// broadcast below. Decided BEFORE typing.Touch so a suppressed frame
+	// neither arms an expiry timer nor fans out; the counter is
+	// observational (a client in a big room may not know yet), never a
+	// misbehavior signal. Groups are bounded by the group cap and DMs
+	// always relay, so only rooms are gated.
+	var roomMembers []string
+	if msg.Room != "" {
+		roomMembers = s.store.GetRoomMemberIDsByRoomID(msg.Room)
+		if !s.roomTypingEnabled(len(roomMembers)) {
+			s.counters.Inc(counters.SignalTypingPolicySuppressed, c.DeviceID)
+			s.logger.Debug("typing suppressed by room policy", "room", msg.Room, "members", len(roomMembers))
+			return
+		}
+	}
+
 	// Track typing for server-side expiry (DMs use the DM ID as context)
 	typingCtx := msg.Room + msg.Group + msg.DM
 	s.typing.Touch(c.UserID, msg.Room, typingCtx)
@@ -1237,7 +1257,7 @@ func (s *Server) handleTyping(c *Client, raw json.RawMessage) {
 
 	switch {
 	case msg.Room != "":
-		s.broadcastToRoomExcept(msg.Room, c.DeviceID, out)
+		s.broadcastToMembersExcept(roomMembers, c.DeviceID, "typing", out)
 	case msg.Group != "":
 		s.broadcastToGroupExcept(msg.Group, c.DeviceID, out)
 	case msg.DM != "":
@@ -1903,20 +1923,16 @@ func (s *Server) handleCreateGroup(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Max group size is operator-configurable via [server.groups].max_members
-	// (default 150). Per-message wrapped keys scale linearly with member
-	// count (~80 bytes per member per message on the wire, plus one
-	// ECDH+HKDF+AES-GCM wrapping op per member per send). At the 150-member
-	// default this is ~12KB of key material per message and ~15ms of crypto
-	// per send — acceptable for most use cases but noticeably heavier than
-	// rooms (which use a shared epoch key). The client shows a soft warning
-	// at 50 members suggesting a room for high-traffic conversations.
-	s.cfg.RLock()
-	maxMembers := s.cfg.Server.Groups.MaxMembers
-	s.cfg.RUnlock()
-	if maxMembers <= 0 {
-		maxMembers = 150 // defensive fallback if config load elided the section
-	}
+	// Max group size is operator-configurable via [groups] max_members
+	// (default config.DefaultMaxGroupMembers, 100). Per-message wrapped
+	// keys scale linearly with member count (~155 bytes per member per
+	// message on the wire, plus one ECDH+HKDF+AES-GCM wrapping op per
+	// member per send). At the 100-member default this is ~15 KB of key
+	// material per message and ~10 ms of crypto per send — acceptable for
+	// most use cases but noticeably heavier than rooms (which use a shared
+	// epoch key). The client shows a soft warning at 50 members suggesting
+	// a room for high-traffic conversations.
+	maxMembers := s.groupMaxMembers()
 	if len(allMembers) > maxMembers {
 		s.respondError(c, "", "too_many_members",
 			fmt.Sprintf("Group DMs are limited to %d members. Use a room for larger groups.", maxMembers), 0)
@@ -2110,12 +2126,7 @@ func (s *Server) checkFileIDsCapAndShape(c *Client, fileIDs []string, verb strin
 // set match) but short-circuit semantics don't actually bound the
 // map entry count on the wire.
 func (s *Server) checkWrappedKeysCap(c *Client, wrappedKeys map[string]string, verb string) bool {
-	s.cfg.RLock()
-	maxMembers := s.cfg.Server.Groups.MaxMembers
-	s.cfg.RUnlock()
-	if maxMembers <= 0 {
-		maxMembers = 150 // defensive fallback; see handleCreateGroup comment
-	}
+	maxMembers := s.groupMaxMembers()
 	if len(wrappedKeys) > maxMembers {
 		s.rejectAndLog(c, counters.SignalWrappedKeysOverCap, verb,
 			fmt.Sprintf("wrapped_keys map has %d entries, max %d", len(wrappedKeys), maxMembers),
@@ -3499,14 +3510,16 @@ func (s *Server) broadcastToGroup(groupID string, msg any) {
 	s.fanOut("message", msg, targets)
 }
 
-// broadcastToRoomExcept sends to all room members except the given device.
-// Phase 17 Step 3: same lock-release pattern as broadcastToRoom.
-func (s *Server) broadcastToRoomExcept(roomID, excludeDevice string, msg any) {
-	if s.store == nil {
-		return
-	}
-	memberSet := make(map[string]bool)
-	for _, uid := range s.store.GetRoomMemberIDsByRoomID(roomID) {
+// broadcastToMembersExcept sends to every connected session of the given
+// users except one device — the room-member fan-out with the member lookup
+// left to the caller. The typing handler fetches a room's members once to
+// decide the room policy and passes the same list here, so one lookup
+// serves both the policy and the fan-out. Phase 17 Step 3 lock-release
+// pattern: RLock → collect targets → release → fanOut; verb names the frame
+// for drop accounting.
+func (s *Server) broadcastToMembersExcept(members []string, excludeDevice, verb string, msg any) {
+	memberSet := make(map[string]bool, len(members))
+	for _, uid := range members {
 		memberSet[uid] = true
 	}
 
@@ -3521,11 +3534,11 @@ func (s *Server) broadcastToRoomExcept(roomID, excludeDevice string, msg any) {
 		}
 	}
 	s.mu.RUnlock()
-	s.fanOut("message", msg, targets)
+	s.fanOut(verb, msg, targets)
 }
 
 // broadcastToRoomExceptUser sends to all room members except EVERY session of
-// the given user — the user-keyed variant of broadcastToRoomExcept (which
+// the given user — the user-keyed variant of broadcastToMembersExcept (which
 // excludes a single device). Used by the add-to-room queue processor so the
 // just-added user does not receive a join system-message about themselves;
 // their "you were added" affordance is room_added_to. Same Phase 17 Step 3

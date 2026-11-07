@@ -10,6 +10,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestHandleLeaveDM_RejectsUnknownDM verifies that calling /leave on a DM ID
@@ -122,7 +123,7 @@ func TestHandleSendDM_PrivacyResponsesIdentical(t *testing.T) {
 	probe := testClientFor("carol", "dev_carol_1")
 	rawProbe, _ := json.Marshal(protocol.SendDM{
 		Type: "send_dm", DM: "dm_does_not_exist",
-		WrappedKeys: map[string]string{"carol": "x"},
+		WrappedKeys: map[string]string{"carol": testutil.WrappedKey("x")},
 		Payload:     "p", Signature: "s",
 	})
 	s.handleSendDM(probe.Client, rawProbe)
@@ -130,7 +131,7 @@ func TestHandleSendDM_PrivacyResponsesIdentical(t *testing.T) {
 	nonMember := testClientFor("carol", "dev_carol_2")
 	rawReal, _ := json.Marshal(protocol.SendDM{
 		Type: "send_dm", DM: "dm_ab",
-		WrappedKeys: map[string]string{"carol": "x"},
+		WrappedKeys: map[string]string{"carol": testutil.WrappedKey("x")},
 		Payload:     "p", Signature: "s",
 	})
 	s.handleSendDM(nonMember.Client, rawReal)

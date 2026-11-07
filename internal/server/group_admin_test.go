@@ -297,19 +297,20 @@ func TestHandleCreateGroup_CapIsConfigurable(t *testing.T) {
 		t.Errorf("expected too_many_members with configured cap, got %q (message: %q)", errResp.Code, errResp.Message)
 	}
 	// Confirm the message reflects the *configured* cap (2), not the
-	// hardcoded legacy value (150).
+	// default (100).
 	if !bytes.Contains([]byte(errResp.Message), []byte("2 members")) {
 		t.Errorf("error message should reference configured cap (2), got %q", errResp.Message)
 	}
 }
 
-// TestHandleAddToGroup_CapDefaultsTo150WhenZero covers the defensive
+// TestHandleAddToGroup_CapDefaultsTo100WhenZero covers the defensive
 // fallback in the handler: if config load somehow produces a zero or
 // negative MaxMembers (operator wrote `max_members = 0`, for example),
-// the handler treats it as 150 rather than allowing unlimited growth
-// or rejecting every add. Parser test (in config package) verifies
-// the zero isn't coerced there; this test verifies the handler catches it.
-func TestHandleAddToGroup_CapDefaultsTo150WhenZero(t *testing.T) {
+// the handler treats it as config.DefaultMaxGroupMembers (100) rather than
+// allowing unlimited growth or rejecting every add. Parser test (in config
+// package) verifies the zero isn't coerced there; this test verifies the
+// handler catches it.
+func TestHandleAddToGroup_CapDefaultsTo100WhenZero(t *testing.T) {
 	s := newTestServer(t)
 	s.cfg.Lock()
 	s.cfg.Server.Groups.MaxMembers = 0
@@ -324,7 +325,7 @@ func TestHandleAddToGroup_CapDefaultsTo150WhenZero(t *testing.T) {
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
 
-	// With MaxMembers = 0 and the defensive fallback kicking in (150),
+	// With MaxMembers = 0 and the defensive fallback kicking in (100),
 	// adding carol to a 2-person group must succeed.
 	raw, _ := json.Marshal(protocol.AddToGroup{
 		Type: "add_to_group", Group: "group_zero_cap", User: "carol",
@@ -332,7 +333,7 @@ func TestHandleAddToGroup_CapDefaultsTo150WhenZero(t *testing.T) {
 	s.handleAddToGroup(alice.Client, raw)
 
 	if isMember, _ := s.store.IsGroupMember("group_zero_cap", "carol"); !isMember {
-		t.Error("carol should have been added — zero cap should trigger 150 fallback, not block")
+		t.Error("carol should have been added — zero cap should trigger the 100 fallback, not block")
 	}
 }
 

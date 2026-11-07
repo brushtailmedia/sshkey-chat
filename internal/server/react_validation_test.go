@@ -6,6 +6,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func reactHasErrorCode(msgs []json.RawMessage, code string) bool {
@@ -34,7 +35,7 @@ func TestHandleReact_GroupWrappedKeysMismatchRejected(t *testing.T) {
 		ID:    "msg_x",
 		Group: "grp_react",
 		WrappedKeys: map[string]string{
-			"alice": "k", "bob": "k", "carol": "k", // carol is NOT a member
+			"alice": testutil.WrappedKey("k"), "bob": testutil.WrappedKey("k"), "carol": testutil.WrappedKey("k"), // carol is NOT a member
 		},
 		Payload:   "p",
 		Signature: "sig",
@@ -60,7 +61,7 @@ func TestHandleReact_DMWrappedKeysMismatchRejected(t *testing.T) {
 		Type:        "react",
 		ID:          "msg_x",
 		DM:          dm.ID,
-		WrappedKeys: map[string]string{"alice": "k"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("k")},
 		Payload:     "p",
 		Signature:   "sig",
 	})

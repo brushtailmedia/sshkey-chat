@@ -87,6 +87,11 @@ func TestProcessPendingAddToRoom_EmitsRoomAddedToAndExcludesSelf(t *testing.T) {
 			if addedTo.AddedBy != "os:1000" {
 				t.Errorf("%s: room_added_to.AddedBy = %q, want os:1000", name, addedTo.AddedBy)
 			}
+			// Typing policy flag rides along from the same member list:
+			// a two-member room is under the default limit.
+			if !addedTo.Typing {
+				t.Errorf("%s: room_added_to.Typing = false for a %d-member room, want true", name, len(addedTo.Members))
+			}
 			found := false
 			for _, m := range addedTo.Members {
 				if m == "bob" {

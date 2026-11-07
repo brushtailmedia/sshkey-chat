@@ -132,7 +132,7 @@ func (s *Server) handleAddToGroup(c *Client, raw json.RawMessage) {
 	}
 
 	// Phase 17 Step 4d: enforce the group member cap on this path too.
-	// Pre-17 handleCreateGroup checked a hardcoded 150 but handleAddToGroup
+	// Pre-17 handleCreateGroup checked a hardcoded cap but handleAddToGroup
 	// had no cap check — an admin could grow a group past the limit via
 	// repeated add_to_group, producing a group whose sends then fail the
 	// wrapped_keys envelope cap on every message. Same config value, same
@@ -145,12 +145,7 @@ func (s *Server) handleAddToGroup(c *Client, raw json.RawMessage) {
 		s.respondError(c, "", protocol.CodeInternal, "failed to add member", 0)
 		return
 	}
-	s.cfg.RLock()
-	maxMembers := s.cfg.Server.Groups.MaxMembers
-	s.cfg.RUnlock()
-	if maxMembers <= 0 {
-		maxMembers = 150 // defensive fallback if config load elided the section
-	}
+	maxMembers := s.groupMaxMembers()
 	if len(currentMembers) >= maxMembers {
 		s.respondError(c, "", "too_many_members",
 			fmt.Sprintf("Group DMs are limited to %d members. Use a room for larger groups.", maxMembers), 0)

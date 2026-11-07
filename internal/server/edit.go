@@ -195,10 +195,9 @@ func (s *Server) handleEdit(c *Client, raw json.RawMessage) {
 
 // handleEditGroup — group DMs.
 func (s *Server) handleEditGroup(c *Client, raw json.RawMessage) {
-	if len(raw) > maxPayloadBytes {
-		s.rejectAndLog(c, counters.SignalOversizedBody, "edit_group",
-			fmt.Sprintf("raw=%d bytes exceeds maxPayloadBytes=%d", len(raw), maxPayloadBytes), nil)
-		s.respondError(c, "", protocol.ErrMessageTooLarge, "Message exceeds 16KB limit", 0)
+	// Frame budget, not the bare 16 KB: a group frame carries one wrapped
+	// key per member on top of the body (see groupFrameBudget).
+	if !s.checkGroupFrameSize(c, raw, "edit_group") {
 		return
 	}
 
@@ -206,6 +205,9 @@ func (s *Server) handleEditGroup(c *Client, raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		s.rejectAndLog(c, counters.SignalMalformedFrame, "edit_group", "malformed edit_group frame",
 			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed edit_group"})
+		return
+	}
+	if !s.checkBodySize(c, msg.Payload, "edit_group") {
 		return
 	}
 	if !s.validateCorrIDOrReject(c, "edit_group", msg.CorrID) {

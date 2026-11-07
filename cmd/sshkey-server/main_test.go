@@ -23,6 +23,7 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/server"
 	"github.com/brushtailmedia/sshkey-chat/internal/sqlitedsn"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // Test fixture keys generated once per test run under a temp dir.
@@ -757,7 +758,7 @@ func TestDMConversations(t *testing.T) {
 	alice.enc.Encode(protocol.SendDM{
 		Type:        "send_dm",
 		DM:          dmID,
-		WrappedKeys: map[string]string{"usr_alice_test": "wrapped_a", "usr_bob_test": "wrapped_b"},
+		WrappedKeys: map[string]string{"usr_alice_test": testutil.WrappedKey("wrapped_a"), "usr_bob_test": testutil.WrappedKey("wrapped_b")},
 		Payload:     "base64_encrypted_dm",
 		Signature:   "base64_sig_dm",
 	})
@@ -793,8 +794,8 @@ func TestDMConversations(t *testing.T) {
 	if bobDM.Payload != "base64_encrypted_dm" {
 		t.Errorf("payload = %q, want base64_encrypted_dm", bobDM.Payload)
 	}
-	if bobDM.WrappedKeys["usr_bob_test"] != "wrapped_b" {
-		t.Errorf("wrapped_keys[bob] = %q, want wrapped_b", bobDM.WrappedKeys["usr_bob_test"])
+	if bobDM.WrappedKeys["usr_bob_test"] != testutil.WrappedKey("wrapped_b") {
+		t.Errorf("wrapped_keys[bob] = %q, want the wrap seeded wrapped_b", bobDM.WrappedKeys["usr_bob_test"])
 	}
 
 	t.Logf("DM delivered: id=%s from=%s dm=%s", bobDM.ID, bobDM.From, bobDM.DM)
@@ -803,7 +804,7 @@ func TestDMConversations(t *testing.T) {
 	alice.enc.Encode(protocol.SendDM{
 		Type:        "send_dm",
 		DM:          dmID,
-		WrappedKeys: map[string]string{"usr_alice_test": "wrapped_a"}, // missing bob
+		WrappedKeys: map[string]string{"usr_alice_test": testutil.WrappedKey("wrapped_a")}, // missing bob
 		Payload:     "base64_bad",
 	})
 
@@ -928,8 +929,8 @@ func TestEdit_GroupEndToEnd(t *testing.T) {
 		Type:  "send_group",
 		Group: groupID,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": "wrapped_alice_orig",
-			"usr_bob_test":   "wrapped_bob_orig",
+			"usr_alice_test": testutil.WrappedKey("wrapped_alice_orig"),
+			"usr_bob_test":   testutil.WrappedKey("wrapped_bob_orig"),
 		},
 		Payload:   "base64_group_original",
 		Signature: "base64_group_sig",
@@ -955,8 +956,8 @@ func TestEdit_GroupEndToEnd(t *testing.T) {
 		ID:    original.ID,
 		Group: groupID,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": "wrapped_alice_edit",
-			"usr_bob_test":   "wrapped_bob_edit",
+			"usr_alice_test": testutil.WrappedKey("wrapped_alice_edit"),
+			"usr_bob_test":   testutil.WrappedKey("wrapped_bob_edit"),
 		},
 		Payload:   "base64_group_edited",
 		Signature: "base64_group_sig_edit",
@@ -991,7 +992,7 @@ func TestEdit_GroupEndToEnd(t *testing.T) {
 	if editedA.EditedAt <= 0 || editedB.EditedAt <= 0 {
 		t.Fatalf("group edited_at must be set: alice=%d bob=%d", editedA.EditedAt, editedB.EditedAt)
 	}
-	if editedA.WrappedKeys["usr_bob_test"] != "wrapped_bob_edit" || editedB.WrappedKeys["usr_bob_test"] != "wrapped_bob_edit" {
+	if editedA.WrappedKeys["usr_bob_test"] != testutil.WrappedKey("wrapped_bob_edit") || editedB.WrappedKeys["usr_bob_test"] != testutil.WrappedKey("wrapped_bob_edit") {
 		t.Fatalf("group wrapped_keys did not round-trip edit payload: alice=%q bob=%q",
 			editedA.WrappedKeys["usr_bob_test"], editedB.WrappedKeys["usr_bob_test"])
 	}
@@ -1033,8 +1034,8 @@ func TestEdit_DMEndToEnd(t *testing.T) {
 		Type: "send_dm",
 		DM:   created.DM,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": "wrapped_dm_alice_orig",
-			"usr_bob_test":   "wrapped_dm_bob_orig",
+			"usr_alice_test": testutil.WrappedKey("wrapped_dm_alice_orig"),
+			"usr_bob_test":   testutil.WrappedKey("wrapped_dm_bob_orig"),
 		},
 		Payload:   "base64_dm_original",
 		Signature: "base64_dm_sig",
@@ -1060,8 +1061,8 @@ func TestEdit_DMEndToEnd(t *testing.T) {
 		ID:   original.ID,
 		DM:   created.DM,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": "wrapped_dm_alice_edit",
-			"usr_bob_test":   "wrapped_dm_bob_edit",
+			"usr_alice_test": testutil.WrappedKey("wrapped_dm_alice_edit"),
+			"usr_bob_test":   testutil.WrappedKey("wrapped_dm_bob_edit"),
 		},
 		Payload:   "base64_dm_edited",
 		Signature: "base64_dm_sig_edit",
@@ -1141,8 +1142,8 @@ func TestEdit_RateLimitEnforced(t *testing.T) {
 		Type:  "send_group",
 		Group: groupID,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": "wrapped_rl_group_alice_seed",
-			"usr_bob_test":   "wrapped_rl_group_bob_seed",
+			"usr_alice_test": testutil.WrappedKey("wrapped_rl_group_alice_seed"),
+			"usr_bob_test":   testutil.WrappedKey("wrapped_rl_group_bob_seed"),
 		},
 		Payload:   "base64_rl_group_seed",
 		Signature: "sig_rl_group_seed",
@@ -1162,8 +1163,8 @@ func TestEdit_RateLimitEnforced(t *testing.T) {
 		Type: "send_dm",
 		DM:   dmID,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": "wrapped_rl_dm_alice_seed",
-			"usr_bob_test":   "wrapped_rl_dm_bob_seed",
+			"usr_alice_test": testutil.WrappedKey("wrapped_rl_dm_alice_seed"),
+			"usr_bob_test":   testutil.WrappedKey("wrapped_rl_dm_bob_seed"),
 		},
 		Payload:   "base64_rl_dm_seed",
 		Signature: "sig_rl_dm_seed",
@@ -1215,8 +1216,8 @@ func TestEdit_RateLimitEnforced(t *testing.T) {
 				ID:    groupSeed.ID,
 				Group: groupID,
 				WrappedKeys: map[string]string{
-					"usr_alice_test": "wrapped_rl_group_alice_edit",
-					"usr_bob_test":   "wrapped_rl_group_bob_edit",
+					"usr_alice_test": testutil.WrappedKey("wrapped_rl_group_alice_edit"),
+					"usr_bob_test":   testutil.WrappedKey("wrapped_rl_group_bob_edit"),
 				},
 				Payload:   fmt.Sprintf("base64_rl_group_edit_%02d", i),
 				Signature: "sig_rl_group_edit",
@@ -1229,8 +1230,8 @@ func TestEdit_RateLimitEnforced(t *testing.T) {
 				ID:   dmSeed.ID,
 				DM:   dmID,
 				WrappedKeys: map[string]string{
-					"usr_alice_test": "wrapped_rl_dm_alice_edit",
-					"usr_bob_test":   "wrapped_rl_dm_bob_edit",
+					"usr_alice_test": testutil.WrappedKey("wrapped_rl_dm_alice_edit"),
+					"usr_bob_test":   testutil.WrappedKey("wrapped_rl_dm_bob_edit"),
 				},
 				Payload:   fmt.Sprintf("base64_rl_dm_edit_%02d", i),
 				Signature: "sig_rl_dm_edit",
@@ -1349,7 +1350,7 @@ func TestDMDelete_MultiDeviceSync(t *testing.T) {
 	aliceA.enc.Encode(protocol.SendDM{
 		Type:        "send_dm",
 		DM:          dmID,
-		WrappedKeys: map[string]string{"usr_alice_test": "wa", "usr_bob_test": "wb"},
+		WrappedKeys: map[string]string{"usr_alice_test": testutil.WrappedKey("wa"), "usr_bob_test": testutil.WrappedKey("wb")},
 		Payload:     "base64_hi",
 		Signature:   "base64_sig",
 	})
@@ -1398,7 +1399,7 @@ func TestDMDelete_MultiDeviceSync(t *testing.T) {
 	bob.enc.Encode(protocol.SendDM{
 		Type:        "send_dm",
 		DM:          dmID,
-		WrappedKeys: map[string]string{"usr_alice_test": "wa2", "usr_bob_test": "wb2"},
+		WrappedKeys: map[string]string{"usr_alice_test": testutil.WrappedKey("wa2"), "usr_bob_test": testutil.WrappedKey("wb2")},
 		Payload:     "base64_followup",
 		Signature:   "base64_sig2",
 	})

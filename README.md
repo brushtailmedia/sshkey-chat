@@ -21,6 +21,7 @@ Inspired by [ssh-chat](https://github.com/shazow/ssh-chat).
 - **Sync on reconnect** -- paginated catch-up with bundled epoch keys; retired and deleted contexts propagate via catchup lists
 - **Lazy scroll-back** -- on-demand history, no bulk download on connect
 - **Reactions, typing indicators, presence, pins**
+- **Per-person signals stop at 100 people** -- group DMs are capped at 100 members (`[groups] max_members`), and typing indicators are relayed in a room only while it has 100 members or fewer (`[rooms] typing_max_members`; 0 turns them off), dropped silently above that so a thousand-person room is not a thousand-way fan-out of noise. The server advertises its limits in the handshake, so clients never hard-code them
 - **Read positions synced across your devices** -- the server keeps where each of your devices has read to and computes your unread counts on connect; it does not show other people what you have read
 - **Edit your last message for 15 minutes** -- an edit is accepted only for your most recent message in a conversation and only within 15 minutes of sending it, enforced by the server against its own clock; deletion has no window
 - **Push notifications** -- content-free APNs/FCM wake pushes (app syncs over SSH)
@@ -224,6 +225,12 @@ bind = "0.0.0.0"
 
 [devices]
 max_per_user = 10
+
+[groups]
+max_members = 100            # group DMs: everyone is addressed by name, so 100 is the rule
+
+[rooms]
+typing_max_members = 100     # typing is relayed in rooms this size or smaller; 0 = off
 
 [rate_limits]
 messages_per_second = 5

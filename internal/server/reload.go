@@ -95,6 +95,7 @@ func (s *Server) reloadServerConfig() {
 	s.cfg.Server.Sync = newCfg.Sync
 	s.cfg.Server.Devices = newCfg.Devices
 	s.cfg.Server.Logging = newCfg.Logging
+	s.cfg.Server.Rooms = newCfg.Rooms // typing policy: read per frame, safe to change live
 	// port and bind are NOT reloaded (require restart)
 	s.cfg.Unlock()
 

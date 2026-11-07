@@ -80,8 +80,11 @@ func TestDockerReferenceServerToml_LoadsCleanly(t *testing.T) {
 		t.Errorf("files.max_file_ids_per_message = %d, want 20",
 			cfg.Server.Files.MaxFileIDsPerMessage)
 	}
-	if cfg.Server.Groups.MaxMembers != 150 {
-		t.Errorf("groups.max_members = %d, want 150", cfg.Server.Groups.MaxMembers)
+	if cfg.Server.Groups.MaxMembers != 100 {
+		t.Errorf("groups.max_members = %d, want 100", cfg.Server.Groups.MaxMembers)
+	}
+	if cfg.Server.Rooms.TypingMaxMembers != 100 {
+		t.Errorf("rooms.typing_max_members = %d, want 100", cfg.Server.Rooms.TypingMaxMembers)
 	}
 	if cfg.Server.RateLimits.PerClientWriteBufferSize != 256 {
 		t.Errorf("rate_limits.per_client_write_buffer_size = %d, want 256",

@@ -22,6 +22,7 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // genFileIDs returns n freshly-generated file_ IDs, each passing
@@ -35,14 +36,18 @@ func genFileIDs(n int) []string {
 	return out
 }
 
-// genWrappedKeys returns a wrapped_keys-shaped map with n entries.
-// Values are opaque; only the count is under test here.
+// genWrappedKeys returns a wrapped_keys-shaped map with n entries. Only the
+// count is under test here, but the values are real-size wraps all the
+// same: a four-character dummy is what hid, for months, that a group at the
+// member cap could not send under the 16 KB frame check (see
+// TestFixtures_NoDummyWrappedKeys).
 func genWrappedKeys(n int) map[string]string {
 	out := make(map[string]string, n)
 	for i := 0; i < n; i++ {
 		// Users are just keys in this map; any string works for the cap check.
 		user := "usr_filler_" + strings.Repeat("a", 11) // ~22 chars, stable length
-		out[user+strings.Repeat("x", 3)+toBase26(i)] = "wkey"
+		key := user + strings.Repeat("x", 3) + toBase26(i)
+		out[key] = testutil.WrappedKey(key)
 	}
 	return out
 }
@@ -153,7 +158,7 @@ func TestHandleSend_FileIDsAtCapAccepted(t *testing.T) {
 
 func TestHandleSendGroup_WrappedKeysOverCapRejected(t *testing.T) {
 	s := newTestServer(t)
-	// Lower the cap so we don't need to construct a 151-entry map.
+	// Lower the cap so we don't need to construct a 101-entry map.
 	s.cfg.Lock()
 	s.cfg.Server.Groups.MaxMembers = 3
 	s.cfg.Unlock()
@@ -304,7 +309,8 @@ func TestHandleReact_WrappedKeysOverCapRejected(t *testing.T) {
 
 func TestCheckWrappedKeysCap_ZeroConfigFallback(t *testing.T) {
 	// Direct helper test: MaxMembers=0 triggers the defensive fallback
-	// to 150. A 3-entry map must be accepted (150 > 3).
+	// to config.DefaultMaxGroupMembers (100). A 3-entry map must be
+	// accepted (100 > 3); a 101-entry map must not.
 	s := newTestServer(t)
 	s.cfg.Lock()
 	s.cfg.Server.Groups.MaxMembers = 0
@@ -312,7 +318,10 @@ func TestCheckWrappedKeysCap_ZeroConfigFallback(t *testing.T) {
 
 	alice := testClientFor("alice", "dev_alice_zero_cap")
 	if !s.checkWrappedKeysCap(alice.Client, genWrappedKeys(3), "test") {
-		t.Error("checkWrappedKeysCap with max_members=0 (fallback 150) should accept 3 entries")
+		t.Error("checkWrappedKeysCap with max_members=0 (fallback 100) should accept 3 entries")
+	}
+	if s.checkWrappedKeysCap(alice.Client, genWrappedKeys(101), "test") {
+		t.Error("checkWrappedKeysCap with max_members=0 (fallback 100) should reject 101 entries")
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/actionauth"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -391,7 +392,7 @@ func TestSync_BundlesActorProfiles(t *testing.T) {
 	postTS := time.Now().Unix() + 3600
 	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
 		ID: "m_bundle", Sender: "alice", TS: postTS, Payload: "p",
-		WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"},
+		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert group message: %v", err)
 	}

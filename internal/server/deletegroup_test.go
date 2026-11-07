@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestHandleDeleteGroup_MemberRemoved verifies the happy path: a member
@@ -462,7 +463,7 @@ func TestHandleSendGroup_PrivacyResponsesIdentical(t *testing.T) {
 	probe := testClientFor("carol", "dev_carol_1")
 	rawProbe, _ := json.Marshal(protocol.SendGroup{
 		Type: "send_group", Group: "group_does_not_exist",
-		WrappedKeys: map[string]string{"carol": "x"},
+		WrappedKeys: map[string]string{"carol": testutil.WrappedKey("x")},
 		Payload:     "p", Signature: "s",
 	})
 	s.handleSendGroup(probe.Client, rawProbe)
@@ -470,7 +471,7 @@ func TestHandleSendGroup_PrivacyResponsesIdentical(t *testing.T) {
 	nonMember := testClientFor("carol", "dev_carol_1")
 	rawReal, _ := json.Marshal(protocol.SendGroup{
 		Type: "send_group", Group: "group_real",
-		WrappedKeys: map[string]string{"carol": "x"},
+		WrappedKeys: map[string]string{"carol": testutil.WrappedKey("x")},
 		Payload:     "p", Signature: "s",
 	})
 	s.handleSendGroup(nonMember.Client, rawReal)

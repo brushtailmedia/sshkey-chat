@@ -48,6 +48,7 @@ Every counter signal falls into one of three categories:
 **Observational** (server-internal; NEVER auto-revoke inputs — slow
 clients can produce these through no misbehavior of their own):
 - `broadcast_dropped`
+- `typing_policy_suppressed` — a typing frame dropped because the room has more members than `[rooms] typing_max_members`
 
 The config loader rejects any attempt to put a load or observational
 signal in the `[server.auto_revoke.thresholds]` table with a

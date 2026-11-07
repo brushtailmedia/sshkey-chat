@@ -124,13 +124,20 @@ const (
 // Observational signals — counted but NEVER auto-revoke inputs.
 const (
 	SignalBroadcastDropped = "broadcast_dropped"
+
+	// SignalTypingPolicySuppressed counts typing frames the server dropped
+	// because the room has more members than [rooms] typing_max_members.
+	// A well-behaved client in a large room produces these (it may not yet
+	// know the room crossed the limit), so this is a policy outcome, never
+	// misbehavior.
+	SignalTypingPolicySuppressed = "typing_policy_suppressed"
 )
 
 // AutoRevokeSignals enumerates the signal names that are valid inputs to the
 // Phase 17b [server.autoRevoke] config. The config parser rejects threshold
 // entries for signals not listed here — load signals (rate_limited) and
-// observational signals (broadcast_dropped) are deliberately excluded because
-// they have nonzero legitimate baselines.
+// observational signals (broadcast_dropped, typing_policy_suppressed) are
+// deliberately excluded because they have nonzero legitimate baselines.
 //
 // Adding a new misbehavior signal means: add a Signal* constant, add to this
 // slice, document in the package doc-comment block above. Phase 17b's config

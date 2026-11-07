@@ -63,7 +63,10 @@ Client opens SSH connection with Ed25519 key
 Client opens 3 session channels (1st: control/NDJSON, 2nd: download, 3rd: upload)
 
   Server -> {"type":"server_hello","protocol":"sshkey-chat","version":1,
-             "server_id":"chat.example.com"}
+             "server_id":"chat.example.com",
+             "limits":{"max_group_members":100,"room_typing_max_members":100,
+                       "max_body_bytes":16384,"wrapped_key_entry_bytes":160,
+                       "max_file_ids_per_message":20}}
 
   Client -> {"type":"client_hello","protocol":"sshkey-chat","version":1,
              "client":"my-client","client_version":"0.1.0",
@@ -80,6 +83,7 @@ Client opens 3 session channels (1st: control/NDJSON, 2nd: download, 3rd: upload
 
 - The client must send `client_hello` within **2 seconds** of receiving `server_hello`. Timeout = the server disconnects with a `client_required` error and an install banner.
 - `protocol` must be `"sshkey-chat"` and `version` must be `1`. Mismatch = disconnect with install banner.
+- `server_hello` carries a `limits` block: the size rules in force on this server, so a client reads them from the server instead of hard-coding a number the operator may have set differently. `max_group_members` is the group-DM membership cap (and the most `wrapped_keys` entries a group frame may carry); `room_typing_max_members` is the room size above which the server drops typing frames; `max_body_bytes` is the cap on a message `payload`; `wrapped_key_entry_bytes` is the per-entry allowance a group frame gets on top of the body (see Server Validation); `max_file_ids_per_message` is how many attachments one message may reference. A field absent or zero means "not advertised" and the client keeps its own default — except `room_typing_max_members`, which is always present and whose zero means typing is off in every room. Older servers send no `limits` at all.
 - There is currently no capability negotiation in the handshake. Clients must handle (or ignore) any message type the server sends.
 - `last_synced_at` controls whether sync batches follow: empty string = no sync (first connect, or client doesn't want catchup), non-empty ISO 8601 timestamp = server sends messages newer than that timestamp.
 - `pending_sync` in the welcome is `true` when `last_synced_at` was non-empty — it tells the client to expect `sync_batch` messages before `sync_complete`.
@@ -411,7 +415,7 @@ Multi-device `/delete` sync for 1:1 DMs uses `dm_list` fields rather than a side
 
 ### Group DMs
 
-Group DMs are multi-party conversations with 2–N members, where N is server-configured via `[server.groups].max_members` (default 150). Identified by `group_` nanoids. **Phase 14 introduced an in-group admin model** — the creator becomes the first admin; admins can add, remove, promote, demote, and rename. The pre-Phase-14 "membership is fixed at creation" model is no longer in force.
+Group DMs are multi-party conversations with 2–N members, where N is server-configured via `[groups] max_members` (default 100) and advertised to clients as `max_group_members` in `server_hello`. Identified by `group_` nanoids. **Phase 14 introduced an in-group admin model** — the creator becomes the first admin; admins can add, remove, promote, demote, and rename. The pre-Phase-14 "membership is fixed at creation" model is no longer in force.
 
 ```json
 // Client -> Server (create a group DM — members excludes sender, name optional)
@@ -431,7 +435,7 @@ Group DMs are multi-party conversations with 2–N members, where N is server-co
  "payload":"base64...","signature":"base64..."}
 ```
 
-- **Max N members** (server-enforced hard cap, configurable via `[server.groups].max_members`, default 150). Per-message wrapped keys scale linearly with member count (~80 bytes per member per message on the wire). At the 150-member default, each message carries ~12KB of key material. **Recommended:** for groups with 50+ members, clients should suggest using a room instead — rooms use a shared epoch key and are significantly more efficient for high-traffic conversations. The server does not enforce this recommendation; it is a UX guideline for client implementers.
+- **Max N members** (server-enforced hard cap, configurable via `[groups] max_members`, default 100, advertised as `max_group_members`). One hundred is the product's size rule for every per-person signal — a group is a conversation where everyone is addressed by name, and typing indicators in rooms stop at the same number. Per-message wrapped keys scale linearly with member count (about 155 bytes per member per message on the wire: a 124-character base64 wrap plus its JSON key). At the 100-member default each message carries ~15 KB of key material, which is why a group frame is allowed `wrapped_key_entry_bytes × max_group_members` on top of the 16 KB body (see Server Validation). **Recommended:** for groups with 50+ members, clients should suggest using a room instead — rooms use a shared epoch key and are significantly more efficient for high-traffic conversations. The server does not enforce this recommendation; it is a UX guideline for client implementers.
 - **Membership is mutable by admin action** (Phase 14). The user who calls `create_group` becomes the initial admin. Admins can `add_to_group`, `remove_from_group`, `promote_group_admin`, `demote_group_admin`, and `rename_group`. New members see only post-join messages (per-message wrapped keys; no backfill).
 - **`wrapped_keys` must match the current member list exactly.** Server rejects with `invalid_wrapped_keys` on mismatch. Membership is small enough that new sends re-wrapping for every recipient is cheap.
 - **Include yourself in `wrapped_keys`** so your other devices can decrypt your own sends.
@@ -805,6 +809,8 @@ Typing envelopes carry exactly one of `room`, `group`, or `dm` — the same thre
 
 Show for 5 seconds, then expire. Re-send while the user is actively typing. The `user` field is set by the server on broadcast; clients omit it on the send.
 
+**Size rule.** Typing is a per-person signal — a name on a "… is typing" line — so it follows the product's one rule for every per-person signal: it exists in conversations of 100 people or fewer. The server relays typing in a room only while the room has `room_typing_max_members` members or fewer (`[rooms] typing_max_members`, default 100; zero turns typing off in every room) and drops it above that: silently, with no error and no frame, the sender simply is not shown as typing. A dropped frame counts toward the server's `typing_policy_suppressed` operator counter and never toward auto-revoke. Groups are bounded by `max_group_members` (the same number by default) and 1:1 DMs always relay. Every `room_list` and `room_added_to` entry carries a `typing` flag giving the answer for that room at that moment; a client should stop sending typing for a room once it is over the advertised limit (it can derive this from the member events it already receives), and the server's own check on each frame is the authority either way.
+
 ### Read Receipts
 
 Capability: `read_receipts`
@@ -960,7 +966,7 @@ Three separate list messages are delivered during the handshake, one per context
 ```json
 // Server -> Client (rooms the user is a member of)
 {"type":"room_list","rooms":[
-  {"id":"room_V1StGXR8_Z5jdHi6B","name":"general","topic":"General chat","members":["usr_alice","usr_bob","usr_carol"]}
+  {"id":"room_V1StGXR8_Z5jdHi6B","name":"general","topic":"General chat","members":["usr_alice","usr_bob","usr_carol"],"typing":true}
 ]}
 
 // Server -> Client (group DMs the user is a member of — Phase 14 adds admins field)
@@ -976,6 +982,8 @@ Three separate list messages are delivered during the handshake, one per context
   {"id":"dm_def456","members":["usr_alice","usr_eve"],"hidden_for_caller":true,"left_at_for_caller":1712345600}
 ]}
 ```
+
+`room_list` entries carry `typing`: whether the server relays typing indicators in that room right now, i.e. whether it has `room_typing_max_members` members or fewer (see Typing Indicators).
 
 `dm_list` entries carry two independent per-user fields:
 
@@ -1076,13 +1084,14 @@ When an operator adds a user to a room via `sshkey-ctl` (`add-to-room`, `approve
 
 ```json
 // Server -> Client (sent ONLY to the newly-added user's connected sessions)
-{"type":"room_added_to","room":"room_V1StGXR8_Z5jdHi6B","name":"general","topic":"General chat","members":["usr_alice","usr_bob"],"added_by":"os:501"}
+{"type":"room_added_to","room":"room_V1StGXR8_Z5jdHi6B","name":"general","topic":"General chat","members":["usr_alice","usr_bob"],"typing":true,"added_by":"os:501"}
 ```
 
 - **Live-only.** `room_added_to` is never replayed in `sync_batch`. An offline (or older, handler-less) client catches up via `room_list` on the next connect — the same fallback path, so missing the live event only costs immediacy, never correctness.
 - **Recipient scope.** Sent to *every* connected session of the newly-added user (multi-device); to no one else. Existing room members instead receive the `room_event{join}` broadcast, from which the newly-added user is excluded so they don't see a self-join system message before `room_added_to` creates the room context.
 - **`added_by`.** The acting operator — a user ID, or `"os:<uid>"` for a CLI-initiated add (clients render the latter as "server admin").
 - **`members`.** The full member ID snapshot, deterministically ordered (`joined_at, user_id`), so the client persists a stable room-member cache entry without a follow-up `room_members` fetch.
+- **`typing`.** Whether the server relays typing indicators in this room (the same flag as `room_list`; see Typing Indicators).
 - **Server-authoritative gates (defense-in-depth).** The queue processor skips a row whose room is missing/retired or whose user is missing/retired at processing time (a user can be retired in the enqueue→dequeue window) — so a retired user is never surfaced as a live room member, and retired rooms stay read-only. The membership insert uses `RowsAffected()` as the source of truth, so a concurrent duplicate add fires side effects exactly once; a unique index on `pending_add_to_room(user_id, room_id)` is the belt-and-braces guard.
 
 `room_added_to` is the room analogue of `group_added_to`. Rooms have no per-room admin model, so `topic` replaces the group event's `admins` field.
@@ -1562,7 +1571,7 @@ Admin clients send `list_pending_keys` and present the result to the operator. A
 | `forbidden` | Policy gate denied the request (e.g. `allow_self_leave_rooms = false` on `leave_room` or `delete_room`) |
 | `server_busy` | A cleanup mutex is held by a concurrent operation; clients should retry with short backoff (used on `create_dm` races) |
 | `invalid_message` | Malformed JSON envelope, missing required fields, or invalid values (e.g. creating a DM with yourself) |
-| `too_many_members` | Group DM exceeds 150-member hard cap |
+| `too_many_members` | Group DM exceeds the member cap (`max_group_members`, default 100) |
 | `invalid_profile` | Display name validation failed (too short, too long, invalid characters) |
 | `username_taken` | Display name already in use by another user (server-enforced uniqueness, case-insensitive) |
 | `internal` | Server-side failure (DB error, etc.) — client should retry or reconnect |
@@ -1596,9 +1605,9 @@ Clients should handle `rate_limited` errors gracefully — show a "Slow down" me
 
 The server validates every incoming message. Common rejection reasons a client builder should handle:
 
-- **Message body size:** 16KB max. Exceeding returns `message_too_large`.
+- **Message body size:** 16KB max on the `payload` (`max_body_bytes`). Exceeding returns `message_too_large`. A group frame (`send_group`, `edit_group`) may be larger than the body by the wrapped keys it needs: the server accepts a raw group frame of up to `max_body_bytes + wrapped_key_entry_bytes × max_group_members` (32,384 bytes at the defaults) and then holds the parsed `payload` to 16KB, so the member cap, not the frame size, is what bounds a group. `send` and `send_dm` frames are checked at 16KB whole.
 - **File upload size:** 100MB max (configurable). Exceeding returns `upload_too_large`.
-- **Group DM member count:** 150 max. Exceeding returns `too_many_members`.
+- **Group DM member count:** `max_group_members` (default 100). Exceeding returns `too_many_members`.
 - **Display name:** 2-32 UTF-8 **bytes** after trimming (byte length, not rune count), no leading/trailing whitespace, unique (case-insensitive). Invalid returns `invalid_profile`; taken returns `username_taken`.
 - **Ed25519 keys only:** RSA, ECDSA, and other key types are rejected at the SSH handshake level.
 - **Malformed messages:** Missing required fields, invalid JSON, or wrong field types return `invalid_message`.

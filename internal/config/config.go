@@ -62,6 +62,7 @@ type ServerConfig struct {
 	Files      FilesSection      `toml:"files"`
 	Devices    DevicesSection    `toml:"devices"`
 	Groups     GroupsSection     `toml:"groups"`
+	Rooms      RoomsSection      `toml:"rooms"`
 	RateLimits RateLimitsSection `toml:"rate_limits"`
 	Shutdown   ShutdownSection   `toml:"shutdown"`
 	Logging    LoggingSection    `toml:"logging"`
@@ -182,19 +183,57 @@ type DevicesSection struct {
 	MaxPerUser int `toml:"max_per_user"`
 }
 
+// DefaultMaxGroupMembers is the group-DM membership cap when [groups]
+// max_members is absent or non-positive. One hundred is the product's size
+// rule for every per-person signal (typing in rooms uses the same number,
+// DefaultRoomTypingMaxMembers): a group is a conversation where everyone is
+// addressed by name, and past a hundred people that stops being true.
+const DefaultMaxGroupMembers = 100
+
+// DefaultRoomTypingMaxMembers is the room size above which typing frames
+// are dropped when [rooms] typing_max_members is absent. See RoomsSection.
+const DefaultRoomTypingMaxMembers = 100
+
 // GroupsSection governs per-group policy knobs. Phase 17 Step 4d.
 //
 // MaxMembers is the hard cap on group-DM membership — enforced at
 // create_group and add_to_group, and is the upper bound on the
 // wrapped_keys envelope size (a 10M-entry map that passes the
-// per-member ECDH check would otherwise exhaust memory). Default 150
-// matches the pre-Phase-17 hardcoded value and PROTOCOL.md
-// documentation. At 150 members, each send costs ~12KB of wrapped-key
-// material on the wire and ~15ms of crypto. Operators running smaller
+// per-member ECDH check would otherwise exhaust memory). Default
+// DefaultMaxGroupMembers (100), advertised to clients in server_hello. At
+// 100 members each send carries ~15 KB of wrapped-key material on the wire
+// (about 155 bytes per member) and costs ~10 ms of crypto; the server
+// allows a group frame that much on top of the 16 KB body so the cap, not
+// the frame size, is what bounds a group. Operators running smaller
 // deployments may tune down; operators with hardware to match may
 // tune up.
 type GroupsSection struct {
 	MaxMembers int `toml:"max_members"`
+}
+
+// RoomsSection governs per-room policy knobs.
+//
+// TypingMaxMembers is the room size above which the server drops typing
+// frames instead of relaying them: typing is a per-person signal, and in a
+// room of a thousand people it is a thousand-way fan-out of noise nobody
+// reads. Rooms of TypingMaxMembers members or fewer relay as before.
+// Default DefaultRoomTypingMaxMembers (100). Zero turns typing off in every
+// room; negative is a config error. Groups are bounded by [groups]
+// max_members and 1:1 DMs always relay, so neither reads this knob. The
+// limit is advertised to clients in server_hello and the per-room answer in
+// room_list / room_added_to. Hot-reloadable.
+type RoomsSection struct {
+	TypingMaxMembers int `toml:"typing_max_members"`
+}
+
+// Validate rejects a negative typing_max_members. Zero is a valid value
+// (typing off in rooms), so unlike PendingKeysSection this is not a
+// must-be-positive check. Called from ServerConfig.Validate.
+func (r RoomsSection) Validate() error {
+	if r.TypingMaxMembers < 0 {
+		return fmt.Errorf("[rooms] typing_max_members must be zero or positive, got %d", r.TypingMaxMembers)
+	}
+	return nil
 }
 
 type RateLimitsSection struct {
@@ -400,7 +439,10 @@ func DefaultServerConfig() ServerConfig {
 			MaxPerUser: 10,
 		},
 		Groups: GroupsSection{
-			MaxMembers: 150, // Phase 17 Step 4d: matches pre-17 hardcoded cap + PROTOCOL.md
+			MaxMembers: DefaultMaxGroupMembers,
+		},
+		Rooms: RoomsSection{
+			TypingMaxMembers: DefaultRoomTypingMaxMembers,
 		},
 		RateLimits: RateLimitsSection{
 			MessagesPerSecond:     5,
@@ -509,6 +551,10 @@ func (c ServerConfig) Validate() (warnings []string, err error) {
 	}
 
 	if err := c.Server.PendingKeys.Validate(); err != nil {
+		return nil, err
+	}
+
+	if err := c.Rooms.Validate(); err != nil {
 		return nil, err
 	}
 

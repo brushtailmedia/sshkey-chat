@@ -66,7 +66,10 @@ max_file_ids_per_message = 20
 max_per_user = 10
 
 [groups]
-max_members = 150
+max_members = 100
+
+[rooms]
+typing_max_members = 100
 
 [rate_limits]
 # All rate limits intentionally high so tests don't trip them. Individual

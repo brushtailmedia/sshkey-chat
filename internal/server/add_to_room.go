@@ -101,6 +101,7 @@ func (s *Server) processPendingAddToRoom() {
 			Name:    room.DisplayName,
 			Topic:   room.Topic,
 			Members: members,
+			Typing:  s.roomTypingEnabled(len(members)), // from the list already fetched
 			AddedBy: p.InitiatedBy,
 		}
 		s.mu.RLock()

@@ -26,6 +26,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // dropTable runs a DROP TABLE on the server's primary dataDB.
@@ -115,8 +116,8 @@ func TestHandleSendGroup_DBFailure_AbortsBroadcastAndRespondsInternal(t *testing
 		Type:  "send_group",
 		Group: groupID,
 		WrappedKeys: map[string]string{
-			"alice": "wrapped_for_alice",
-			"bob":   "wrapped_for_bob",
+			"alice": testutil.WrappedKey("wrapped_for_alice"),
+			"bob":   testutil.WrappedKey("wrapped_for_bob"),
 		},
 		Payload:   "dGVzdA==",
 		Signature: "c2ln",
@@ -167,8 +168,8 @@ func TestHandleSendDM_DBFailure_AbortsBroadcastAndRespondsInternal(t *testing.T)
 		Type: "send_dm",
 		DM:   dm.ID,
 		WrappedKeys: map[string]string{
-			"alice": "wrapped_for_alice",
-			"bob":   "wrapped_for_bob",
+			"alice": testutil.WrappedKey("wrapped_for_alice"),
+			"bob":   testutil.WrappedKey("wrapped_for_bob"),
 		},
 		Payload:   "dGVzdA==",
 		Signature: "c2ln",

@@ -6,6 +6,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // S1 (server_order, history-state-model.md step 8): the sync/history emission
@@ -138,7 +139,7 @@ func TestHandleDelete_LiveDeletedBroadcastCarriesServerOrder(t *testing.T) {
 			TS:          100,
 			Payload:     "p",
 			Signature:   "s",
-			WrappedKeys: map[string]string{"dave": "wa", "bob": "wb"},
+			WrappedKeys: map[string]string{"dave": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 		})
 		if err != nil {
 			t.Fatalf("insert group message: %v", err)
@@ -175,7 +176,7 @@ func TestHandleDelete_LiveDeletedBroadcastCarriesServerOrder(t *testing.T) {
 			TS:          100,
 			Payload:     "p",
 			Signature:   "s",
-			WrappedKeys: map[string]string{"dave": "wa", "bob": "wb"},
+			WrappedKeys: map[string]string{"dave": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
 		})
 		if err != nil {
 			t.Fatalf("insert dm message: %v", err)
