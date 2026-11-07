@@ -22,6 +22,7 @@ Inspired by [ssh-chat](https://github.com/shazow/ssh-chat).
 - **Lazy scroll-back** -- on-demand history, no bulk download on connect
 - **Reactions, typing indicators, presence, pins**
 - **Read positions synced across your devices** -- the server keeps where each of your devices has read to and computes your unread counts on connect; it does not show other people what you have read
+- **Edit your last message for 15 minutes** -- an edit is accepted only for your most recent message in a conversation and only within 15 minutes of sending it, enforced by the server against its own clock; deletion has no window
 - **Push notifications** -- content-free APNs/FCM wake pushes (app syncs over SSH)
 - **Admin CLI** -- manage users, rooms, devices, pending keys from the server shell (local-only; no remote admin RPC)
 - **User self-service** -- retire own account, list and revoke own devices from the client

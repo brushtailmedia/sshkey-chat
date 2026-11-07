@@ -94,6 +94,7 @@ func TestHandleEdit_PrivacyResponsesIdentical(t *testing.T) {
 // emits an `edited` broadcast to room members.
 func TestHandleEdit_HappyPath_ReplacesPayloadAndBroadcasts(t *testing.T) {
 	s := newTestServer(t)
+	pinEditClock(t, 1000) // fixtures use small fixed timestamps; keep them inside the edit window
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	msgID := "msg_happy"
@@ -274,6 +275,7 @@ func TestHandleEdit_RetiredRoom(t *testing.T) {
 // grace window is rejected with ErrEditWindowExpired.
 func TestHandleEdit_EpochTooOld(t *testing.T) {
 	s := newTestServer(t)
+	pinEditClock(t, 1000) // fixtures use small fixed timestamps; keep them inside the edit window
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	// Bootstrap an epoch by inserting an initial message; then bump
@@ -318,6 +320,7 @@ func TestHandleEdit_EpochTooOld(t *testing.T) {
 // clear local reaction state on receipt of the `edited` event).
 func TestHandleEdit_ClearsReactions(t *testing.T) {
 	s := newTestServer(t)
+	pinEditClock(t, 1000) // fixtures use small fixed timestamps; keep them inside the edit window
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
@@ -422,6 +425,7 @@ func TestHandleEditGroup_PrivacyResponsesIdentical(t *testing.T) {
 // replaces the payload, rewraps keys, sets edited_at, and broadcasts.
 func TestHandleEditGroup_HappyPath(t *testing.T) {
 	s := newTestServer(t)
+	pinEditClock(t, 1000) // fixtures use small fixed timestamps; keep them inside the edit window
 	groupHappy := store.GenerateID("group_")
 	if err := s.store.CreateGroup(groupHappy, "alice", []string{"alice", "bob"}, "Happy"); err != nil {
 		t.Fatalf("create: %v", err)
@@ -626,6 +630,7 @@ func TestHandleEditGroup_DeletedMessage_CollapsedToUnknown(t *testing.T) {
 
 func TestHandleEditGroup_ClearsReactions(t *testing.T) {
 	s := newTestServer(t)
+	pinEditClock(t, 1000) // fixtures use small fixed timestamps; keep them inside the edit window
 	groupID := store.GenerateID("group_")
 	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "react"); err != nil {
 		t.Fatalf("CreateGroup: %v", err)
@@ -667,6 +672,7 @@ func TestHandleEditGroup_ClearsReactions(t *testing.T) {
 
 func TestHandleEditGroup_InvalidWrappedKeys(t *testing.T) {
 	s := newTestServer(t)
+	pinEditClock(t, 1000) // fixtures use small fixed timestamps; keep them inside the edit window
 	groupID := store.GenerateID("group_")
 	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "keys"); err != nil {
 		t.Fatalf("CreateGroup: %v", err)
@@ -704,6 +710,7 @@ func TestHandleEditGroup_InvalidWrappedKeys(t *testing.T) {
 
 func TestHandleEditDM_HappyPath(t *testing.T) {
 	s := newTestServer(t)
+	pinEditClock(t, 1000) // fixtures use small fixed timestamps; keep them inside the edit window
 	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
 	if err != nil {
 		t.Fatalf("CreateOrGetDirectMessage: %v", err)
@@ -859,6 +866,7 @@ func TestHandleEditDM_DeletedMessage_CollapsedToUnknown(t *testing.T) {
 
 func TestHandleEditDM_ClearsReactions(t *testing.T) {
 	s := newTestServer(t)
+	pinEditClock(t, 1000) // fixtures use small fixed timestamps; keep them inside the edit window
 	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
 	if err != nil {
 		t.Fatalf("CreateOrGetDirectMessage: %v", err)
@@ -900,6 +908,7 @@ func TestHandleEditDM_ClearsReactions(t *testing.T) {
 
 func TestHandleEditDM_FrozenCallerRejected(t *testing.T) {
 	s := newTestServer(t)
+	pinEditClock(t, 1000) // fixtures use small fixed timestamps; keep them inside the edit window
 	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
 	if err != nil {
 		t.Fatalf("CreateOrGetDirectMessage: %v", err)
@@ -948,5 +957,124 @@ func TestHandleEditDM_FrozenCallerRejected(t *testing.T) {
 	}
 	if !bytes.Equal(baseMsgs[0], msgs[0]) {
 		t.Fatalf("frozen-caller response differs from unknown baseline\nbaseline: %s\nfrozen:   %s", baseMsgs[0], msgs[0])
+	}
+}
+
+// pinEditClock makes the edit time-window check (step 7b) see `at` as now,
+// so fixtures with small fixed timestamps stay inside the fifteen-minute
+// window, and the window tests can step the clock exactly.
+func pinEditClock(t *testing.T, at int64) {
+	t.Helper()
+	old := editNow
+	editNow = func() time.Time { return time.Unix(at, 0) }
+	t.Cleanup(func() { editNow = old })
+}
+
+// editOutcome runs one edit and returns the error code it produced, or ""
+// when the server answered with an `edited`-family broadcast instead.
+func editOutcome(t *testing.T, cc *captureClient, handle func()) string {
+	t.Helper()
+	cc.buf.Reset()
+	handle()
+	for _, m := range cc.messages() {
+		var e protocol.Error
+		if err := json.Unmarshal(m, &e); err == nil && e.Type == "error" {
+			return e.Code
+		}
+	}
+	return ""
+}
+
+// The window is inclusive at fifteen minutes from the ORIGINAL send and
+// refused one second past it, in all three contexts. A fresh server per
+// context, because the edit rate limiter is one bucket per user across
+// all three verbs and every attempt counts against it.
+func TestHandleEdit_TimeWindow_BoundaryInAllContexts(t *testing.T) {
+	const sent = 1_000_000
+	keys := map[string]string{"alice": "wa2", "bob": "wb2"}
+	for _, ctx := range []string{"room", "group", "dm"} {
+		s := newTestServer(t)
+		alice := testClientFor("alice", "dev_alice_window_"+ctx)
+		s.mu.Lock()
+		s.clients[alice.DeviceID] = alice.Client
+		s.mu.Unlock()
+
+		var attempt func()
+		switch ctx {
+		case "room":
+			generalID := s.store.RoomDisplayNameToID("general")
+			if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{ID: "msg_r", Sender: "alice", TS: sent, Epoch: 1, Payload: "p", Signature: "s"}); err != nil {
+				t.Fatal(err)
+			}
+			attempt = func() {
+				raw, _ := json.Marshal(protocol.Edit{Type: "edit", ID: "msg_r", Room: generalID, Epoch: 1, Payload: "n", Signature: "n"})
+				s.handleEdit(alice.Client, raw)
+			}
+		case "group":
+			groupID := store.GenerateID("group_")
+			if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "window"); err != nil {
+				t.Fatalf("CreateGroup: %v", err)
+			}
+			if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{ID: "msg_g", Sender: "alice", TS: sent, Payload: "p", Signature: "s", WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"}}); err != nil {
+				t.Fatal(err)
+			}
+			attempt = func() {
+				raw, _ := json.Marshal(protocol.EditGroup{Type: "edit_group", ID: "msg_g", Group: groupID, WrappedKeys: keys, Payload: "n", Signature: "n"})
+				s.handleEditGroup(alice.Client, raw)
+			}
+		case "dm":
+			dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+			if err != nil {
+				t.Fatalf("CreateOrGetDirectMessage: %v", err)
+			}
+			if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{ID: "msg_d", Sender: "alice", TS: sent, Payload: "p", Signature: "s", WrappedKeys: map[string]string{"alice": "wa", "bob": "wb"}}); err != nil {
+				t.Fatal(err)
+			}
+			attempt = func() {
+				raw, _ := json.Marshal(protocol.EditDM{Type: "edit_dm", ID: "msg_d", DM: dm.ID, WrappedKeys: keys, Payload: "n", Signature: "n"})
+				s.handleEditDM(alice.Client, raw)
+			}
+		}
+
+		pinEditClock(t, sent+protocol.EditWindowSeconds+1)
+		if code := editOutcome(t, alice, attempt); code != protocol.ErrEditWindowExpired {
+			t.Errorf("%s: one second past the window: code = %q, want %q", ctx, code, protocol.ErrEditWindowExpired)
+		}
+		pinEditClock(t, sent+protocol.EditWindowSeconds)
+		if code := editOutcome(t, alice, attempt); code != "" {
+			t.Errorf("%s: at exactly the window: code = %q, want an accepted edit", ctx, code)
+		}
+	}
+}
+
+// An edit inside the window does not extend it: the window is measured from
+// the original send, so a message edited at minute fourteen is frozen at
+// minute fifteen like any other.
+func TestHandleEdit_TimeWindow_NotExtendedByAnEdit(t *testing.T) {
+	const sent = 2_000_000
+	s := newTestServer(t)
+	generalID := s.store.RoomDisplayNameToID("general")
+	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{ID: "msg_r", Sender: "alice", TS: sent, Epoch: 1, Payload: "p", Signature: "s"}); err != nil {
+		t.Fatal(err)
+	}
+	alice := testClientFor("alice", "dev_alice_window2")
+	s.mu.Lock()
+	s.clients[alice.DeviceID] = alice.Client
+	s.mu.Unlock()
+	attempt := func() {
+		raw, _ := json.Marshal(protocol.Edit{Type: "edit", ID: "msg_r", Room: generalID, Epoch: 1, Payload: "n", Signature: "n"})
+		s.handleEdit(alice.Client, raw)
+	}
+	pinEditClock(t, sent+14*60)
+	if code := editOutcome(t, alice, attempt); code != "" {
+		t.Fatalf("edit at minute fourteen: code = %q, want accepted", code)
+	}
+	got, err := s.store.GetRoomMessageByID(generalID, "msg_r")
+	if err != nil || got.EditedAt == 0 || got.TS != sent {
+		t.Fatalf("after the first edit: ts=%d edited_at=%d err=%v; want ts kept and edited_at set", got.TS, got.EditedAt, err)
+	}
+	pinEditClock(t, sent+16*60)
+	if code := editOutcome(t, alice, attempt); code != protocol.ErrEditWindowExpired {
+		t.Fatalf("edit at minute sixteen after an edit at fourteen: code = %q, want %q", code, protocol.ErrEditWindowExpired)
 	}
 }

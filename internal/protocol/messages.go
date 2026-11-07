@@ -1537,3 +1537,11 @@ func MalformedField(field, reason string) *Error {
 // RawMessage is a JSON object that hasn't been decoded into a specific type yet.
 // Used in sync batches and history results which contain mixed message types.
 type RawMessage = json.RawMessage
+
+// EditWindowSeconds is how long after a message's ORIGINAL send (the `ts`
+// the server stamps at insert — never a previous edit's `edited_at`) an
+// edit of it is accepted: fifteen minutes. A protocol rule, not a server
+// setting: every client can rely on it, the server enforces it against its
+// own clock, and the term hides the edit affordance past it. The most-recent
+// rule bounds what can be edited; this bounds when.
+const EditWindowSeconds int64 = 15 * 60

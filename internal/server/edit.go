@@ -23,6 +23,13 @@ package server
 //      so a probing client cannot enumerate tombstones)
 //   7. Most-recent check (ErrEditNotMostRecent surfaced — caller is
 //      proven author at this point so specific errors are safe)
+//   7b. Time window (all contexts — ErrEditWindowExpired surfaced): the
+//      edit must arrive within protocol.EditWindowSeconds of the row's
+//      ORIGINAL send time, which this server stamped at insert. Never
+//      measured from a previous edit, so edits cannot chain past it; no
+//      client clock is consulted. Added 2026-11-08: "most recent" alone
+//      let the last message in a quiet conversation be rewritten days
+//      later.
 //   8. Epoch window check (rooms only — ErrEditWindowExpired surfaced)
 //   9. WrappedKeys match current membership (groups/DMs only —
 //      ErrInvalidWrappedKeys, mirrors handleSendGroup/handleSendDM)
@@ -48,6 +55,17 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 )
+
+// editNow is the clock the time-window check reads; tests pin it.
+var editNow = time.Now
+
+// editWindowExpired reports whether an edit of a row sent at sentTS (unix
+// seconds, server-stamped) arrives after the protocol's edit window.
+func editWindowExpired(sentTS int64) bool {
+	return editNow().Unix()-sentTS > protocol.EditWindowSeconds
+}
+
+const editWindowExpiredMessage = "Edit window expired — a message can be edited for 15 minutes after it is sent"
 
 // handleEdit — rooms.
 func (s *Server) handleEdit(c *Client, raw json.RawMessage) {
@@ -122,6 +140,12 @@ func (s *Server) handleEdit(c *Client, raw json.RawMessage) {
 	if mostRecentID != msg.ID {
 		s.respondErrorRef(c, msg.CorrID, protocol.ErrEditNotMostRecent,
 			"You can only edit your most recent message in this room", msg.ID, 0)
+		return
+	}
+
+	// Step 7b: time window from the ORIGINAL send (row.TS).
+	if editWindowExpired(row.TS) {
+		s.respondErrorRef(c, msg.CorrID, protocol.ErrEditWindowExpired, editWindowExpiredMessage, msg.ID, 0)
 		return
 	}
 
@@ -235,6 +259,12 @@ func (s *Server) handleEditGroup(c *Client, raw json.RawMessage) {
 	if mostRecentID != msg.ID {
 		s.respondErrorRef(c, msg.CorrID, protocol.ErrEditNotMostRecent,
 			"You can only edit your most recent message in this group", msg.ID, 0)
+		return
+	}
+
+	// Step 7b: time window from the ORIGINAL send (row.TS).
+	if editWindowExpired(row.TS) {
+		s.respondErrorRef(c, msg.CorrID, protocol.ErrEditWindowExpired, editWindowExpiredMessage, msg.ID, 0)
 		return
 	}
 
@@ -361,6 +391,12 @@ func (s *Server) handleEditDM(c *Client, raw json.RawMessage) {
 	if mostRecentID != msg.ID {
 		s.respondErrorRef(c, msg.CorrID, protocol.ErrEditNotMostRecent,
 			"You can only edit your most recent message in this DM", msg.ID, 0)
+		return
+	}
+
+	// Step 7b: time window from the ORIGINAL send (row.TS).
+	if editWindowExpired(row.TS) {
+		s.respondErrorRef(c, msg.CorrID, protocol.ErrEditWindowExpired, editWindowExpiredMessage, msg.ID, 0)
 		return
 	}
 

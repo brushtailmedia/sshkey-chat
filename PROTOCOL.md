@@ -771,8 +771,9 @@ Three verb families mirror the send-family split: `edit` / `edited` for rooms, `
 4. **Authorship.** `row.Sender == c.UserID` — non-authors collapse into the byte-identical unknown response so tombstone / authorship state does not leak.
 5. **Deleted check.** Tombstoned rows reject edits, also collapsed into the byte-identical unknown response.
 6. **Most-recent rule.** The edit target must be the user's most recent non-deleted message in the current context. If not, returns `edit_not_most_recent` (surfaced — caller is proven author at this point).
-7. **Epoch window (rooms only).** The edit's `epoch` must be in the current-or-previous epoch grace window, matching the send path. If the epoch has rotated past the grace window, returns `edit_window_expired`.
-8. **Wrapped-key match (groups/DMs only).** `wrapped_keys` must exactly match the current member set. Mid-flight membership changes between client-side compose and server-side validate produce `invalid_wrapped_keys`.
+7. **Time window.** The edit must arrive within **15 minutes** of the message's original send (`ts`, stamped by the server at insert). The window runs from the original send, never from a previous edit, so edits cannot chain past it, and no client clock is consulted. Past it, returns `edit_window_expired`. A protocol constant, not a server setting; clients should stop offering the edit affordance once a message is older than 15 minutes by its `ts`. Deletion has no window.
+8. **Epoch window (rooms only).** The edit's `epoch` must be in the current-or-previous epoch grace window, matching the send path. If the epoch has rotated past the grace window, returns `edit_window_expired`.
+9. **Wrapped-key match (groups/DMs only).** `wrapped_keys` must exactly match the current member set. Mid-flight membership changes between client-side compose and server-side validate produce `invalid_wrapped_keys`.
 
 **Immutable fields.** The edit envelope does NOT carry `file_ids`, `reply_to`, `mentions`, or `attachments`. The server preserves `file_ids` from the stored row on replace. The payload-internal fields (`ReplyTo`, `Mentions`, `Attachments[*]`) live inside the encrypted `DecryptedPayload` and the client's send path copies them verbatim from the original decrypted payload into the new one before re-encrypting, replacing only `Body` (and regenerating `Seq` + `DeviceID` for the new wire frame). Clients re-extract `Mentions` from the new body for highlight rendering. This is client-side enforcement by construction — the server never sees these fields and cannot validate them.
 
@@ -1555,7 +1556,7 @@ Admin clients send `list_pending_keys` and present the result to the operator. A
 | `already_member` | **Phase 14.** `add_to_group` target is already a member of the group. |
 | `already_admin` | **Phase 14.** `promote_group_admin` target is already an admin of the group. |
 | `edit_not_most_recent` | **Phase 15.** `edit` / `edit_group` / `edit_dm` target is not the caller's most recent message in the context. Only returned AFTER authorship has been proven — the unknown-context response shape is used before that. |
-| `edit_window_expired` | **Phase 15.** Rooms only. The epoch has rotated past the grace window since the original message was sent, so the room edit cannot be signed with a valid epoch key. Client should exit edit mode and compose a fresh message. |
+| `edit_window_expired` | **Phase 15.** The edit arrived more than 15 minutes after the message's original send (all contexts), or — rooms only — the epoch has rotated past the grace window since the original message was sent, so the room edit cannot be signed with a valid epoch key. Client should exit edit mode and compose a fresh message. |
 | `user_retired` | Sender or target of a DM operation has a retired account |
 | `room_retired` | Room has been retired by an admin — writes (`send`, `react`, `unreact`, `pin`, `unpin`, `delete`) are rejected |
 | `forbidden` | Policy gate denied the request (e.g. `allow_self_leave_rooms = false` on `leave_room` or `delete_room`) |
