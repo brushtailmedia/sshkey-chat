@@ -816,9 +816,11 @@ Read receipts carry exactly one of `room`, `group`, or `dm` plus the `last_read`
 {"type":"read","group":"group_xK9mQ2pR","last_read":"msg_def456"}
 {"type":"read","dm":"dm_yL0nR3qS","last_read":"msg_ghi789"}
 
-// Server -> Client (broadcast to others — or, for 1:1 DMs, to the other party)
+// Server -> Client (relayed to the sender's own other devices — or, for 1:1 DMs, to both parties' other devices)
 {"type":"read","room":"room_V1StGXR8_Z5jdHi6B","user":"usr_alice","last_read":"msg_abc123"}
 ```
+
+A room or group receipt is never relayed to the other members: it exists for a user's own devices to keep their read state in step. Unread counts on connect come from the server's stored read positions, not from these frames, so a client may ignore them.
 
 ### Unread Counts
 

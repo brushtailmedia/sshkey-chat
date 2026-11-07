@@ -1264,7 +1264,19 @@ func (s *Server) handleTyping(c *Client, raw json.RawMessage) {
 	}
 }
 
-// handleRead broadcasts a read receipt and stores the position.
+// handleRead stores the read position and relays the receipt to the
+// sender's other devices; for 1:1 DMs it also reaches the peer's devices.
+//
+// Store-write Part 3 (2026-11-08): room and group receipts used to be
+// rebroadcast to every connected member except the sending device —
+// viewers² `read` frames per message, which above ~250 viewers overflowed
+// every client's send buffer on every message and disconnected the room in
+// a wave — and no client consumed them (the term has no inbound `read`
+// handler; unread counts on connect come from the stored positions). The
+// relay now goes to the sender's own other devices only, the multi-device
+// sync set, which is the one recipient set that could ever use it. The
+// stored positions are untouched and remain the source for unread counts
+// and for any later "seen by" query.
 func (s *Server) handleRead(c *Client, raw json.RawMessage) {
 	var msg protocol.Read
 	if err := json.Unmarshal(raw, &msg); err != nil {
@@ -1332,11 +1344,7 @@ func (s *Server) handleRead(c *Client, raw json.RawMessage) {
 		LastRead: msg.LastRead,
 	}
 
-	if msg.Room != "" {
-		s.broadcastToRoomExcept(msg.Room, c.DeviceID, out)
-	} else if msg.Group != "" {
-		s.broadcastToGroupExcept(msg.Group, c.DeviceID, out)
-	} else if msg.DM != "" {
+	if msg.DM != "" {
 		// For 1:1 DMs, broadcast to both members' other devices.
 		// Phase 17 Step 3: lock-release pattern.
 		if dm, err := s.store.GetDirectMessage(msg.DM); err == nil && dm != nil {
@@ -1353,7 +1361,12 @@ func (s *Server) handleRead(c *Client, raw json.RawMessage) {
 			s.mu.RUnlock()
 			s.fanOut("read", out, targets)
 		}
+		return
 	}
+	// Rooms and groups: the sender's own other devices only (Part 3) —
+	// never the other members, whose per-receipt fan-out was viewers²
+	// per message and consumed by nobody.
+	s.sendToOwnOtherDevices(c, "read", out)
 }
 
 // isReactableMessage reports whether a message row in the given

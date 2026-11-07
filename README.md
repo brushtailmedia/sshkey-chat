@@ -20,7 +20,8 @@ Inspired by [ssh-chat](https://github.com/shazow/ssh-chat).
 - **File sharing** via encrypted upload/download channels (server can't see filenames, types, or content)
 - **Sync on reconnect** -- paginated catch-up with bundled epoch keys; retired and deleted contexts propagate via catchup lists
 - **Lazy scroll-back** -- on-demand history, no bulk download on connect
-- **Reactions, typing indicators, read receipts, presence, pins**
+- **Reactions, typing indicators, presence, pins**
+- **Read positions synced across your devices** -- the server keeps where each of your devices has read to and computes your unread counts on connect; it does not show other people what you have read
 - **Push notifications** -- content-free APNs/FCM wake pushes (app syncs over SSH)
 - **Admin CLI** -- manage users, rooms, devices, pending keys from the server shell (local-only; no remote admin RPC)
 - **User self-service** -- retire own account, list and revoke own devices from the client
