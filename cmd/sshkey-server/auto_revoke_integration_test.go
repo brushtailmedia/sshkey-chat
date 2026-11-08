@@ -98,6 +98,7 @@ func signalRule(signal string, count int) map[string]string {
 func TestAutoRevoke_PerSignalThresholdDouble_RevokesKicksAndRestore(t *testing.T) {
 	for i, signal := range counters.AutoRevokeSignals {
 		t.Run(signal, func(t *testing.T) {
+			t.Parallel() // one server per signal: each env is its own TempDir on port 0
 			e := newTestEnvWithConfig(t, func(cfg *config.Config) {
 				cfg.Server.Server.AutoRevoke.Enabled = true
 				cfg.Server.Server.AutoRevoke.Thresholds = signalRule(signal, 2)
@@ -144,6 +145,7 @@ func TestAutoRevoke_PerSignalThresholdDouble_RevokesKicksAndRestore(t *testing.T
 func TestAutoRevoke_PerSignalSubThreshold_NoRevocation(t *testing.T) {
 	for i, signal := range counters.AutoRevokeSignals {
 		t.Run(signal, func(t *testing.T) {
+			t.Parallel() // one server per signal: each env is its own TempDir on port 0
 			e := newTestEnvWithConfig(t, func(cfg *config.Config) {
 				cfg.Server.Server.AutoRevoke.Enabled = true
 				cfg.Server.Server.AutoRevoke.Thresholds = signalRule(signal, 4)
@@ -517,6 +519,7 @@ func TestAutoRevoke_LaunchGateRepresentativeFlow_NoMisbehaviorSignals(t *testing
 func TestAutoRevoke_PerSignalThresholdDouble_DeviceReasonContainsSignalName(t *testing.T) {
 	for i, signal := range counters.AutoRevokeSignals {
 		t.Run(signal, func(t *testing.T) {
+			t.Parallel() // one server per signal: each env is its own TempDir on port 0
 			e := newTestEnvWithConfig(t, func(cfg *config.Config) {
 				cfg.Server.Server.AutoRevoke.Enabled = true
 				cfg.Server.Server.AutoRevoke.Thresholds = signalRule(signal, 2)

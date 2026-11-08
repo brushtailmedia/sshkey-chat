@@ -35,6 +35,11 @@ bind = "127.0.0.1"
 
 [server.auto_revoke]
 enabled = false
+
+# Close() sleeps the whole grace period even with no client connected;
+# the 10 s default would be 10 s per test that calls it.
+[shutdown]
+grace_period = "100ms"
 `), 0644); err != nil {
 		t.Fatalf("write server.toml: %v", err)
 	}

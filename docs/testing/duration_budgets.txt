@@ -1,0 +1,17 @@
+# Serial wall-time budgets for the nightly duration guard
+# (.github/scripts/check_test_durations.sh, scorer .github/scripts/testbudget.go).
+# Seconds, measured with `go test -count=1 -p 1 ./...` and no race detector.
+# A package or test may exceed its budget by the tolerance factor (default 2x)
+# before the guard fails; CI runners are slower and noisier than a workstation.
+#
+# Format:
+#   key | seconds | rationale
+# Keys:
+#   default          every package not listed below
+#   test             ceiling for one top-level test; a test over it must carry a
+#                    "// slow: <reason>" comment on or above its func line
+#   ./package/path   a package with its own budget
+
+default | 15 | unit packages: handlers with a real store, store, protocol, config
+test | 3 | one test; longer needs a "// slow:" comment naming the wait
+./cmd/sshkey-server | 30 | wire-contract suite: one SSH server per test

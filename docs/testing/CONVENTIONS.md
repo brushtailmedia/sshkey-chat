@@ -50,11 +50,13 @@ This document is the prescriptive test policy for `sshkey-chat` only.
 - `t.Parallel()` is allowed only when tests are isolated (`t.TempDir()`, no package-global mutable state, no shared files).
 - No `time.Sleep` for synchronization in new tests; use channels, wait groups, or injected clocks.
 - Existing sleep callsites are tracked in `docs/testing/sleep_allowlist.txt`; new callsites must be reviewed and allowlisted with rationale.
+- Nightly enforces `docs/testing/duration_budgets.txt` (`.github/scripts/check_test_durations.sh`): serial wall time per package, and 3 s per top-level test unless the func carries a `// slow: <reason>` comment naming the wait.
 
 ## Short Mode and Build Tags
 
 - Integration tests must guard with:
   `if testing.Short() { t.Skip("integration test — run without -short") }`
+- `-short` is the developer-loop switch (`go test -short ./...` skips the wire suite in `cmd/sshkey-server`). CI runs no separate short pass: it repeated the race pass and was dropped 2026-11-08.
 - Do not introduce `//go:build integration`/`//go:build e2e` for server test execution paths.
 
 ## Coverage Policy

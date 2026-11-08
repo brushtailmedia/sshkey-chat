@@ -1,16 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -184,18 +187,14 @@ func newTestEnvWithConfig(t *testing.T, mutate func(*config.Config)) *testEnv {
 		mutate(cfg)
 	}
 
-	// Find a free port
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
-
-	cfg.Server.Server.Port = port
+	// Port 0: the kernel picks a free port and the server's "server
+	// listening" record reports which. Binding a probe listener and
+	// closing it to discover a port is racy once subtests run in parallel.
+	cfg.Server.Server.Port = 0
 	cfg.Server.Server.Bind = "127.0.0.1"
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	ready := newListenSignal()
+	logger := slog.New(slog.NewJSONHandler(io.MultiWriter(os.Stdout, ready), &slog.HandlerOptions{Level: slog.LevelDebug}))
 	srv, err := server.New(cfg, logger, testDataDir)
 	if err != nil {
 		t.Fatalf("create server: %v", err)
@@ -241,7 +240,7 @@ func newTestEnvWithConfig(t *testing.T, mutate func(*config.Config)) *testEnv {
 
 	go srv.ListenAndServe()
 	t.Cleanup(func() { srv.Close() })
-	time.Sleep(200 * time.Millisecond)
+	port := ready.wait(t, 10*time.Second)
 
 	return &testEnv{
 		srv:       srv,
@@ -253,11 +252,77 @@ func newTestEnvWithConfig(t *testing.T, mutate func(*config.Config)) *testEnv {
 	}
 }
 
+// listenSignal is an io.Writer fed a copy of the server's JSON log. It
+// watches for the "server listening" record and publishes the bound port
+// once. This replaces the old fixed startup sleep: the harness starts the
+// server on port 0 and waits for the one line that proves the listener is
+// up, the same way the cross-repo e2e harness finds a server it started as
+// a process. slog's JSON handler writes one whole record per Write call,
+// so each call is parsed on its own.
+type listenSignal struct {
+	once sync.Once
+	ch   chan int
+}
+
+func newListenSignal() *listenSignal {
+	return &listenSignal{ch: make(chan int, 1)}
+}
+
+func (l *listenSignal) Write(p []byte) (int, error) {
+	var rec struct {
+		Msg  string `json:"msg"`
+		Addr string `json:"addr"`
+	}
+	if json.Unmarshal(bytes.TrimSpace(p), &rec) == nil && rec.Msg == "server listening" {
+		if _, portStr, err := net.SplitHostPort(rec.Addr); err == nil {
+			if port, err := strconv.Atoi(portStr); err == nil {
+				l.once.Do(func() { l.ch <- port })
+			}
+		}
+	}
+	return len(p), nil
+}
+
+// wait returns the bound port, failing the test if the server has not
+// logged that it is listening within timeout.
+func (l *listenSignal) wait(t *testing.T, timeout time.Duration) int {
+	t.Helper()
+	select {
+	case port := <-l.ch:
+		return port
+	case <-time.After(timeout):
+		t.Fatalf("server did not log \"server listening\" within %s", timeout)
+		return 0
+	}
+}
+
+// openClientChannels opens the three session channels a real client opens
+// before its hello — messages, download, upload, in that order (the term's
+// client.go does exactly this) — and returns them. The server maps the 2nd
+// and 3rd channels by arrival order and waits a 500 ms grace for the 2nd
+// before it finishes the post-handshake work, so a one-channel test client
+// used to pay that wait on every connect.
+func openClientChannels(t *testing.T, conn *ssh.Client) (msg, dl, ul ssh.Channel) {
+	t.Helper()
+	chans := make([]ssh.Channel, 0, 3)
+	for i := 1; i <= 3; i++ {
+		ch, reqs, err := conn.OpenChannel("session", nil)
+		if err != nil {
+			t.Fatalf("open session channel %d: %v", i, err)
+		}
+		go ssh.DiscardRequests(reqs)
+		chans = append(chans, ch)
+	}
+	return chans[0], chans[1], chans[2]
+}
+
 // testClient is a connected protocol client.
 type testClient struct {
 	enc  *protocol.Encoder
 	dec  *protocol.Decoder
 	ch   ssh.Channel
+	dlCh ssh.Channel // 2nd session channel: the server's shared download channel
+	ulCh ssh.Channel // 3rd session channel: the upload channel
 	conn *ssh.Client // underlying SSH connection — used by tests that need to open additional session channels (e.g. the shared download channel in the legacy-path download tests)
 	t    *testing.T
 	priv ed25519.PrivateKey // raw key for signing F6 action requests (delete / unreact) in tests
@@ -287,11 +352,7 @@ func (e *testEnv) connect(keyPath, deviceID string) *testClient {
 	}
 	e.t.Cleanup(func() { conn.Close() })
 
-	ch, reqs, err := conn.OpenChannel("session", nil)
-	if err != nil {
-		e.t.Fatalf("open channel: %v", err)
-	}
-	go ssh.DiscardRequests(reqs)
+	ch, dlCh, ulCh := openClientChannels(e.t, conn)
 
 	var clientPriv ed25519.PrivateKey
 	if rawKey, perr := ssh.ParseRawPrivateKey(keyData); perr == nil {
@@ -306,6 +367,8 @@ func (e *testEnv) connect(keyPath, deviceID string) *testClient {
 		enc:  protocol.NewEncoder(ch),
 		dec:  protocol.NewDecoder(ch),
 		ch:   ch,
+		dlCh: dlCh,
+		ulCh: ulCh,
 		conn: conn,
 		t:    e.t,
 		priv: clientPriv,
@@ -570,11 +633,7 @@ func TestSyncOnReconnect(t *testing.T) {
 	}
 	defer conn.Close()
 
-	ch, reqs, err := conn.OpenChannel("session", nil)
-	if err != nil {
-		t.Fatalf("reconnect channel: %v", err)
-	}
-	go ssh.DiscardRequests(reqs)
+	ch, _, _ := openClientChannels(t, conn)
 
 	enc := protocol.NewEncoder(ch)
 	dec := protocol.NewDecoder(ch)
@@ -1480,11 +1539,7 @@ func TestDMDelete_OfflineCatchupViaDMList(t *testing.T) {
 		t.Fatalf("device2 dial: %v", err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	ch, reqs, err := conn.OpenChannel("session", nil)
-	if err != nil {
-		t.Fatalf("device2 open: %v", err)
-	}
-	go ssh.DiscardRequests(reqs)
+	ch, _, _ := openClientChannels(t, conn)
 
 	device2 := &testClient{
 		enc: protocol.NewEncoder(ch),
@@ -1817,11 +1872,7 @@ func TestDeleteGroup_LastMemberCleanupAndOfflineCatchup(t *testing.T) {
 		t.Fatalf("device B dial: %v", err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	ch, reqs, err := conn.OpenChannel("session", nil)
-	if err != nil {
-		t.Fatalf("device B open: %v", err)
-	}
-	go ssh.DiscardRequests(reqs)
+	ch, _, _ := openClientChannels(t, conn)
 
 	deviceB := &testClient{
 		enc: protocol.NewEncoder(ch),

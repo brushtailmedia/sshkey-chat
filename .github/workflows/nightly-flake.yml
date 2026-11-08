@@ -17,6 +17,8 @@ jobs:
         run: bash .github/scripts/check_test_sleeps.sh
       - name: Nested DB Guard
         run: bash .github/scripts/check_nested_db_use.sh
+      - name: Duration Budget
+        run: bash .github/scripts/check_test_durations.sh
       - name: Shuffle Stress (critical packages)
         run: |
           go test -v -shuffle=on -count=20 -p 1 ./internal/server ./internal/store ./internal/protocol ./internal/counters
