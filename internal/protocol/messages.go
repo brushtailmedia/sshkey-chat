@@ -7,24 +7,24 @@ import "encoding/json"
 // Handshake messages
 
 type ServerHello struct {
-	Type     string        `json:"type"`             // "server_hello"
-	Protocol string        `json:"protocol"`         // "sshkey-chat"
-	Version  int           `json:"version"`          // 1
-	ServerID string        `json:"server_id"`        // e.g. "chat.example.com"
-	Limits   *ServerLimits `json:"limits,omitempty"` // this server's size rules; absent on older servers
+	Type     string       `json:"type"`      // "server_hello"
+	Protocol string       `json:"protocol"`  // "sshkey-chat"
+	Version  int          `json:"version"`   // 1
+	ServerID string       `json:"server_id"` // e.g. "chat.example.com"
+	Limits   ServerLimits `json:"limits"`    // this server's size rules; always present and complete
 }
 
 // ServerLimits is the one place a client reads its size rules from, so no
 // client has to hard-code a number the server may have configured
-// differently. Sent in server_hello before the client has said anything.
-// A field absent or zero means "not advertised" and the client keeps its own
-// default for that one limit — except RoomTypingMaxMembers, which is always
-// present when the block is and whose zero means "typing off in rooms".
+// differently. Sent in every server_hello, before the client has said
+// anything, and always complete: a client keeps no defaults of its own and
+// refuses a hello without it. Only RoomTypingMaxMembers may be zero, which
+// means typing is off in every room.
 type ServerLimits struct {
 	// MaxGroupMembers is the group-DM membership cap ([groups] max_members):
 	// create_group and add_to_group refuse to go past it, and a group frame
 	// may carry at most this many wrapped_keys entries.
-	MaxGroupMembers int `json:"max_group_members,omitempty"`
+	MaxGroupMembers int `json:"max_group_members"`
 	// RoomTypingMaxMembers is the room size above which the server drops
 	// typing frames ([rooms] typing_max_members). Zero means typing is off
 	// in every room; groups are bounded by MaxGroupMembers and DMs always
@@ -33,15 +33,15 @@ type ServerLimits struct {
 	RoomTypingMaxMembers int `json:"room_typing_max_members"`
 	// MaxBodyBytes is the cap on a message's `payload` (16384 today). The
 	// frame that carries it may be larger by the wrapped keys it needs.
-	MaxBodyBytes int `json:"max_body_bytes,omitempty"`
+	MaxBodyBytes int `json:"max_body_bytes"`
 	// WrappedKeyEntryBytes is the server's per-entry allowance for
 	// wrapped_keys (WrappedKeyEntryBytes): a group frame may be up to
 	// MaxBodyBytes + WrappedKeyEntryBytes × MaxGroupMembers long before
 	// parsing. Clients size their compose limit from it.
-	WrappedKeyEntryBytes int `json:"wrapped_key_entry_bytes,omitempty"`
+	WrappedKeyEntryBytes int `json:"wrapped_key_entry_bytes"`
 	// MaxFileIDsPerMessage is [files] max_file_ids_per_message: how many
 	// attachments one message may reference.
-	MaxFileIDsPerMessage int `json:"max_file_ids_per_message,omitempty"`
+	MaxFileIDsPerMessage int `json:"max_file_ids_per_message"`
 }
 
 type ClientHello struct {

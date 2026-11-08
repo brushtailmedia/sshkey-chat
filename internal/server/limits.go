@@ -64,15 +64,16 @@ func (s *Server) checkBodySize(c *Client, payload string, verb string) bool {
 	return true
 }
 
-// serverLimits is the limits block sent in server_hello: the size rules in
-// force on this server, so a client never hard-codes a number the operator
-// may have set differently. Built per connection from the live config.
-func (s *Server) serverLimits() *protocol.ServerLimits {
+// serverLimits is the limits block sent in every server_hello: the size
+// rules in force on this server, complete, so a client never hard-codes a
+// number the operator may have set differently and needs no defaults of
+// its own. Built per connection from the live config.
+func (s *Server) serverLimits() protocol.ServerLimits {
 	s.cfg.RLock()
 	typing := s.cfg.Server.Rooms.TypingMaxMembers
 	fileIDs := s.cfg.Server.Files.MaxFileIDsPerMessage
 	s.cfg.RUnlock()
-	return &protocol.ServerLimits{
+	return protocol.ServerLimits{
 		MaxGroupMembers:      s.groupMaxMembers(),
 		RoomTypingMaxMembers: typing,
 		MaxBodyBytes:         maxPayloadBytes,
