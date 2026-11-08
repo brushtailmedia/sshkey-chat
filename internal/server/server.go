@@ -403,7 +403,10 @@ func (s *Server) ListenAndServe() error {
 		return fmt.Errorf("listen: %w", err)
 	}
 	s.listener = ln
-	s.logger.Info("server listening", "addr", addr)
+	// Log the address actually bound, not the configured string: with
+	// port = 0 the operating system picks the port, and this line is how
+	// an operator or a test harness learns which one.
+	s.logger.Info("server listening", "addr", ln.Addr().String())
 
 	// Start config file watcher
 	s.watchConfig()

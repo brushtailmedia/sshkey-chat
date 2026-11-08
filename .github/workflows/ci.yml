@@ -36,3 +36,36 @@ jobs:
         run: go install honnef.co/go/tools/cmd/staticcheck@2026.1
       - name: Staticcheck
         run: staticcheck ./...
+
+  # End to end from this side: the client repo's real client against the
+  # server and ctl built from THIS workspace. Both repos move together (no
+  # compatibility fallbacks), so a server change that breaks the real client
+  # must fail here, not only on the client repo's next push. The suite lives
+  # in sshkey-term/internal/e2e behind the `e2e` build tag; both repos are
+  # public, so the checkout needs no token. The client's SQLCipher build is
+  # cgo, hence gcc.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: brushtailmedia/sshkey-term
+          ref: main
+          path: sshkey-term
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y gcc
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@2026.1
+      - name: End-to-end (real client against this server)
+        run: make -C sshkey-term e2e SSHKEY_CHAT_REPO="$GITHUB_WORKSPACE"
+      - name: Keep failure dirs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-failure-dirs
+          path: /tmp/sshkey-e2e-*
+          if-no-files-found: ignore

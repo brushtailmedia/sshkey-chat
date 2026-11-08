@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
@@ -50,6 +51,8 @@ func run() error {
 	// Handle signals
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	var shuttingDown atomic.Bool
+	closed := make(chan struct{}) // closed once a signalled Close has finished
 	go func() {
 		for sig := range sigCh {
 			switch sig {
@@ -58,11 +61,24 @@ func run() error {
 				srv.Reload()
 			default:
 				logger.Info("shutdown signal received", "signal", sig.String())
-				srv.Close()
+				shuttingDown.Store(true)
+				if err := srv.Close(); err != nil {
+					logger.Error("shutdown", "error", err)
+				}
+				close(closed)
 				return
 			}
 		}
 	}()
 
-	return srv.ListenAndServe()
+	err = srv.ListenAndServe()
+	// ListenAndServe returns the moment Close shuts the listener, while the
+	// rest of Close — the grace period, the store checkpoint and close, the
+	// lockfile removal — is still running on the signal goroutine. Returning
+	// here would exit the process mid-shutdown, leaving the lockfile behind
+	// and the databases unflushed; wait for the shutdown to finish.
+	if shuttingDown.Load() {
+		<-closed
+	}
+	return err
 }
