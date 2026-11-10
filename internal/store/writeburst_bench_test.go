@@ -18,15 +18,15 @@ package store
 // against synchronous=NORMAL (fsync only at checkpoint), single-transaction
 // batching, same-file writer contention, cross-file parallelism (the per-room
 // sharding), the read-receipt amplification into the shared data.db, and
-// (D1) writers and history readers sharing one file — the cost of the
-// one-connection cap, which serialises reads behind writes that WAL would
-// otherwise let overlap.
+// (D1) writers and history readers sharing one file — compares the production
+// two-connection pool with a single-connection alternative that serialises
+// reads behind writes, plus larger and uncapped pools.
 //
-// Since store-write Part 1 every handle the store opens is capped at one
-// connection (store.go openDB). openBenchDB applies the same cap so the
-// matrix measures production behaviour; SSHKEY_BENCH_UNCAPPED=1 removes it
-// everywhere (and the C scenarios swap the Store's data.db handle for a
-// bench-opened one so the knob reaches them too).
+// Production handles use handleConns (currently two connections) and a
+// per-handle write mutex, allowing a read to overlap the serialised writer.
+// openBenchDB uses the same shape; SSHKEY_BENCH_UNCAPPED=1 disables the cap
+// and write serialisation everywhere (and the C scenarios swap the Store's
+// data.db handle for a bench-opened one so the knob reaches them too).
 //
 // macOS caveat: plain fsync does not flush the drive's write cache, so FULL
 // looks cheap here; the fullfsync(ON) scenario forces F_FULLFSYNC and
@@ -120,13 +120,13 @@ func benchMsg(i int) StoredMessage {
 	}
 }
 
-// benchCapped reports whether handles get the production one-connection cap
-// (default) or an uncapped pool (SSHKEY_BENCH_UNCAPPED=1, the pre-Part-1
-// behaviour, for reproducing the baseline).
+// benchCapped reports whether handles get the production two-connection pool
+// and write mutex (default) or an uncapped pool without write serialisation
+// (SSHKEY_BENCH_UNCAPPED=1, for reproducing the pre-Part-1 baseline).
 func benchCapped() bool { return os.Getenv("SSHKEY_BENCH_UNCAPPED") == "" }
 
 // openBenchDB opens path exactly as the store does (sqlitedsn.Writable +
-// WAL + foreign_keys + the Part 1 handle: a one-connection pool and the
+// WAL + foreign_keys + the production handle: a two-connection pool and the
 // write mutex, unless SSHKEY_BENCH_UNCAPPED=1) plus any extra `_pragma=`
 // settings applied to every pooled connection — the only correct way to
 // change synchronous or fullfsync.
@@ -485,8 +485,9 @@ func TestWriteBurstReport(t *testing.T) {
 	// measured on 2026-11-08 and retired: C3 capped is now that shape.)
 
 	// ---- D. mixed: writers and history readers on ONE room file ----
-	// The cost of the one-connection handle is that a read waits behind
-	// writes to the same file (WAL would let them overlap). D1 measures it:
+	// A single-connection pool makes reads wait behind writes to the same
+	// file; the production two-connection pool allows them to overlap. D1
+	// compares these shapes:
 	// 16 writers insert N messages while 4 readers page history through the
 	// production pager (getHistoryBefore, a 100-row page below a cursor) as
 	// fast as they can, with the two populations reported separately. Each

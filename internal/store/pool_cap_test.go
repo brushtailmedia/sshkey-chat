@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-// Store-write Part 1: every handle the store opens is capped at one
-// connection, so concurrent writers to one file queue in database/sql
-// instead of sleeping on SQLite's busy-handler ladder. These tests pin the
-// cap on every kind of handle and prove that a burst of concurrent writers
+// Every handle the store opens has a two-connection pool and a per-handle
+// write mutex: writers queue on the mutex while a read can overlap a write
+// on the second connection. These tests pin the cap and write serialisation
+// on every kind of handle and prove that a burst of concurrent writers
 // through the production insert path neither errors nor loses rows. No
 // timing assertions and no sleeps: the latency claims live in the
 // env-gated write-burst benchmark.
@@ -43,9 +43,10 @@ func TestOpenDB_CapsEveryHandleAtOneConnection(t *testing.T) {
 }
 
 // Sixteen goroutines, a hundred inserts each, one room file: zero errors
-// and exactly 1,600 rows. Under the cap this is a queue, not a busy-wait;
-// without it the same burst used to produce multi-hundred-millisecond
-// stalls and, before busy_timeout was fixed, "database is locked" errors.
+// and exactly 1,600 rows. The write mutex queues writers instead of leaving
+// them to SQLite's busy handler; without serialisation the same burst used
+// to produce multi-hundred-millisecond stalls and, before busy_timeout was
+// fixed, "database is locked" errors.
 func TestPoolCap_ConcurrentWritersToOneFileLoseNothing(t *testing.T) {
 	s, err := Open(t.TempDir())
 	if err != nil {

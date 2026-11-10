@@ -62,7 +62,7 @@ This document is the prescriptive test policy for `sshkey-chat` only.
 ## Coverage Policy
 
 - Coverage thresholds are enforced by `.github/scripts/check_coverage.sh` using `docs/testing/coverage_thresholds.txt`.
-- Current thresholds intentionally reflect practical pre-launch baselines and are ratcheted upward only with new focused tests.
+- Coverage thresholds never decrease. Recalculate them after focused tests land and at the end of each implementation plan, using the greater of the existing threshold and floor(measured coverage − 3 percentage points).
 
 ## Phase 22b Deferral Registry
 
@@ -70,4 +70,4 @@ No open deferrals remain after the 2026-04-24 deferred-items pass.
 
 - Launch-gate behavior is covered by the new `cmd/sshkey-server/auto_revoke_integration_test.go` suite (including representative-flow counter checks).
 - B.5 and B.6 integration scenarios now have concrete `cmd/sshkey-server` coverage (`auto_revoke_integration_test.go`, `upload_quota_integration_test.go`).
-- B.15 ratchet is applied in CI thresholds: `internal/server` 54.0, `internal/store` 54.0, `internal/protocol` 75.0.
+- Current CI minimums include: `internal/server` 66.0, `internal/store` 58.0, `internal/protocol` 75.0.
