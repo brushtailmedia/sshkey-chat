@@ -123,6 +123,53 @@ func TestPinPersistence_WriteFailure(t *testing.T) {
 	}
 }
 
+func TestPinPersistence_FailedUnpinPreservesPin(t *testing.T) {
+	e := newPinPersistenceEnv(t, true)
+	db := e.roomDB(t)
+	if _, err := db.Exec(`INSERT INTO pins(message_id,pinned_by,ts) VALUES(?,?,?)`, e.message, e.peer.UserID, 42); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the real pin row available for inspection while forcing DELETE to
+	// fail. The trigger lives only in this test's temporary room database.
+	if _, err := db.Exec(`CREATE TRIGGER reject_pin_delete BEFORE DELETE ON pins
+		BEGIN SELECT RAISE(ABORT, 'test pin delete failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	before := logicalIDState(t, e.s)
+	e.invoke(t, "unpin")
+	e.assertError(t, protocol.CodeInternal, "Failed to unpin message")
+	e.assertFailureLog(t)
+	if !reflect.DeepEqual(before, logicalIDState(t, e.s)) {
+		t.Fatal("failed unpin changed application state")
+	}
+	var by string
+	var ts int64
+	if err := db.QueryRow(`SELECT pinned_by,ts FROM pins WHERE message_id=?`, e.message).Scan(&by, &ts); err != nil {
+		t.Fatalf("failed unpin lost the stored pin: %v", err)
+	}
+	if by != e.peer.UserID || ts != 42 {
+		t.Fatalf("failed unpin changed pin metadata: by=%q ts=%d", by, ts)
+	}
+
+	// Removing the fault must let the same authorized request persist and
+	// broadcast success, proving the failure was caused by the trigger.
+	if _, err := db.Exec(`DROP TRIGGER reject_pin_delete`); err != nil {
+		t.Fatal(err)
+	}
+	e.origin.buf.Reset()
+	e.peer.buf.Reset()
+	e.logs.Reset()
+	e.invoke(t, "unpin")
+	e.assertSuccess(t, "unpinned")
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pins WHERE message_id=?`, e.message).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("unpin after removing the fault was not persisted")
+	}
+}
+
 func TestPinPersistence_OpenFailure(t *testing.T) {
 	for _, verb := range []string{"pin", "unpin"} {
 		t.Run(verb, func(t *testing.T) {

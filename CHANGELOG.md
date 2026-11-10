@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Changed
+- **Failed-unpin row-preservation regression (2026-11-11).** Keep an existing
+  pin in a real temporary store while a SQLite trigger rejects deletion. Assert
+  the original row/metadata survive, the caller receives the internal error and
+  neither client receives success. Remove the trigger and verify deletion and
+  fan-out recover. Document the test pattern; production behavior is unchanged.
 - **Pin/unpin persistence errors (2026-11-11).** Stop before success broadcasts
   when opening the room database or writing pin state fails. Return the existing
   correlated `internal_error` to the authorized caller and log the storage cause

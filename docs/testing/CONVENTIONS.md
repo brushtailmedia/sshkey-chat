@@ -141,6 +141,11 @@ assertions. Success, duplicate/no-op, authorization/retirement precedence and
 error-response limiting are separate controls. Keep foreign keys enabled when
 checking a well-shaped missing-message pin.
 
+For failed-unpin row preservation, seed an existing pin and install a temporary
+`BEFORE DELETE` trigger using `RAISE(ABORT, ...)`. Assert the row and its metadata
+survive, with the same error/log/no-success contract. Drop the trigger and repeat
+the request to prove normal deletion and fan-out recover once the fault is gone.
+
 Store copied Go source in audit/planning evidence as `.go.txt` or in an archive.
 Git-ignored documentation folders are still scanned by `go build/test ./...`;
 plain `.go` snapshots can accidentally create packages and break local gates.
