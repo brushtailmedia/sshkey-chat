@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Changed
+- **Pin/unpin persistence errors (2026-11-11).** Stop before success broadcasts
+  when opening the room database or writing pin state fails. Return the existing
+  correlated `internal_error` to the authorized caller and log the storage cause
+  for operators. Preserve duplicate-pin and absent-pin unpin success semantics,
+  authorization/privacy gates and error-response limiting. Add real-store failure
+  regressions, including cold database-open and missing-message cases.
 - **S3 follow-up (2026-11-11).** Fixture lint now checks raw JSON `file_ids`
   arrays and reports unsupported ID-bearing JSON templates instead of silently
   skipping their static fields. Add shared regressions for array elements,

@@ -1883,10 +1883,18 @@ func (s *Server) handlePin(c *Client, raw json.RawMessage) {
 	}
 
 	db, err := s.store.RoomDB(msg.Room)
-	if err == nil {
-		db.Exec(`INSERT OR IGNORE INTO pins (message_id, pinned_by, ts) VALUES (?, ?, ?)`,
-			msg.ID, c.UserID, time.Now().Unix())
+	if err != nil {
+		s.logger.Error("failed to open room database for pin", "room", msg.Room, "message_id", msg.ID, "error", err)
+		s.respondError(c, msg.CorrID, protocol.CodeInternal, "Failed to pin message", 0)
+		return
 	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO pins (message_id, pinned_by, ts) VALUES (?, ?, ?)`,
+		msg.ID, c.UserID, time.Now().Unix()); err != nil {
+		s.logger.Error("failed to pin message", "room", msg.Room, "message_id", msg.ID, "error", err)
+		s.respondError(c, msg.CorrID, protocol.CodeInternal, "Failed to pin message", 0)
+		return
+	}
+	// A successful no-op is valid; only a storage error prevents fan-out.
 
 	s.broadcastToRoom(msg.Room, protocol.Pinned{
 		Type:     "pinned",
@@ -1939,9 +1947,17 @@ func (s *Server) handleUnpin(c *Client, raw json.RawMessage) {
 	}
 
 	db, err := s.store.RoomDB(msg.Room)
-	if err == nil {
-		db.Exec(`DELETE FROM pins WHERE message_id = ?`, msg.ID)
+	if err != nil {
+		s.logger.Error("failed to open room database for unpin", "room", msg.Room, "message_id", msg.ID, "error", err)
+		s.respondError(c, msg.CorrID, protocol.CodeInternal, "Failed to unpin message", 0)
+		return
 	}
+	if _, err := db.Exec(`DELETE FROM pins WHERE message_id = ?`, msg.ID); err != nil {
+		s.logger.Error("failed to unpin message", "room", msg.Room, "message_id", msg.ID, "error", err)
+		s.respondError(c, msg.CorrID, protocol.CodeInternal, "Failed to unpin message", 0)
+		return
+	}
+	// A successful no-op is valid; only a storage error prevents fan-out.
 
 	s.broadcastToRoom(msg.Room, protocol.Unpinned{
 		Type: "unpinned",

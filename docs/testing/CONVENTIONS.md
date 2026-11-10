@@ -127,3 +127,20 @@ broadcast/pending upload/typing work, and unchanged logical rows/database files.
 Fixed expected wire contracts are independent of the production rejection helper.
 Each row also keeps a separate well-shaped control; existing correlation,
 authorization, empty-value and flood/size-cap precedence regressions remain.
+
+## Pin/unpin Persistence Regressions
+
+`pin_persistence_test.go` uses real temporary stores and captures both sender and
+peer frames. Drop only the room's `pins` table after seeding to force SQL failure.
+To test a database-open failure without a production seam, leave the room DB cold
+and place a directory at `<dataDir>/data/room-<roomID>.db`; the helper asserts
+that `RoomDB` actually fails before invoking the handler. This works without
+permission tricks, sleeps or a store interface. Retain the exact correlated
+internal-error, operator-log, no-success/no-mutation and invalid-ID-counter
+assertions. Success, duplicate/no-op, authorization/retirement precedence and
+error-response limiting are separate controls. Keep foreign keys enabled when
+checking a well-shaped missing-message pin.
+
+Store copied Go source in audit/planning evidence as `.go.txt` or in an archive.
+Git-ignored documentation folders are still scanned by `go build/test ./...`;
+plain `.go` snapshots can accidentally create packages and break local gates.

@@ -961,6 +961,20 @@ Rooms only. Neither group DMs nor 1:1 DMs support pins — the `pin` / `unpin` /
 
 The server filters pins by the user's `first_epoch` -- new members only see pins from messages they can decrypt. `message_data` includes the full encrypted message envelopes so clients can decrypt and show pin previews without scrolling back.
 
+**Persistence and failures.** `pinned` and `unpinned` are broadcast only after
+the corresponding database statement succeeds. A room-database open or SQL
+write failure sends the authorized caller the existing `internal_error` frame,
+with the request `corr_id` and `Failed to pin message` or `Failed to unpin
+message`; no success frame is sent to the caller or peers. The underlying
+storage error is logged for operators and is not included in the wire message.
+The usual error-response limiter can suppress the error frame. Storage failure
+on a well-shaped request is not an invalid-ID signal.
+
+Duplicate pins (`INSERT OR IGNORE`) and unpinning an absent pin remain successful
+no-ops and retain their established success broadcasts. Zero affected rows is
+not an error. A well-shaped pin ID referencing a missing message can fail the
+foreign-key constraint and takes the same generic internal-error path.
+
 ### Profiles
 
 ```json
