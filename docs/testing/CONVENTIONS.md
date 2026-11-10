@@ -96,6 +96,16 @@ review. Non-ID fields (display names, SSH login hints, protocol type names and
 trusted system actors) are outside the ID rule. Optional empty fields retain
 their protocol semantics. Parse/read failures and an empty scan fail the guard.
 
+Raw JSON `members`, `admins` and `file_ids` arrays are checked element by
+element for the repository's selected ID classes, including arrays in nested
+message objects.
+When an ID-bearing JSON expression cannot be evaluated, the lint reports it
+for review instead of skipping its static fields. For example, indexed runtime
+formatting (`%[1]s`) is outside the supported template evaluator: rewrite a
+valid fixture with supported `%s` formatting/builders. Reserve a malformed
+exemption for an actual intentional negative fixture, not a valid unsupported
+format. Non-ID JSON/text and disabled ID classes remain outside the scan.
+
 Keep intentional malformed test input and its rejection assertions unchanged.
 Attach `// malformed: <specific reason>` to the same source line as that input;
 a bare marker, an unrelated comment or a marker on another line does not exempt
@@ -105,3 +115,15 @@ fixture with a valid builder to make the guard pass.
 The server guard scans `internal/server`, `internal/store` and
 `cmd/sshkey-server` test files for `usr_`, `room_`, `group_`, `dm_`, `msg_`,
 `react_`, `file_` and `up_`. Device IDs are deliberately excluded.
+
+### Handler ID regression matrix
+
+`internal/server/id_validation_test.go` exercises five malformed forms through
+every one of the 68 handler/field/context rows: short, wrong prefix at the
+correct byte length, invalid alphabet, oversized suffix and UTF-8 at the correct
+byte length. Each case asserts the exact encoded rejection (or silence), one
+requesting-device invalid-ID event, no limiter hiding that event, no peer
+broadcast/pending upload/typing work, and unchanged logical rows/database files.
+Fixed expected wire contracts are independent of the production rejection helper.
+Each row also keeps a separate well-shaped control; existing correlation,
+authorization, empty-value and flood/size-cap precedence regressions remain.

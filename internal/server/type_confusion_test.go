@@ -85,7 +85,7 @@ func TestHandleSendGroup_WrappedKeysNonMemberKeyNamesRejected(t *testing.T) {
 		"wrapped_keys":{"☃":"` + testutil.WrappedKey("abc") + `","hello world":"` + testutil.WrappedKey("def") + `"},
 		"payload":"p",
 		"signature":"s"
-	}`)
+	}`) // malformed: wrapped-key member names deliberately violate usr_ shape.
 	s.handleSendGroup(alice.Client, raw)
 
 	msgs := alice.messages()

@@ -71,3 +71,45 @@ func TestFixtureLint_DynamicTemplatesKeepLiteralChecks(t *testing.T) {
 		}
 	}
 }
+
+func TestFixtureLint_JSONFileArraysAndUnsupportedTemplates(t *testing.T) {
+	cases := []struct {
+		name, body string
+		bad        bool
+	}{
+		{"valid file array", "_ = `" + `{"file_ids":["file_AAAAAAAAAAAAAAAAAAAAA"]}` + "`", false},
+		{"empty file array", "_ = `" + `{"file_ids":[]}` + "`", false},
+		{"short file array", "_ = `" + `{"file_ids":["file_short"]}` + "`", true},
+		{"wrong prefix in file array", "_ = `" + `{"file_ids":["room_AAAAAAAAAAAAAAAAAAAAA"]}` + "`", true},
+		{"later bad array entry", "_ = `" + `{"file_ids":["file_AAAAAAAAAAAAAAAAAAAAA","file_short"]}` + "`", true},
+		{"nested file array", "_ = `" + `{"messages":[{"file_ids":["file_short"]}]}` + "`", true},
+		{"other string array", "_ = `" + `{"labels":["file_short"]}` + "`", false},
+		{"same-line negative array", "_ = `" + `{"file_ids":["file_short"]}` + "` // malformed: short file array must reject", false},
+		{"dynamic array keeps static check", `_ = fmt.Sprintf("{\"payload\":\"%s\",\"file_ids\":[\"file_short\"]}",payload)`, true},
+		{"dynamic file array", `_ = fmt.Sprintf("{\"file_ids\":[\"%s\"]}",fileID)`, false},
+		{"indexed format hides bad file", `_ = fmt.Sprintf("{\"payload\":\"%[1]s\",\"file_id\":\"file_short\"}",payload)`, true},
+		{"indexed format needs review even with valid file", `_ = fmt.Sprintf("{\"payload\":\"%[1]s\",\"file_ids\":[\"file_AAAAAAAAAAAAAAAAAAAAA\"]}",payload)`, true},
+		{"indexed negative with reason", `_ = fmt.Sprintf("{\"file_id\":\"%[1]s\"}",fileID) // malformed: indexed negative template intentionally outside supported formatting`, false},
+		{"indexed non-ID JSON", `_ = fmt.Sprintf("{\"payload\":\"%[1]s\"}",payload)`, false},
+		{"indexed ordinary text", `_ = fmt.Sprintf("file_id=%[1]s",fileID)`, false},
+		{"unparseable file array", "_ = `" + `{"file_ids":["file_short"],` + "`", true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			source := []byte("package p\nfunc f(){\n" + tt.body + "\n}\n")
+			issues, err := testutil.LintIDFixtures("sample.go", source, map[string]bool{"file_": true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (len(issues) > 0) != tt.bad {
+				t.Fatalf("issues=%v; want bad=%v", issues, tt.bad)
+			}
+		})
+	}
+	// A repository's selected classes still control the scan. The term's
+	// file-only guard must not start policing user or room fixture classes.
+	issues, err := testutil.LintIDFixtures("sample.go", []byte("package p\nfunc f(){_ = `"+`{"file_ids":["file_short"]}`+"`}\n"), map[string]bool{"usr_": true})
+	if err != nil || len(issues) != 0 {
+		t.Fatalf("disabled file class: issues=%v err=%v", issues, err)
+	}
+}

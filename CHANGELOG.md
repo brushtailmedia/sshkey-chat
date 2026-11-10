@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Changed
+- **S3 follow-up (2026-11-11).** Fixture lint now checks raw JSON `file_ids`
+  arrays and reports unsupported ID-bearing JSON templates instead of silently
+  skipping their static fields. Add shared regressions for array elements,
+  nested/dynamic JSON, indexed formatting and intentional negative exemptions.
+  Expand all 68 handler/field/context rows to five malformed-ID forms and assert
+  exact wire responses, counters and rejection side effects; preserve existing
+  rate limits, privacy contracts and well-shaped controls.
 - Validate client-supplied room/group/DM routing IDs, message and reaction targets,
   group member IDs, upload contexts, read markers, history cursors and create-DM
   recipients. Keep existing authorization, privacy, correlation and per-verb

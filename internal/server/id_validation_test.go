@@ -172,90 +172,149 @@ func logicalIDState(t *testing.T, s *Server) map[string][]string {
 	return state
 }
 
+// assertIDShapeRejection uses explicit wire contracts, independently of the
+// production reject helper or an unknown-ID response from the same handler.
+// This catches the right signal paired with a wrong code, message or corr_id.
+func assertIDShapeRejection(t *testing.T, e idShapeEnv, tc idShapeCase, bad string) {
+	t.Helper()
+	var expected any
+	code, message := protocol.ErrUnknownRoom, "You are not a member of this room"
+	switch tc.kind {
+	case "group":
+		code, message = protocol.ErrUnknownGroup, "You are not a member of this group"
+	case "dm":
+		code, message = protocol.ErrUnknownDM, "You are not a party to this DM"
+	}
+	corrID := ""
+	switch tc.verb {
+	case "send", "send_group", "send_dm", "pin", "unpin", "delete", "room_update", "history", "react":
+		corrID = "corr_AAAAAAAAAAAAAAAAAAAAA"
+	}
+	silent := false
+	switch tc.verb {
+	case "typing", "read", "unreact":
+		silent = true
+	case "react":
+		switch {
+		case tc.field == "id" || tc.kind == "dm":
+			silent = true
+		case tc.kind == "group":
+			code, message = protocol.ErrInvalidWrappedKeys, "wrapped_keys must match group member list"
+		}
+	case "history":
+		if tc.field == "before" {
+			code, message = protocol.CodeInvalidCursor, "history cursor is invalid for this context"
+		} else if tc.kind == "room" {
+			code, message = protocol.ErrNotAuthorized, "You don't have access to room: "+bad
+		}
+	case "epoch_rotate":
+		code, message = protocol.ErrEpochConflict, "Conflict detected — please try again"
+	case "create_group":
+		code, message = protocol.CodeDenied, "operation rejected"
+	case "create_dm":
+		code, message = "invalid_message", "malformed create_dm"
+	case "add_to_group":
+		if tc.field == "user" {
+			code, message = protocol.ErrUnknownUser, "No such user"
+		}
+	}
+	if silent {
+		if e.origin.buf.Len() != 0 {
+			t.Fatalf("silent rejection emitted %s", e.origin.buf.Bytes())
+		}
+		return
+	}
+	if tc.verb == "upload_start" {
+		expected = protocol.UploadError{Type: "upload_error", UploadID: testutil.UploadID("id-shape"), Code: code, Message: message, CorrID: "corr_AAAAAAAAAAAAAAAAAAAAA"}
+	} else {
+		expected = protocol.Error{Type: "error", Code: code, Message: message, CorrID: corrID}
+	}
+	var wire bytes.Buffer
+	if err := protocol.NewEncoder(&wire).Encode(expected); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(e.origin.buf.Bytes(), wire.Bytes()) {
+		t.Fatalf("wrong rejection frame:\n got %s\nwant %s", e.origin.buf.Bytes(), wire.Bytes())
+	}
+}
+
 func checkIDShapeCases(t *testing.T, cases []idShapeCase) {
 	t.Helper()
 	for _, tc := range cases {
 		t.Run(tc.verb+"/"+tc.field+"/"+tc.kind, func(t *testing.T) {
-			for _, malformed := range []bool{true, false} {
-				name := "valid-shape"
-				if malformed {
-					name = "malformed"
-				}
-				t.Run(name, func(t *testing.T) {
-					e := newIDShapeEnv(t)
-					frame := e.frame(tc)
-					if malformed {
-						bad := tc.prefix + "short" // malformed: the selected field must reject a short ID.
+			t.Run("malformed", func(t *testing.T) {
+				e := newIDShapeEnv(t)
+				before := logicalIDState(t, e.s)
+				variants := []struct{ name, value string }{
+					{"short", tc.prefix + "short"},
+					{"wrong-prefix", "x" + tc.prefix[1:] + strings.Repeat("A", 21)},
+					{"invalid-alphabet", tc.prefix + strings.Repeat("A", 20) + "."},
+					{"oversized", tc.prefix + strings.Repeat("A", 22)},
+					{"utf8", tc.prefix + strings.Repeat("A", 19) + "é"},
+				} // malformed: each variant violates the selected field's production ID contract.
+				// Reuse only the rejection environment: every variant must leave
+				// it unchanged. Five requests fit the limiter's minimum burst;
+				// real limit settings stay active, with separate precedence tests.
+				for i, variant := range variants {
+					t.Run(variant.name, func(t *testing.T) {
+						frame := e.frame(tc)
 						if tc.field == "members" {
-							frame[tc.field] = []string{bad}
+							frame[tc.field] = []string{variant.value}
 						} else {
-							frame[tc.field] = bad
+							frame[tc.field] = variant.value
 						}
-					}
-					// Delete's positive control resolves a well-shaped missing row instead
-					// of relying on an artificial cryptographic signature to verify.
-					if !malformed && tc.verb == "delete" {
-						frame["id"] = testutil.MsgID("missing")
-					}
-					before := logicalIDState(t, e.s)
-					raw, err := json.Marshal(frame)
-					if err != nil {
-						t.Fatal(err)
-					}
-					e.s.handleMessage(e.origin.Client, tc.verb, raw)
-					count := e.s.counters.Get(counters.SignalInvalidNanoID, e.origin.DeviceID)
-					want := int64(0)
-					if malformed {
-						want = 1
-					}
-					if int64(count) != want {
-						t.Fatalf("invalid-ID count=%d want %d; frames=%s", count, want, e.origin.buf.String())
-					}
-					if e.s.counters.Get(counters.SignalInvalidNanoID, e.peer.DeviceID) != 0 {
-						t.Fatal("counter attributed to another device")
-					}
-					if !malformed {
-						return
-					}
-					e.s.typing.mu.Lock()
-					pendingTyping := len(e.s.typing.timers)
-					e.s.typing.mu.Unlock()
-					e.s.files.mu.RLock()
-					pendingUploads := len(e.s.files.uploads)
-					e.s.files.mu.RUnlock()
-					if pendingUploads != 0 {
-						t.Fatal("malformed ID queued a pending upload")
-					}
-					if pendingTyping != 0 {
-						t.Fatal("malformed ID queued typing expiry work")
-					}
-					after := logicalIDState(t, e.s)
-					if !reflect.DeepEqual(before, after) {
-						t.Fatal("malformed ID changed rows or database-file set")
-					}
-					if len(e.peer.messages()) != 0 {
-						t.Fatalf("peer received a broadcast: %s", e.peer.buf.String())
-					}
-					for _, raw := range e.origin.messages() {
-						var response protocol.Error
-						if err := json.Unmarshal(raw, &response); err != nil {
+						e.origin.buf.Reset()
+						e.peer.buf.Reset()
+						raw, err := json.Marshal(frame)
+						if err != nil {
 							t.Fatal(err)
 						}
-						wantType := "error"
-						if tc.verb == "upload_start" {
-							wantType = "upload_error"
+						e.s.handleMessage(e.origin.Client, tc.verb, raw)
+						if got := e.s.counters.Get(counters.SignalInvalidNanoID, e.origin.DeviceID); got != int64(i+1) {
+							t.Fatalf("invalid-ID count=%d want %d; frames=%s", got, i+1, e.origin.buf.String())
 						}
-						if response.Type != wantType {
-							t.Fatalf("success event on rejection: %s", raw)
+						if e.s.counters.Get(counters.SignalInvalidNanoID, e.peer.DeviceID) != 0 {
+							t.Fatal("counter attributed to another device")
 						}
-					}
-					if tc.verb == "typing" || tc.verb == "read" || tc.verb == "unreact" {
-						if len(e.origin.messages()) != 0 {
-							t.Fatalf("silent verb emitted a response: %s", e.origin.buf.String())
+						if e.s.counters.Get(counters.SignalRateLimited, e.origin.DeviceID) != 0 || e.s.counters.Get(counters.SignalErrorFlood, e.origin.DeviceID) != 0 {
+							t.Fatal("another limiter hid the ID rejection")
 						}
-					}
-				})
-			}
+						assertIDShapeRejection(t, e, tc, variant.value)
+						e.s.typing.mu.Lock()
+						pendingTyping := len(e.s.typing.timers)
+						e.s.typing.mu.Unlock()
+						e.s.files.mu.RLock()
+						pendingUploads := len(e.s.files.uploads)
+						e.s.files.mu.RUnlock()
+						if pendingUploads != 0 || pendingTyping != 0 {
+							t.Fatal("malformed ID queued pending upload or typing work")
+						}
+						if !reflect.DeepEqual(before, logicalIDState(t, e.s)) {
+							t.Fatal("malformed ID changed rows or database-file set")
+						}
+						if len(e.peer.messages()) != 0 {
+							t.Fatalf("peer received a broadcast: %s", e.peer.buf.String())
+						}
+					})
+				}
+			})
+			t.Run("valid-shape", func(t *testing.T) {
+				e := newIDShapeEnv(t)
+				frame := e.frame(tc)
+				// Delete's syntax control resolves a well-shaped missing row;
+				// signature verification tests continue using real signatures.
+				if tc.verb == "delete" {
+					frame["id"] = testutil.MsgID("missing")
+				}
+				raw, err := json.Marshal(frame)
+				if err != nil {
+					t.Fatal(err)
+				}
+				e.s.handleMessage(e.origin.Client, tc.verb, raw)
+				if got := e.s.counters.Get(counters.SignalInvalidNanoID, e.origin.DeviceID); got != 0 {
+					t.Fatalf("valid shape rejected: count=%d frames=%s", got, e.origin.buf.String())
+				}
+			})
 		})
 	}
 }

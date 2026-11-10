@@ -91,11 +91,15 @@ func LintIDFixtures(filename string, source []byte, prefixes map[string]bool) ([
 				if s, ok := item.(string); ok && prefixes[prefix] && !(s == "" && fixtureOptionalEmpty(k, "")) && !fixtureDynamicJSON(node, s) && !fixtureIDShape(s, prefix) {
 					report(node, fmt.Sprintf("JSON %s fixture %q must have %s shape", k, s, prefix))
 				}
-				if k == "members" || k == "admins" {
-					if a, ok := item.([]any); ok && prefixes["usr_"] {
+				if k == "members" || k == "admins" || k == "file_ids" {
+					itemPrefix := "usr_"
+					if k == "file_ids" {
+						itemPrefix = "file_"
+					}
+					if a, ok := item.([]any); ok && prefixes[itemPrefix] {
 						for _, entry := range a {
-							if s, ok := entry.(string); ok && !fixtureDynamicJSON(node, s) && !fixtureIDShape(s, "usr_") {
-								report(node, "JSON member fixture must be a real-shaped usr_ ID")
+							if s, ok := entry.(string); ok && !fixtureDynamicJSON(node, s) && !fixtureIDShape(s, itemPrefix) {
+								report(node, fmt.Sprintf("JSON %s fixture must have %s shape", k, itemPrefix))
 							}
 						}
 					}
@@ -230,6 +234,9 @@ func LintIDFixtures(filename string, source []byte, prefixes map[string]bool) ([
 		}
 		value, known := fixtureJSONString(expr)
 		if !known {
+			if fixtureJSONTemplateHasIDs(expr, prefixes) {
+				report(expr, "unsupported JSON ID fixture expression; use supported formatting or mark deliberate malformed input")
+			}
 			return true
 		}
 		trimmed := strings.TrimSpace(value)
@@ -238,7 +245,7 @@ func LintIDFixtures(filename string, source []byte, prefixes map[string]bool) ([
 		}
 		var decoded any
 		if err := json.Unmarshal([]byte(value), &decoded); err != nil {
-			if (prefixes["room_"] && strings.Contains(value, `"room"`)) || (prefixes["group_"] && strings.Contains(value, `"group"`)) || (prefixes["file_"] && strings.Contains(value, `"file_id"`)) {
+			if fixtureJSONTemplateHasIDs(expr, prefixes) {
 				report(expr, "unparseable JSON ID fixture; mark deliberate malformed input")
 			}
 			return true
@@ -247,6 +254,42 @@ func LintIDFixtures(filename string, source []byte, prefixes map[string]bool) ([
 		return true
 	})
 	return issues, nil
+}
+
+var fixtureJSONKeyPattern = regexp.MustCompile(`"([A-Za-z_]+)"\s*:`)
+
+// fixtureJSONTemplateHasIDs recognizes static JSON keys even when evaluating
+// the complete expression fails (for example an indexed runtime Sprintf).
+// Report such ID-bearing templates for review instead of losing their static
+// fields. This inspects literal fragments only, not values of runtime variables.
+func fixtureJSONTemplateHasIDs(expr ast.Expr, prefixes map[string]bool) bool {
+	var fragments strings.Builder
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			if value, err := strconv.Unquote(lit.Value); err == nil {
+				fragments.WriteString(value)
+			}
+		}
+		return true
+	})
+	template := strings.TrimSpace(fragments.String())
+	if !strings.HasPrefix(template, "{") && !strings.HasPrefix(template, "[") {
+		return false
+	}
+	for _, match := range fixtureJSONKeyPattern.FindAllStringSubmatch(template, -1) {
+		key := match[1]
+		prefix := fixtureFieldPrefix(key, "")
+		switch key {
+		case "members", "admins", "wrapped_keys":
+			prefix = "usr_"
+		case "file_ids":
+			prefix = "file_"
+		}
+		if prefixes[prefix] {
+			return true
+		}
+	}
+	return false
 }
 
 func fixtureExprName(e ast.Expr) string {
