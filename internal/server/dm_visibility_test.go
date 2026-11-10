@@ -5,16 +5,17 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestHandleLeaveDM_SetsHiddenForLeaverOnly(t *testing.T) {
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage("dm_ab", "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(testutil.DMID("ab"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
 
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_bob_1"] = bob.Client
 	s.mu.Unlock()
@@ -28,40 +29,40 @@ func TestHandleLeaveDM_SetsHiddenForLeaverOnly(t *testing.T) {
 	if after == nil {
 		t.Fatal("DM should still exist after one-sided leave")
 	}
-	if !after.HiddenFor("bob") {
+	if !after.HiddenFor(testutil.UserID("bob")) {
 		t.Fatal("bob should be hidden after leave_dm")
 	}
-	if after.HiddenFor("alice") {
+	if after.HiddenFor(testutil.UserID("alice")) {
 		t.Fatal("alice should remain visible after bob leave_dm")
 	}
-	if after.CutoffFor("bob") == 0 {
+	if after.CutoffFor(testutil.UserID("bob")) == 0 {
 		t.Fatal("bob cutoff should be set after leave_dm")
 	}
 }
 
 func TestHandleCreateDM_ReusesRowClearsHiddenButKeepsCutoff(t *testing.T) {
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage("dm_ab", "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(testutil.DMID("ab"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
 
-	if err := s.store.SetDMLeftAt(dm.ID, "alice", 1234); err != nil {
+	if err := s.store.SetDMLeftAt(dm.ID, testutil.UserID("alice"), 1234); err != nil {
 		t.Fatalf("SetDMLeftAt: %v", err)
 	}
-	if err := s.store.SetDMHidden(dm.ID, "alice", true); err != nil {
+	if err := s.store.SetDMHidden(dm.ID, testutil.UserID("alice"), true); err != nil {
 		t.Fatalf("SetDMHidden alice: %v", err)
 	}
-	if err := s.store.SetDMHidden(dm.ID, "bob", true); err != nil {
+	if err := s.store.SetDMHidden(dm.ID, testutil.UserID("bob"), true); err != nil {
 		t.Fatalf("SetDMHidden bob: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
 
-	s.handleCreateDM(alice.Client, mustJSON(t, protocol.CreateDM{Type: "create_dm", Other: "bob"}))
+	s.handleCreateDM(alice.Client, mustJSON(t, protocol.CreateDM{Type: "create_dm", Other: testutil.UserID("bob")}))
 
 	after, err := s.store.GetDirectMessage(dm.ID)
 	if err != nil {
@@ -70,11 +71,11 @@ func TestHandleCreateDM_ReusesRowClearsHiddenButKeepsCutoff(t *testing.T) {
 	if after == nil {
 		t.Fatal("DM should still exist")
 	}
-	if after.HiddenFor("alice") || after.HiddenFor("bob") {
+	if after.HiddenFor(testutil.UserID("alice")) || after.HiddenFor(testutil.UserID("bob")) {
 		t.Fatalf("hidden flags should be cleared for both parties: alice=%v bob=%v",
-			after.HiddenFor("alice"), after.HiddenFor("bob"))
+			after.HiddenFor(testutil.UserID("alice")), after.HiddenFor(testutil.UserID("bob")))
 	}
-	if got := after.CutoffFor("alice"); got != 1234 {
+	if got := after.CutoffFor(testutil.UserID("alice")); got != 1234 {
 		t.Fatalf("alice cutoff changed: got %d want 1234", got)
 	}
 
@@ -96,18 +97,18 @@ func TestHandleCreateDM_ReusesRowClearsHiddenButKeepsCutoff(t *testing.T) {
 
 func TestSendDMList_IncludesHiddenForCaller(t *testing.T) {
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage("dm_ab", "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(testutil.DMID("ab"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
-	if err := s.store.SetDMLeftAt(dm.ID, "alice", 4321); err != nil {
+	if err := s.store.SetDMLeftAt(dm.ID, testutil.UserID("alice"), 4321); err != nil {
 		t.Fatalf("SetDMLeftAt: %v", err)
 	}
-	if err := s.store.SetDMHidden(dm.ID, "alice", true); err != nil {
+	if err := s.store.SetDMHidden(dm.ID, testutil.UserID("alice"), true); err != nil {
 		t.Fatalf("SetDMHidden: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.sendDMList(alice.Client)
 
 	msgs := alice.messages()

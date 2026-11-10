@@ -1,6 +1,11 @@
 package store
 
-import "testing"
+import (
+	"sort"
+	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
+)
 
 // Layer 1 (server canonical) regression tests for the unread
 // pre-join leak fix. See unread-epoch-leak-fix.md.
@@ -30,7 +35,7 @@ func openStore(t *testing.T) *Store {
 func roomMsg(t *testing.T, s *Store, room, id string, epoch, ts int64) {
 	t.Helper()
 	if _, err := s.InsertRoomMessage(room, StoredMessage{
-		ID: id, Sender: "alice", TS: ts, Epoch: epoch, Payload: "x",
+		ID: id, Sender: testutil.UserID("alice"), TS: ts, Epoch: epoch, Payload: "x",
 	}); err != nil {
 		t.Fatalf("insert room msg %q: %v", id, err)
 	}
@@ -39,7 +44,7 @@ func roomMsg(t *testing.T, s *Store, room, id string, epoch, ts int64) {
 func groupMsg(t *testing.T, s *Store, gid, id string, ts int64) {
 	t.Helper()
 	if _, err := s.InsertGroupMessage(gid, StoredMessage{
-		ID: id, Sender: "alice", TS: ts, Payload: "x",
+		ID: id, Sender: testutil.UserID("alice"), TS: ts, Payload: "x",
 	}); err != nil {
 		t.Fatalf("insert group msg %q: %v", id, err)
 	}
@@ -77,25 +82,25 @@ func TestGetRoomUnreadCount_NewMemberSkipsPreJoinMessages(t *testing.T) {
 	s := openStore(t)
 	roomID := GenerateID("room_")
 	seedTestRoom(t, s, roomID, "general", "")
-	if err := s.AddRoomMember(roomID, "me", 0); err != nil {
+	if err := s.AddRoomMember(roomID, testutil.UserID("me"), 0); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
 	// joined_at pinned to 2022-01-01 00:00:00 UTC = unix 1640995200.
-	pinRoomJoinedAt(t, s, roomID, "me", "2022-01-01 00:00:00")
-	roomMsg(t, s, roomID, "pre_1", 1, 1640995100)  // before join
-	roomMsg(t, s, roomID, "pre_2", 1, 1640995199)  // before join
-	roomMsg(t, s, roomID, "post_1", 1, 1640995200) // == join (inclusive)
-	roomMsg(t, s, roomID, "post_2", 1, 1640995300) // after join
+	pinRoomJoinedAt(t, s, roomID, testutil.UserID("me"), "2022-01-01 00:00:00")
+	roomMsg(t, s, roomID, testutil.MsgID("pre_1"), 1, 1640995100)  // before join
+	roomMsg(t, s, roomID, testutil.MsgID("pre_2"), 1, 1640995199)  // before join
+	roomMsg(t, s, roomID, testutil.MsgID("post_1"), 1, 1640995200) // == join (inclusive)
+	roomMsg(t, s, roomID, testutil.MsgID("post_2"), 1, 1640995300) // after join
 
-	u, err := s.GetRoomUnreadCount(roomID, "me", "dev1")
+	u, err := s.GetRoomUnreadCount(roomID, testutil.UserID("me"), "dev1")
 	if err != nil {
 		t.Fatalf("unread: %v", err)
 	}
 	if u.Count != 2 {
 		t.Errorf("Count = %d, want 2 (ts >= joined_at only, NOT 4)", u.Count)
 	}
-	if u.FirstUnreadID != "post_1" {
-		t.Errorf("FirstUnreadID = %q, want %q", u.FirstUnreadID, "post_1")
+	if u.FirstUnreadID != testutil.MsgID("post_1") {
+		t.Errorf("FirstUnreadID = %q, want %q", u.FirstUnreadID, testutil.MsgID("post_1"))
 	}
 }
 
@@ -105,15 +110,15 @@ func TestGetRoomUnreadCount_LongStandingMemberNoRegression(t *testing.T) {
 	s := openStore(t)
 	roomID := GenerateID("room_")
 	seedTestRoom(t, s, roomID, "general", "")
-	if err := s.AddRoomMember(roomID, "me", 0); err != nil {
+	if err := s.AddRoomMember(roomID, testutil.UserID("me"), 0); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
-	pinRoomJoinedAt(t, s, roomID, "me", "2000-01-01 00:00:00")
-	roomMsg(t, s, roomID, "m1", 1, 1640995200)
-	roomMsg(t, s, roomID, "m2", 1, 1640995300)
-	roomMsg(t, s, roomID, "m3", 1, 1640995400)
+	pinRoomJoinedAt(t, s, roomID, testutil.UserID("me"), "2000-01-01 00:00:00")
+	roomMsg(t, s, roomID, testutil.MsgID("m1"), 1, 1640995200)
+	roomMsg(t, s, roomID, testutil.MsgID("m2"), 1, 1640995300)
+	roomMsg(t, s, roomID, testutil.MsgID("m3"), 1, 1640995400)
 
-	u, err := s.GetRoomUnreadCount(roomID, "me", "dev1")
+	u, err := s.GetRoomUnreadCount(roomID, testutil.UserID("me"), "dev1")
 	if err != nil {
 		t.Fatalf("unread: %v", err)
 	}
@@ -131,10 +136,10 @@ func TestGetRoomUnreadCount_NonMemberReturnsZero(t *testing.T) {
 	s := openStore(t)
 	roomID := GenerateID("room_")
 	seedTestRoom(t, s, roomID, "general", "")
-	roomMsg(t, s, roomID, "m1", 1, 1640995200)
-	roomMsg(t, s, roomID, "m2", 1, 1640995300)
+	roomMsg(t, s, roomID, testutil.MsgID("m1"), 1, 1640995200)
+	roomMsg(t, s, roomID, testutil.MsgID("m2"), 1, 1640995300)
 
-	u, err := s.GetRoomUnreadCount(roomID, "stranger", "dev1")
+	u, err := s.GetRoomUnreadCount(roomID, testutil.UserID("stranger"), "dev1")
 	if err != nil {
 		t.Fatalf("non-member must not error: %v", err)
 	}
@@ -150,42 +155,42 @@ func TestGetRoomUnreadCount_LeftRejoinedOnlyPostRejoin(t *testing.T) {
 	s := openStore(t)
 	roomID := GenerateID("room_")
 	seedTestRoom(t, s, roomID, "general", "")
-	if err := s.AddRoomMember(roomID, "me", 0); err != nil {
+	if err := s.AddRoomMember(roomID, testutil.UserID("me"), 0); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
-	pinRoomJoinedAt(t, s, roomID, "me", "2022-01-01 00:00:00")
-	roomMsg(t, s, roomID, "old_read", 1, 1640995300) // read before leaving
-	if err := s.SetReadPosition("me", "dev1", roomID, "", "", "old_read"); err != nil {
+	pinRoomJoinedAt(t, s, roomID, testutil.UserID("me"), "2022-01-01 00:00:00")
+	roomMsg(t, s, roomID, testutil.MsgID("old_read"), 1, 1640995300) // read before leaving
+	if err := s.SetReadPosition(testutil.UserID("me"), "dev1", roomID, "", "", testutil.MsgID("old_read")); err != nil {
 		t.Fatalf("set read pos: %v", err)
 	}
 
 	// Leave; while-absent messages must stay out of unread.
-	if err := s.RemoveRoomMember(roomID, "me"); err != nil {
+	if err := s.RemoveRoomMember(roomID, testutil.UserID("me")); err != nil {
 		t.Fatalf("remove member: %v", err)
 	}
-	roomMsg(t, s, roomID, "away_1", 1, 1643673600)
-	roomMsg(t, s, roomID, "away_2", 1, 1643673700)
+	roomMsg(t, s, roomID, testutil.MsgID("away_1"), 1, 1643673600)
+	roomMsg(t, s, roomID, testutil.MsgID("away_2"), 1, 1643673700)
 
 	// Re-add with a fresh joined_at, then new messages.
-	if err := s.AddRoomMember(roomID, "me", 0); err != nil {
+	if err := s.AddRoomMember(roomID, testutil.UserID("me"), 0); err != nil {
 		t.Fatalf("re-add member: %v", err)
 	}
-	pinRoomJoinedAt(t, s, roomID, "me", "2022-03-01 00:00:00") // unix 1646092800
-	roomMsg(t, s, roomID, "post_1", 1, 1646092800)             // == rejoin (inclusive)
-	roomMsg(t, s, roomID, "post_2", 1, 1646092900)
+	pinRoomJoinedAt(t, s, roomID, testutil.UserID("me"), "2022-03-01 00:00:00") // unix 1646092800
+	roomMsg(t, s, roomID, testutil.MsgID("post_1"), 1, 1646092800)              // == rejoin (inclusive)
+	roomMsg(t, s, roomID, testutil.MsgID("post_2"), 1, 1646092900)
 
-	u, err := s.GetRoomUnreadCount(roomID, "me", "dev1")
+	u, err := s.GetRoomUnreadCount(roomID, testutil.UserID("me"), "dev1")
 	if err != nil {
 		t.Fatalf("unread: %v", err)
 	}
-	if u.LastRead != "old_read" {
-		t.Errorf("LastRead = %q, want %q", u.LastRead, "old_read")
+	if u.LastRead != testutil.MsgID("old_read") {
+		t.Errorf("LastRead = %q, want %q", u.LastRead, testutil.MsgID("old_read"))
 	}
 	if u.Count != 2 {
 		t.Errorf("Count = %d, want 2 (post-rejoin only; while-absent must not count)", u.Count)
 	}
-	if u.FirstUnreadID != "post_1" {
-		t.Errorf("FirstUnreadID = %q, want %q", u.FirstUnreadID, "post_1")
+	if u.FirstUnreadID != testutil.MsgID("post_1") {
+		t.Errorf("FirstUnreadID = %q, want %q", u.FirstUnreadID, testutil.MsgID("post_1"))
 	}
 }
 
@@ -196,24 +201,28 @@ func TestGetRoomUnreadCount_FirstUnreadIDIsRowidOrderedNotMinID(t *testing.T) {
 	s := openStore(t)
 	roomID := GenerateID("room_")
 	seedTestRoom(t, s, roomID, "general", "")
-	if err := s.AddRoomMember(roomID, "u", 0); err != nil {
+	if err := s.AddRoomMember(roomID, testutil.UserID("u"), 0); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
-	pinRoomJoinedAt(t, s, roomID, "u", "2000-01-01 00:00:00") // all in-scope
-	// Lexical MIN(id) would be "m_1"; rowid-first is "m_9".
-	roomMsg(t, s, roomID, "m_9", 1, 1640995200) // rowid 1 — chronologically first
-	roomMsg(t, s, roomID, "m_1", 1, 1640995201) // rowid 2 — lexically smallest
-	roomMsg(t, s, roomID, "m_5", 1, 1640995202) // rowid 3
+	pinRoomJoinedAt(t, s, roomID, testutil.UserID("u"), "2000-01-01 00:00:00") // all in-scope
+	// Arrange IDs so MIN(id) is deliberately not the first row, regardless
+	// of the canonical builder's hash ordering for readable labels.
+	ids := []string{testutil.MsgID("m_9"), testutil.MsgID("m_1"), testutil.MsgID("m_5")}
+	sort.Strings(ids)
+	firstID, minimumID, lastID := ids[2], ids[0], ids[1]
+	roomMsg(t, s, roomID, firstID, 1, 1640995200)
+	roomMsg(t, s, roomID, minimumID, 1, 1640995201)
+	roomMsg(t, s, roomID, lastID, 1, 1640995202)
 
-	u, err := s.GetRoomUnreadCount(roomID, "u", "dev1")
+	u, err := s.GetRoomUnreadCount(roomID, testutil.UserID("u"), "dev1")
 	if err != nil {
 		t.Fatalf("unread: %v", err)
 	}
 	if u.Count != 3 {
 		t.Fatalf("Count = %d, want 3", u.Count)
 	}
-	if u.FirstUnreadID != "m_9" {
-		t.Errorf("FirstUnreadID = %q, want %q (rowid-first); MIN(id) would wrongly be %q", u.FirstUnreadID, "m_9", "m_1")
+	if u.FirstUnreadID != firstID {
+		t.Errorf("FirstUnreadID = %q, want %q (rowid-first); MIN(id) would wrongly be %q", u.FirstUnreadID, firstID, minimumID)
 	}
 }
 
@@ -225,35 +234,35 @@ func TestUnreadCount_RoomsEqualsGroupsParity(t *testing.T) {
 	roomID := GenerateID("room_")
 	groupID := GenerateID("group_")
 	seedTestRoom(t, s, roomID, "general", "")
-	if err := s.AddRoomMember(roomID, "me", 0); err != nil {
+	if err := s.AddRoomMember(roomID, testutil.UserID("me"), 0); err != nil {
 		t.Fatalf("add room member: %v", err)
 	}
-	if err := s.CreateGroup(groupID, "me", []string{"me"}, "G"); err != nil {
+	if err := s.CreateGroup(groupID, testutil.UserID("me"), []string{testutil.UserID("me")}, "G"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	pinRoomJoinedAt(t, s, roomID, "me", "2022-01-01 00:00:00")
-	pinGroupJoinedAt(t, s, groupID, "me", "2022-01-01 00:00:00")
+	pinRoomJoinedAt(t, s, roomID, testutil.UserID("me"), "2022-01-01 00:00:00")
+	pinGroupJoinedAt(t, s, groupID, testutil.UserID("me"), "2022-01-01 00:00:00")
 
 	seq := []struct {
 		id string
 		ts int64
 	}{
-		{"pre_1", 1640995100},
-		{"pre_2", 1640995199},
-		{"post_1", 1640995200}, // == join (inclusive)
-		{"post_2", 1640995300},
-		{"post_3", 1640995400},
+		{testutil.MsgID("pre_1"), 1640995100},
+		{testutil.MsgID("pre_2"), 1640995199},
+		{testutil.MsgID("post_1"), 1640995200}, // == join (inclusive)
+		{testutil.MsgID("post_2"), 1640995300},
+		{testutil.MsgID("post_3"), 1640995400},
 	}
 	for _, m := range seq {
 		roomMsg(t, s, roomID, m.id, 1, m.ts)
 		groupMsg(t, s, groupID, m.id, m.ts)
 	}
 
-	ru, err := s.GetRoomUnreadCount(roomID, "me", "dev1")
+	ru, err := s.GetRoomUnreadCount(roomID, testutil.UserID("me"), "dev1")
 	if err != nil {
 		t.Fatalf("room unread: %v", err)
 	}
-	gu, err := s.GetGroupUnreadCount(groupID, "me", "dev1")
+	gu, err := s.GetGroupUnreadCount(groupID, testutil.UserID("me"), "dev1")
 	if err != nil {
 		t.Fatalf("group unread: %v", err)
 	}
@@ -261,7 +270,7 @@ func TestUnreadCount_RoomsEqualsGroupsParity(t *testing.T) {
 		t.Errorf("room/group parity broken:\n  room  = {Count:%d FirstUnreadID:%q LastRead:%q}\n  group = {Count:%d FirstUnreadID:%q LastRead:%q}",
 			ru.Count, ru.FirstUnreadID, ru.LastRead, gu.Count, gu.FirstUnreadID, gu.LastRead)
 	}
-	if ru.Count != 3 || ru.FirstUnreadID != "post_1" {
+	if ru.Count != 3 || ru.FirstUnreadID != testutil.MsgID("post_1") {
 		t.Errorf("Count/FirstUnreadID = %d/%q, want 3/\"post_1\"", ru.Count, ru.FirstUnreadID)
 	}
 }
@@ -272,25 +281,25 @@ func TestUnreadCount_RoomsEqualsGroupsParity(t *testing.T) {
 func TestGetGroupUnreadCount_NewMemberSkipsPreJoinMessages(t *testing.T) {
 	s := openStore(t)
 	groupID := GenerateID("group_")
-	if err := s.CreateGroup(groupID, "me", []string{"me"}, "G"); err != nil {
+	if err := s.CreateGroup(groupID, testutil.UserID("me"), []string{testutil.UserID("me")}, "G"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 	// joined_at pinned to 2022-01-01 00:00:00 UTC = unix 1640995200.
-	pinGroupJoinedAt(t, s, groupID, "me", "2022-01-01 00:00:00")
-	groupMsg(t, s, groupID, "pre_1", 1640995100)  // before join
-	groupMsg(t, s, groupID, "pre_2", 1640995199)  // before join
-	groupMsg(t, s, groupID, "post_1", 1640995200) // == join (inclusive)
-	groupMsg(t, s, groupID, "post_2", 1640995300) // after join
+	pinGroupJoinedAt(t, s, groupID, testutil.UserID("me"), "2022-01-01 00:00:00")
+	groupMsg(t, s, groupID, testutil.MsgID("pre_1"), 1640995100)  // before join
+	groupMsg(t, s, groupID, testutil.MsgID("pre_2"), 1640995199)  // before join
+	groupMsg(t, s, groupID, testutil.MsgID("post_1"), 1640995200) // == join (inclusive)
+	groupMsg(t, s, groupID, testutil.MsgID("post_2"), 1640995300) // after join
 
-	u, err := s.GetGroupUnreadCount(groupID, "me", "dev1")
+	u, err := s.GetGroupUnreadCount(groupID, testutil.UserID("me"), "dev1")
 	if err != nil {
 		t.Fatalf("unread: %v", err)
 	}
 	if u.Count != 2 {
 		t.Errorf("Count = %d, want 2 (ts >= joined_at only, NOT 4)", u.Count)
 	}
-	if u.FirstUnreadID != "post_1" {
-		t.Errorf("FirstUnreadID = %q, want %q", u.FirstUnreadID, "post_1")
+	if u.FirstUnreadID != testutil.MsgID("post_1") {
+		t.Errorf("FirstUnreadID = %q, want %q", u.FirstUnreadID, testutil.MsgID("post_1"))
 	}
 }
 
@@ -298,15 +307,15 @@ func TestGetGroupUnreadCount_NewMemberSkipsPreJoinMessages(t *testing.T) {
 func TestGetGroupUnreadCount_LongStandingMemberNoRegression(t *testing.T) {
 	s := openStore(t)
 	groupID := GenerateID("group_")
-	if err := s.CreateGroup(groupID, "me", []string{"me"}, "G"); err != nil {
+	if err := s.CreateGroup(groupID, testutil.UserID("me"), []string{testutil.UserID("me")}, "G"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	pinGroupJoinedAt(t, s, groupID, "me", "2000-01-01 00:00:00")
-	groupMsg(t, s, groupID, "m1", 1640995200)
-	groupMsg(t, s, groupID, "m2", 1640995300)
-	groupMsg(t, s, groupID, "m3", 1640995400)
+	pinGroupJoinedAt(t, s, groupID, testutil.UserID("me"), "2000-01-01 00:00:00")
+	groupMsg(t, s, groupID, testutil.MsgID("m1"), 1640995200)
+	groupMsg(t, s, groupID, testutil.MsgID("m2"), 1640995300)
+	groupMsg(t, s, groupID, testutil.MsgID("m3"), 1640995400)
 
-	u, err := s.GetGroupUnreadCount(groupID, "me", "dev1")
+	u, err := s.GetGroupUnreadCount(groupID, testutil.UserID("me"), "dev1")
 	if err != nil {
 		t.Fatalf("unread: %v", err)
 	}
@@ -321,44 +330,44 @@ func TestGetGroupUnreadCount_LongStandingMemberNoRegression(t *testing.T) {
 func TestGetGroupUnreadCount_LeftRejoinedOnlyPostRejoin(t *testing.T) {
 	s := openStore(t)
 	groupID := GenerateID("group_")
-	if err := s.CreateGroup(groupID, "me", []string{"me"}, "G"); err != nil {
+	if err := s.CreateGroup(groupID, testutil.UserID("me"), []string{testutil.UserID("me")}, "G"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
 	// First membership window.
-	pinGroupJoinedAt(t, s, groupID, "me", "2022-01-01 00:00:00")
-	groupMsg(t, s, groupID, "old_read", 1640995300) // read before leaving
-	if err := s.SetReadPosition("me", "dev1", "", groupID, "", "old_read"); err != nil {
+	pinGroupJoinedAt(t, s, groupID, testutil.UserID("me"), "2022-01-01 00:00:00")
+	groupMsg(t, s, groupID, testutil.MsgID("old_read"), 1640995300) // read before leaving
+	if err := s.SetReadPosition(testutil.UserID("me"), "dev1", "", groupID, "", testutil.MsgID("old_read")); err != nil {
 		t.Fatalf("set read pos: %v", err)
 	}
 
 	// User leaves; messages while absent must stay out of unread.
-	if err := s.RemoveGroupMember(groupID, "me"); err != nil {
+	if err := s.RemoveGroupMember(groupID, testutil.UserID("me")); err != nil {
 		t.Fatalf("remove member: %v", err)
 	}
-	groupMsg(t, s, groupID, "away_1", 1643673600)
-	groupMsg(t, s, groupID, "away_2", 1643673700)
+	groupMsg(t, s, groupID, testutil.MsgID("away_1"), 1643673600)
+	groupMsg(t, s, groupID, testutil.MsgID("away_2"), 1643673700)
 
 	// Re-add user with a fresh joined_at, then send new messages.
-	if err := s.AddGroupMember(groupID, "me", false); err != nil {
+	if err := s.AddGroupMember(groupID, testutil.UserID("me"), false); err != nil {
 		t.Fatalf("re-add member: %v", err)
 	}
-	pinGroupJoinedAt(t, s, groupID, "me", "2022-03-01 00:00:00")
-	groupMsg(t, s, groupID, "post_1", 1646092800) // == rejoin (inclusive)
-	groupMsg(t, s, groupID, "post_2", 1646092900)
+	pinGroupJoinedAt(t, s, groupID, testutil.UserID("me"), "2022-03-01 00:00:00")
+	groupMsg(t, s, groupID, testutil.MsgID("post_1"), 1646092800) // == rejoin (inclusive)
+	groupMsg(t, s, groupID, testutil.MsgID("post_2"), 1646092900)
 
-	u, err := s.GetGroupUnreadCount(groupID, "me", "dev1")
+	u, err := s.GetGroupUnreadCount(groupID, testutil.UserID("me"), "dev1")
 	if err != nil {
 		t.Fatalf("unread: %v", err)
 	}
-	if u.LastRead != "old_read" {
-		t.Errorf("LastRead = %q, want %q", u.LastRead, "old_read")
+	if u.LastRead != testutil.MsgID("old_read") {
+		t.Errorf("LastRead = %q, want %q", u.LastRead, testutil.MsgID("old_read"))
 	}
 	if u.Count != 2 {
 		t.Errorf("Count = %d, want 2 (post-rejoin only; while-absent messages must not count)", u.Count)
 	}
-	if u.FirstUnreadID != "post_1" {
-		t.Errorf("FirstUnreadID = %q, want %q", u.FirstUnreadID, "post_1")
+	if u.FirstUnreadID != testutil.MsgID("post_1") {
+		t.Errorf("FirstUnreadID = %q, want %q", u.FirstUnreadID, testutil.MsgID("post_1"))
 	}
 }
 
@@ -367,13 +376,13 @@ func TestGetGroupUnreadCount_LeftRejoinedOnlyPostRejoin(t *testing.T) {
 func TestGetGroupUnreadCount_NonMemberReturnsZero(t *testing.T) {
 	s := openStore(t)
 	groupID := GenerateID("group_")
-	if err := s.CreateGroup(groupID, "owner", []string{"owner"}, "G"); err != nil {
+	if err := s.CreateGroup(groupID, testutil.UserID("owner"), []string{testutil.UserID("owner")}, "G"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	groupMsg(t, s, groupID, "m1", 1640995200)
-	groupMsg(t, s, groupID, "m2", 1640995300)
+	groupMsg(t, s, groupID, testutil.MsgID("m1"), 1640995200)
+	groupMsg(t, s, groupID, testutil.MsgID("m2"), 1640995300)
 
-	u, err := s.GetGroupUnreadCount(groupID, "stranger", "dev1")
+	u, err := s.GetGroupUnreadCount(groupID, testutil.UserID("stranger"), "dev1")
 	if err != nil {
 		t.Fatalf("non-member must not error: %v", err)
 	}

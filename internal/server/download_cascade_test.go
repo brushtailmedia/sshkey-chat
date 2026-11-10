@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // seedOrphanableFile helper: writes bytes + file_hashes row + file_contexts
@@ -88,39 +89,39 @@ func TestCleanupFilesForContext_RoomLastMemberDelete(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	seedOrphanableFile(t, s, "file_room_cleanup", store.FileContextRoom, generalID, 100)
+	seedOrphanableFile(t, s, testutil.FileID("room_cleanup"), store.FileContextRoom, generalID, 100)
 
 	// Simulate the cleanup path invoking cleanupFilesForContext.
 	s.cleanupFilesForContext(store.FileContextRoom, generalID)
 
-	assertFileFullyGone(t, s, "file_room_cleanup")
+	assertFileFullyGone(t, s, testutil.FileID("room_cleanup"))
 }
 
 func TestCleanupFilesForContext_GroupLastMemberDelete(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_cleanup", "alice", []string{"alice"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("cleanup"), testutil.UserID("alice"), []string{testutil.UserID("alice")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	seedOrphanableFile(t, s, "file_group_cleanup", store.FileContextGroup, "group_cleanup", 100)
+	seedOrphanableFile(t, s, testutil.FileID("group_cleanup"), store.FileContextGroup, testutil.GroupID("cleanup"), 100)
 
-	s.cleanupFilesForContext(store.FileContextGroup, "group_cleanup")
+	s.cleanupFilesForContext(store.FileContextGroup, testutil.GroupID("cleanup"))
 
-	assertFileFullyGone(t, s, "file_group_cleanup")
+	assertFileFullyGone(t, s, testutil.FileID("group_cleanup"))
 }
 
 func TestCleanupFilesForContext_DMBothPartiesLeft(t *testing.T) {
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage("dm_cleanup", "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(testutil.DMID("cleanup"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create dm: %v", err)
 	}
 
-	seedOrphanableFile(t, s, "file_dm_cleanup", store.FileContextDM, dm.ID, 100)
+	seedOrphanableFile(t, s, testutil.FileID("dm_cleanup"), store.FileContextDM, dm.ID, 100)
 
 	s.cleanupFilesForContext(store.FileContextDM, dm.ID)
 
-	assertFileFullyGone(t, s, "file_dm_cleanup")
+	assertFileFullyGone(t, s, testutil.FileID("dm_cleanup"))
 }
 
 // TestCleanupFilesForContext_PreservesUnrelatedFiles ensures that
@@ -132,13 +133,13 @@ func TestCleanupFilesForContext_PreservesUnrelatedFiles(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 	engID := s.store.RoomDisplayNameToID("engineering")
 
-	seedOrphanableFile(t, s, "file_doomed", store.FileContextRoom, generalID, 100)
-	seedOrphanableFile(t, s, "file_survivor", store.FileContextRoom, engID, 100)
+	seedOrphanableFile(t, s, testutil.FileID("doomed"), store.FileContextRoom, generalID, 100)
+	seedOrphanableFile(t, s, testutil.FileID("survivor"), store.FileContextRoom, engID, 100)
 
 	s.cleanupFilesForContext(store.FileContextRoom, generalID)
 
-	assertFileFullyGone(t, s, "file_doomed")
-	assertFileFullyPresent(t, s, "file_survivor")
+	assertFileFullyGone(t, s, testutil.FileID("doomed"))
+	assertFileFullyPresent(t, s, testutil.FileID("survivor"))
 }
 
 // ============================================================================
@@ -155,14 +156,14 @@ func TestPerUserLeave_DoesNotCleanupFileContexts(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	seedOrphanableFile(t, s, "file_shared", store.FileContextRoom, generalID, 100)
+	seedOrphanableFile(t, s, testutil.FileID("shared"), store.FileContextRoom, generalID, 100)
 
 	// bob leaves general. alice and carol remain, so the room isn't
 	// cleaned up — but the file_contexts row must stay intact so alice
 	// and carol retain download access.
-	s.performRoomLeave(generalID, "bob", "", "bob")
+	s.performRoomLeave(generalID, testutil.UserID("bob"), "", testutil.UserID("bob"))
 
-	assertFileFullyPresent(t, s, "file_shared")
+	assertFileFullyPresent(t, s, testutil.FileID("shared"))
 }
 
 // ============================================================================
@@ -178,13 +179,13 @@ func TestCleanupFiles_DropsFileContextBinding(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	seedOrphanableFile(t, s, "file_msg_attached", store.FileContextRoom, generalID, 100)
+	seedOrphanableFile(t, s, testutil.FileID("msg_attached"), store.FileContextRoom, generalID, 100)
 
 	// Simulate handleDelete invoking cleanupFiles after the message is
 	// tombstoned and DeleteRoomMessage returned the file_ids.
-	s.cleanupFiles([]string{"file_msg_attached"})
+	s.cleanupFiles([]string{testutil.FileID("msg_attached")})
 
-	assertFileFullyGone(t, s, "file_msg_attached")
+	assertFileFullyGone(t, s, testutil.FileID("msg_attached"))
 }
 
 // ============================================================================
@@ -200,17 +201,17 @@ func TestCleanOrphanFiles_ReconvergesOrphanedHashRows(t *testing.T) {
 	// Simulate a partial-cleanup artifact: write the bytes + hash row
 	// but no file_contexts binding. This is the "eager GC failed"
 	// scenario that the lazy pass catches.
-	path := filepath.Join(s.files.dir, "file_orphan_hash")
+	path := filepath.Join(s.files.dir, testutil.FileID("orphan_hash"))
 	if err := os.WriteFile(path, []byte("stale"), 0644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if err := s.store.StoreFileHash("file_orphan_hash", "blake2b-256:fake", 5); err != nil {
+	if err := s.store.StoreFileHash(testutil.FileID("orphan_hash"), "blake2b-256:fake", 5); err != nil {
 		t.Fatalf("store hash: %v", err)
 	}
 
 	s.cleanOrphanFiles()
 
-	assertFileFullyGone(t, s, "file_orphan_hash")
+	assertFileFullyGone(t, s, testutil.FileID("orphan_hash"))
 }
 
 // TestCleanOrphanFiles_LeavesBoundFilesAlone is the negative-regression
@@ -220,9 +221,9 @@ func TestCleanOrphanFiles_LeavesBoundFilesAlone(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	seedOrphanableFile(t, s, "file_bound", store.FileContextRoom, generalID, 100)
+	seedOrphanableFile(t, s, testutil.FileID("bound"), store.FileContextRoom, generalID, 100)
 
 	s.cleanOrphanFiles()
 
-	assertFileFullyPresent(t, s, "file_bound")
+	assertFileFullyPresent(t, s, testutil.FileID("bound"))
 }

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // Moved from rooms_test.go — co-located with the code they exercise.
@@ -68,7 +70,7 @@ func TestValidateNanoID_UnusualButLegalPrefixes(t *testing.T) {
 	// Per-spec happy-path edges: a prefix of just "_" or just "a" is legal.
 	// Caller is trusted on what prefix to pass; validator only enforces
 	// shape (non-empty, alphabet-only).
-	cases := []string{"_", "a", "-", "aa_", "some-prefix_"}
+	cases := []string{"_", testutil.UserID("a"), "-", "aa_", "some-prefix_"}
 	for _, prefix := range cases {
 		t.Run(prefix, func(t *testing.T) {
 			id := prefix + validBody
@@ -88,7 +90,7 @@ func TestValidateNanoID_LengthFailure(t *testing.T) {
 		{"too_short", "room_short"},
 		{"one_byte_short", "room_" + validBody[:20]},
 		{"one_byte_long", "room_" + validBody + "x"},
-		{"way_too_long", "room_" + strings.Repeat("a", 500)},
+		{"way_too_long", "room_" + strings.Repeat(testutil.UserID("a"), 500)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -211,7 +213,7 @@ func TestValidateNanoID_AlphabetFailure_InjectionClasses(t *testing.T) {
 			}
 			// Pad with valid chars if we're under 21 bytes.
 			for len(body) < 21 {
-				body += "a"
+				body += testutil.UserID("a")
 			}
 			id := "room_" + body
 			err := ValidateNanoID(id, "room_")
@@ -279,7 +281,7 @@ func TestValidateNanoID_BoundedErrorMessageOnOversizedInput(t *testing.T) {
 	// Spec requires ErrInvalidNanoIDLength error messages to NOT include
 	// the full id value — so a giant bogus input must not produce a giant
 	// error string.
-	huge := strings.Repeat("a", 10_000)
+	huge := strings.Repeat(testutil.UserID("a"), 10_000)
 	err := ValidateNanoID(huge, "room_")
 	if err == nil {
 		t.Fatal("expected error for oversized id")

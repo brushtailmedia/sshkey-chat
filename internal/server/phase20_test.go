@@ -8,6 +8,8 @@ package server
 
 import (
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestPerformRoomLeave_WritesHistoryOnEveryPath verifies that every
@@ -19,8 +21,8 @@ func TestPerformRoomLeave_WritesHistoryOnEveryPath(t *testing.T) {
 		reason      string
 		initiatedBy string
 	}{
-		{"self_leave", "", "bob"},
-		{"admin_removed", "removed", "admin"},
+		{"self_leave", "", testutil.UserID("bob")},
+		{"admin_removed", "removed", testutil.UserID("admin")},
 		{"user_retired", "user_retired", "system"},
 	}
 
@@ -29,9 +31,9 @@ func TestPerformRoomLeave_WritesHistoryOnEveryPath(t *testing.T) {
 			s := newTestServer(t)
 			generalID := s.store.RoomDisplayNameToID("general")
 
-			s.performRoomLeave(generalID, "bob", tc.reason, tc.initiatedBy)
+			s.performRoomLeave(generalID, testutil.UserID("bob"), tc.reason, tc.initiatedBy)
 
-			got, err := s.store.GetUserLeftRoomsCatchup("bob")
+			got, err := s.store.GetUserLeftRoomsCatchup(testutil.UserID("bob"))
 			if err != nil {
 				t.Fatalf("catchup: %v", err)
 			}
@@ -54,7 +56,7 @@ func TestPerformRoomLeave_RecordsRoomEvent(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	s.performRoomLeave(generalID, "bob", "removed", "admin")
+	s.performRoomLeave(generalID, testutil.UserID("bob"), "removed", testutil.UserID("admin"))
 
 	events, err := s.store.GetRoomEventsSince(generalID, 0)
 	if err != nil {
@@ -62,8 +64,8 @@ func TestPerformRoomLeave_RecordsRoomEvent(t *testing.T) {
 	}
 	found := false
 	for _, e := range events {
-		if e.Event == "leave" && e.User == "bob" {
-			if e.By != "admin" {
+		if e.Event == "leave" && e.User == testutil.UserID("bob") {
+			if e.By != testutil.UserID("admin") {
 				t.Errorf("By = %q, want admin", e.By)
 			}
 			if e.Reason != "removed" {
@@ -87,8 +89,8 @@ func TestPerformGroupLeave_WritesHistoryOnEveryPath(t *testing.T) {
 		by          string
 		initiatedBy string
 	}{
-		{"self_leave", "", "", "alice"},
-		{"admin_removed", "removed", "alice", "alice"},
+		{"self_leave", "", "", testutil.UserID("alice")},
+		{"admin_removed", "removed", testutil.UserID("alice"), testutil.UserID("alice")},
 		{"retirement", "retirement", "", "system"},
 	}
 
@@ -97,14 +99,14 @@ func TestPerformGroupLeave_WritesHistoryOnEveryPath(t *testing.T) {
 			s := newTestServer(t)
 			// Create a group with alice as sole member so performGroupLeave
 			// can be called cleanly.
-			groupID := "grp_" + tc.name
-			if err := s.store.CreateGroup(groupID, "alice", []string{"alice"}, "lunch"); err != nil {
+			groupID := testutil.GroupID("grp_" + tc.name)
+			if err := s.store.CreateGroup(groupID, testutil.UserID("alice"), []string{testutil.UserID("alice")}, "lunch"); err != nil {
 				t.Fatalf("create group: %v", err)
 			}
 
-			s.performGroupLeave(groupID, "alice", tc.reason, tc.by, tc.initiatedBy)
+			s.performGroupLeave(groupID, testutil.UserID("alice"), tc.reason, tc.by, tc.initiatedBy)
 
-			got, err := s.store.GetUserLeftGroupsCatchup("alice")
+			got, err := s.store.GetUserLeftGroupsCatchup(testutil.UserID("alice"))
 			if err != nil {
 				t.Fatalf("catchup: %v", err)
 			}
@@ -131,17 +133,17 @@ func TestPerformGroupLeave_WritesHistoryOnEveryPath(t *testing.T) {
 // the row exists post-cleanup.
 func TestPerformGroupLeave_HistoryWrittenBeforeLastMemberCleanup(t *testing.T) {
 	s := newTestServer(t)
-	groupID := "grp_solo"
-	if err := s.store.CreateGroup(groupID, "alice", []string{"alice"}, "solo"); err != nil {
+	groupID := testutil.GroupID("grp_solo")
+	if err := s.store.CreateGroup(groupID, testutil.UserID("alice"), []string{testutil.UserID("alice")}, "solo"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
 	// Alice is the sole member — leaving triggers last-member cleanup
 	// which unlinks the per-group DB file.
-	s.performGroupLeave(groupID, "alice", "", "", "alice")
+	s.performGroupLeave(groupID, testutil.UserID("alice"), "", "", testutil.UserID("alice"))
 
 	// The user_left_groups row should still exist in data.db.
-	got, err := s.store.GetUserLeftGroupsCatchup("alice")
+	got, err := s.store.GetUserLeftGroupsCatchup(testutil.UserID("alice"))
 	if err != nil {
 		t.Fatalf("catchup: %v", err)
 	}
@@ -157,7 +159,7 @@ func TestPerformGroupLeave_HistoryWrittenBeforeLastMemberCleanup(t *testing.T) {
 // function sends nothing when the user has no leave history.
 func TestSendLeftRoomsCatchup_ReturnsEmpty_NoLeaves(t *testing.T) {
 	s := newTestServer(t)
-	client := testClientFor("bob", "dev_bob_1")
+	client := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 
 	s.sendLeftRooms(client.Client)
 
@@ -175,9 +177,9 @@ func TestSendLeftRoomsCatchup_ReturnsEntriesWithReasons(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	// Record a leave for bob. performRoomLeave removes from members too.
-	s.performRoomLeave(generalID, "bob", "removed", "admin")
+	s.performRoomLeave(generalID, testutil.UserID("bob"), "removed", testutil.UserID("admin"))
 
-	client := testClientFor("bob", "dev_bob_1")
+	client := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.sendLeftRooms(client.Client)
 
 	msgs := client.messages()
@@ -198,7 +200,7 @@ func TestProcessPendingRemoveFromRoom_DrainsQueueNotHistory(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	if err := s.store.RecordPendingRemoveFromRoom("bob", generalID, "removed", "os:1000"); err != nil {
+	if err := s.store.RecordPendingRemoveFromRoom(testutil.UserID("bob"), generalID, "removed", "os:1000"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -211,7 +213,7 @@ func TestProcessPendingRemoveFromRoom_DrainsQueueNotHistory(t *testing.T) {
 	}
 
 	// History row should be present (written by performRoomLeave).
-	history, _ := s.store.GetUserLeftRoomsCatchup("bob")
+	history, _ := s.store.GetUserLeftRoomsCatchup(testutil.UserID("bob"))
 	if len(history) != 1 {
 		t.Errorf("expected 1 history row, got %d", len(history))
 	}

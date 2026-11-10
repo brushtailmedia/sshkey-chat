@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestPendingNotifyLimiter_Allow(t *testing.T) {
@@ -58,8 +60,8 @@ func newStormServer(t *testing.T) (*Server, *captureClient) {
 			s.store.Close()
 		}
 	})
-	seedTestUser(t, s, "alice", testKeyAlice, "Alice", true, nil)
-	admin := testClientFor("alice", "dev_alice_storm_admin")
+	seedTestUser(t, s, testutil.UserID("alice"), testKeyAlice, "Alice", true, nil)
+	admin := testClientFor(testutil.UserID("alice"), "dev_alice_storm_admin")
 	s.mu.Lock()
 	s.clients[admin.DeviceID] = admin.Client
 	s.mu.Unlock()

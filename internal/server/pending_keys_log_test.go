@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestLogPendingKey_RecordsDBRowNoLogFile verifies that an unknown-key contact
@@ -35,8 +36,8 @@ func TestLogPendingKey_RecordsDBRowNoLogFile(t *testing.T) {
 		}
 	})
 
-	seedTestUser(t, s, "alice", testKeyAlice, "Alice", true, nil)
-	admin := testClientFor("alice", "dev_alice_pending_admin_notify")
+	seedTestUser(t, s, testutil.UserID("alice"), testKeyAlice, "Alice", true, nil)
+	admin := testClientFor(testutil.UserID("alice"), "dev_alice_pending_admin_notify")
 	s.mu.Lock()
 	s.clients[admin.DeviceID] = admin.Client
 	s.mu.Unlock()

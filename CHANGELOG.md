@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Changed
+- Validate client-supplied room/group/DM routing IDs, message and reaction targets,
+  group member IDs, upload contexts, read markers, history cursors and create-DM
+  recipients. Keep existing authorization, privacy, correlation and per-verb
+  rejection contracts; record one device-scoped invalid-ID signal per shape
+  rejection. Empty read markers remain accepted; empty history cursors remain
+  invalid.
+- Replace ordinary short test IDs with deterministic, real-shaped builders. Add
+  fixed vectors, fixture lint regression tests, handler wiring/privacy tests and
+  rejection-state snapshots. Raise the handler coverage floor from 66% to 70%
+  under the existing ratchet policy. Preserve intentional malformed inputs and
+  defer device-handshake validation to the device-session work. Document contracts
+  and fixture rules; pin/unpin persistence failure handling remains separate.
+
 ### Added
 - **Write-burst benchmark for the SQLite WAL store (2026-10-19).** `internal/store/writeburst_bench_test.go`, env-gated (`SSHKEY_WRITE_BENCH=1`), drives the production `insertMessage` / `SetReadPosition` statements through a scenario matrix — synchronous FULL vs NORMAL vs fullfsync, single-transaction batching, 16 concurrent writers on one room file, 8 parallel room files, and 50 readers' receipts into the shared `data.db` — with and without a Go-side per-file write mutex, reporting ops/s and p50/p99/max. Baseline table and interpretation in `docs/testing/write_burst_benchmark.md`. Headline findings on local SSD: the pure-Go driver floors at ~12–40 µs/insert; a durable fsync costs ~5 ms/commit (so FULL ≈ 200 msgs/s per room file on a barrier-honoring disk); and concurrent writers to one file collapse under SQLite's busy handler regardless of sync mode — 16 writers lose 75% throughput with 600–850 ms worst-case waits, 50 receipt writers on `data.db` lose 94% with **multi-second** waits — while a per-file Go write mutex restores single-writer throughput and bounds the tail at a few ms. No production code changed by this entry; it motivates a per-file write serializer and read-receipt coalescing as the next store work.
 

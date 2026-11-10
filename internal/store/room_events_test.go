@@ -6,6 +6,8 @@ package store
 
 import (
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestRecordRoomEvent_RoundTrip(t *testing.T) {
@@ -18,7 +20,7 @@ func TestRecordRoomEvent_RoundTrip(t *testing.T) {
 
 	roomID := GenerateID("room_")
 	if err := st.RecordRoomEvent(
-		roomID, "leave", "usr_alice", "usr_admin", "removed", "", false, 1000,
+		roomID, "leave", testutil.UserID("alice"), testutil.UserID("admin"), "removed", "", false, 1000,
 	); err != nil {
 		t.Fatalf("record: %v", err)
 	}
@@ -34,10 +36,10 @@ func TestRecordRoomEvent_RoundTrip(t *testing.T) {
 	if e.Event != "leave" {
 		t.Errorf("Event = %q, want leave", e.Event)
 	}
-	if e.User != "usr_alice" {
+	if e.User != testutil.UserID("alice") {
 		t.Errorf("User = %q, want usr_alice", e.User)
 	}
-	if e.By != "usr_admin" {
+	if e.By != testutil.UserID("admin") {
 		t.Errorf("By = %q, want usr_admin", e.By)
 	}
 	if e.Reason != "removed" {
@@ -60,9 +62,9 @@ func TestGetRoomEventsSince_Ordered(t *testing.T) {
 
 	roomID := GenerateID("room_")
 	// Record out of order.
-	st.RecordRoomEvent(roomID, "join", "usr_bob", "usr_admin", "", "", false, 3000)
-	st.RecordRoomEvent(roomID, "leave", "usr_alice", "usr_admin", "removed", "", false, 1000)
-	st.RecordRoomEvent(roomID, "topic", "", "usr_admin", "", "new topic", false, 2000)
+	st.RecordRoomEvent(roomID, "join", testutil.UserID("bob"), testutil.UserID("admin"), "", "", false, 3000)
+	st.RecordRoomEvent(roomID, "leave", testutil.UserID("alice"), testutil.UserID("admin"), "removed", "", false, 1000)
+	st.RecordRoomEvent(roomID, "topic", "", testutil.UserID("admin"), "", "new topic", false, 2000)
 
 	events, err := st.GetRoomEventsSince(roomID, 0)
 	if err != nil {
@@ -88,14 +90,14 @@ func TestGetRoomEventsSince_RespectsSinceTS(t *testing.T) {
 	defer st.Close()
 
 	roomID := GenerateID("room_")
-	st.RecordRoomEvent(roomID, "leave", "usr_a", "usr_admin", "", "", false, 500)
-	st.RecordRoomEvent(roomID, "leave", "usr_b", "usr_admin", "", "", false, 1500)
+	st.RecordRoomEvent(roomID, "leave", testutil.UserID("a"), testutil.UserID("admin"), "", "", false, 500)
+	st.RecordRoomEvent(roomID, "leave", testutil.UserID("b"), testutil.UserID("admin"), "", "", false, 1500)
 
 	events, _ := st.GetRoomEventsSince(roomID, 1000)
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event with ts >= 1000, got %d", len(events))
 	}
-	if events[0].User != "usr_b" {
+	if events[0].User != testutil.UserID("b") {
 		t.Errorf("expected usr_b (post-cutoff), got %q", events[0].User)
 	}
 }
@@ -113,7 +115,7 @@ func TestRecordRoomEvent_AllVocabulary(t *testing.T) {
 	roomID := GenerateID("room_")
 	for _, event := range []string{"leave", "join", "topic", "rename", "retire"} {
 		if err := st.RecordRoomEvent(
-			roomID, event, "usr_x", "usr_admin", "", "value", false, 1000,
+			roomID, event, testutil.UserID("x"), testutil.UserID("admin"), "", "value", false, 1000,
 		); err != nil {
 			t.Errorf("RecordRoomEvent(%q): %v", event, err)
 		}

@@ -47,6 +47,7 @@ import (
 	"time"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/sqlitedsn"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // benchInsertSQL mirrors insertMessage's statement for the single-transaction
@@ -107,12 +108,12 @@ func benchDir(t *testing.T) string {
 	return dir
 }
 
-func benchRoomID(k int) string { return fmt.Sprintf("room_bench%016d", k) }
+func benchRoomID(k int) string { return testutil.RoomID(fmt.Sprintf("bench%016d", k)) }
 
 func benchMsg(i int) StoredMessage {
 	return StoredMessage{
-		ID:        fmt.Sprintf("msg_bench%016d", i),
-		Sender:    "usr_bench_sender",
+		ID:        testutil.MsgID(fmt.Sprintf("bench%016d", i)),
+		Sender:    testutil.UserID("bench_sender"),
 		TS:        time.Now().Unix(),
 		Epoch:     1,
 		Payload:   benchPayload,
@@ -291,7 +292,7 @@ func TestWriteBurstReport(t *testing.T) {
 		runtime.GOOS, runtime.GOARCH, runtime.Version(), dir, n, writers, readers, capLabel(benchCapped()))
 
 	// ---- A. one room file: synchronous mode + batching + contention ----
-	rooms := newRoomFiles(t, filepath.Join(dir, "a"), 6)
+	rooms := newRoomFiles(t, filepath.Join(dir, testutil.UserID("a")), 6)
 	{
 		db := openBenchDB(t, rooms[0])
 		defer db.Close()
@@ -402,7 +403,7 @@ func TestWriteBurstReport(t *testing.T) {
 
 	// ---- C. read receipts into the SHARED data.db (production SetReadPosition) ----
 	roomForReceipts := benchRoomID(0)
-	msgID := func(m int) string { return fmt.Sprintf("msg_bench%016d", m) }
+	msgID := func(m int) string { return testutil.MsgID(fmt.Sprintf("bench%016d", m)) }
 	perReader := n / readers
 	{
 		s, err := Open(filepath.Join(dir, "c1"))
@@ -413,7 +414,7 @@ func TestWriteBurstReport(t *testing.T) {
 		swapDataDB(t, s)
 		record(runSeq(fmt.Sprintf("C1 read_positions | FULL | %d readers sequential", readers), perReader*readers, func(i int) error {
 			m, r := i/readers, i%readers
-			return s.SetReadPosition(fmt.Sprintf("usr_reader%02d", r), fmt.Sprintf("dev_reader%02d", r), roomForReceipts, "", "", msgID(m))
+			return s.SetReadPosition(testutil.UserID(fmt.Sprintf("reader%02d", r)), fmt.Sprintf("dev_reader%02d", r), roomForReceipts, "", "", msgID(m))
 		}))
 	}
 	{
@@ -426,7 +427,7 @@ func TestWriteBurstReport(t *testing.T) {
 		swapDataDB(t, s, "synchronous(NORMAL)")
 		record(runSeq(fmt.Sprintf("C2 read_positions | NORMAL | %d readers sequential", readers), perReader*readers, func(i int) error {
 			m, r := i/readers, i%readers
-			return s.SetReadPosition(fmt.Sprintf("usr_reader%02d", r), fmt.Sprintf("dev_reader%02d", r), roomForReceipts, "", "", msgID(m))
+			return s.SetReadPosition(testutil.UserID(fmt.Sprintf("reader%02d", r)), fmt.Sprintf("dev_reader%02d", r), roomForReceipts, "", "", msgID(m))
 		}))
 	}
 	{
@@ -438,7 +439,7 @@ func TestWriteBurstReport(t *testing.T) {
 		swapDataDB(t, s)
 		record(runConc(fmt.Sprintf("C3 read_positions | FULL | %d reader goroutines", readers), perReader*readers, readers, func(i int) error {
 			r, m := i/perReader, i%perReader
-			return s.SetReadPosition(fmt.Sprintf("usr_reader%02d", r), fmt.Sprintf("dev_reader%02d", r), roomForReceipts, "", "", msgID(m))
+			return s.SetReadPosition(testutil.UserID(fmt.Sprintf("reader%02d", r)), fmt.Sprintf("dev_reader%02d", r), roomForReceipts, "", "", msgID(m))
 		}))
 	}
 	{
@@ -450,7 +451,7 @@ func TestWriteBurstReport(t *testing.T) {
 		swapDataDB(t, s, "synchronous(NORMAL)")
 		record(runConc(fmt.Sprintf("C4 read_positions | NORMAL | %d reader goroutines", readers), perReader*readers, readers, func(i int) error {
 			r, m := i/perReader, i%perReader
-			return s.SetReadPosition(fmt.Sprintf("usr_reader%02d", r), fmt.Sprintf("dev_reader%02d", r), roomForReceipts, "", "", msgID(m))
+			return s.SetReadPosition(testutil.UserID(fmt.Sprintf("reader%02d", r)), fmt.Sprintf("dev_reader%02d", r), roomForReceipts, "", "", msgID(m))
 		}))
 	}
 
@@ -477,7 +478,7 @@ func TestWriteBurstReport(t *testing.T) {
 			r, m := i/perReader, i%perReader
 			mu.Lock()
 			defer mu.Unlock()
-			return s.SetReadPosition(fmt.Sprintf("usr_reader%02d", r), fmt.Sprintf("dev_reader%02d", r), roomForReceipts, "", "", msgID(m))
+			return s.SetReadPosition(testutil.UserID(fmt.Sprintf("reader%02d", r)), fmt.Sprintf("dev_reader%02d", r), roomForReceipts, "", "", msgID(m))
 		}))
 	}
 

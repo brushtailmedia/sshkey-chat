@@ -6,6 +6,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // syncBatchMessageIDs collects the ids of every message/tombstone in the
@@ -59,28 +60,28 @@ func TestSyncRoom_TombstoneObeysEpochGate(t *testing.T) {
 	// first_epoch=2 → messages from epoch < 2 are pre-membership for bob.
 	// joined_at defaults to now, so use far-future timestamps that clear the
 	// first_seen (ts) gate; this isolates the epoch gate.
-	if err := s.store.AddRoomMember(roomID, "bob", 2); err != nil {
+	if err := s.store.AddRoomMember(roomID, testutil.UserID("bob"), 2); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
 	const baseTS = int64(4000000000)
-	s.store.InsertRoomMessage(roomID, store.StoredMessage{ID: "m1", Sender: "alice", TS: baseTS, Epoch: 1, Payload: "p"})     // pre-epoch live
-	s.store.InsertRoomMessage(roomID, store.StoredMessage{ID: "m2", Sender: "alice", TS: baseTS + 1, Epoch: 1, Payload: "p"}) // pre-epoch (to be deleted)
-	s.store.InsertRoomMessage(roomID, store.StoredMessage{ID: "m3", Sender: "alice", TS: baseTS + 2, Epoch: 2, Payload: "p"}) // visible
-	if _, err := s.store.DeleteRoomMessage(roomID, "m2", "alice"); err != nil {
+	s.store.InsertRoomMessage(roomID, store.StoredMessage{ID: testutil.MsgID("m1"), Sender: testutil.UserID("alice"), TS: baseTS, Epoch: 1, Payload: "p"})     // pre-epoch live
+	s.store.InsertRoomMessage(roomID, store.StoredMessage{ID: testutil.MsgID("m2"), Sender: testutil.UserID("alice"), TS: baseTS + 1, Epoch: 1, Payload: "p"}) // pre-epoch (to be deleted)
+	s.store.InsertRoomMessage(roomID, store.StoredMessage{ID: testutil.MsgID("m3"), Sender: testutil.UserID("alice"), TS: baseTS + 2, Epoch: 2, Payload: "p"}) // visible
+	if _, err := s.store.DeleteRoomMessage(roomID, testutil.MsgID("m2"), testutil.UserID("alice")); err != nil {
 		t.Fatalf("delete m2: %v", err)
 	}
 
-	cc := testClientFor("bob", "dev_bob_sync_tomb")
+	cc := testClientFor(testutil.UserID("bob"), "dev_bob_sync_tomb")
 	s.syncRoom(cc.Client, roomID, 0, 100)
 
 	ids := syncBatchMessageIDs(t, cc)
-	if !ids["m3"] {
+	if !ids[testutil.MsgID("m3")] {
 		t.Errorf("m3 (epoch >= first_epoch) should be in the sync batch; got %v", ids)
 	}
-	if ids["m1"] {
+	if ids[testutil.MsgID("m1")] {
 		t.Error("m1 (pre-first_epoch live) must not be in the sync batch")
 	}
-	if ids["m2"] {
+	if ids[testutil.MsgID("m2")] {
 		t.Error("m2 (pre-first_epoch tombstone) must not leak into the sync batch — its existence is information")
 	}
 }

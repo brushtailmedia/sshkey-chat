@@ -17,9 +17,9 @@ import (
 // the server has never seen returns ErrUnknownDM and does not mutate any state.
 func TestHandleLeaveDM_RejectsUnknownDM(t *testing.T) {
 	s := newTestServer(t)
-	cc := testClientFor("alice", "dev_alice_1")
+	cc := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 
-	raw, _ := json.Marshal(protocol.LeaveDM{Type: "leave_dm", DM: "dm_does_not_exist"})
+	raw, _ := json.Marshal(protocol.LeaveDM{Type: "leave_dm", DM: testutil.DMID("does_not_exist")})
 	s.handleLeaveDM(cc.Client, raw)
 
 	msgs := cc.messages()
@@ -45,12 +45,12 @@ func TestHandleLeaveDM_RejectsUnknownDM(t *testing.T) {
 func TestHandleLeaveDM_RejectsNonMember(t *testing.T) {
 	s := newTestServer(t)
 
-	dm, err := s.store.CreateOrGetDirectMessage("dm_ab", "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(testutil.DMID("ab"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
 
-	cc := testClientFor("carol", "dev_carol_1")
+	cc := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	raw, _ := json.Marshal(protocol.LeaveDM{Type: "leave_dm", DM: dm.ID})
 	s.handleLeaveDM(cc.Client, raw)
 
@@ -68,9 +68,9 @@ func TestHandleLeaveDM_RejectsNonMember(t *testing.T) {
 
 	// Cutoffs must remain untouched after a rejected leave.
 	after, _ := s.store.GetDirectMessage(dm.ID)
-	if after.CutoffFor("alice") != 0 || after.CutoffFor("bob") != 0 {
+	if after.CutoffFor(testutil.UserID("alice")) != 0 || after.CutoffFor(testutil.UserID("bob")) != 0 {
 		t.Errorf("non-member leave must not advance cutoffs, got alice=%d bob=%d",
-			after.CutoffFor("alice"), after.CutoffFor("bob"))
+			after.CutoffFor(testutil.UserID("alice")), after.CutoffFor(testutil.UserID("bob")))
 	}
 }
 
@@ -83,18 +83,18 @@ func TestHandleLeaveDM_PrivacyResponsesIdentical(t *testing.T) {
 	s := newTestServer(t)
 
 	// Create a real DM between alice and bob.
-	if _, err := s.store.CreateOrGetDirectMessage("dm_ab", "alice", "bob"); err != nil {
+	if _, err := s.store.CreateOrGetDirectMessage(testutil.DMID("ab"), testutil.UserID("alice"), testutil.UserID("bob")); err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
 
 	// Carol probes a DM ID that does not exist.
-	probe := testClientFor("carol", "dev_carol_1")
-	rawProbe, _ := json.Marshal(protocol.LeaveDM{Type: "leave_dm", DM: "dm_does_not_exist"})
+	probe := testClientFor(testutil.UserID("carol"), "dev_carol_1")
+	rawProbe, _ := json.Marshal(protocol.LeaveDM{Type: "leave_dm", DM: testutil.DMID("does_not_exist")})
 	s.handleLeaveDM(probe.Client, rawProbe)
 
 	// Carol probes the real (alice/bob) DM that she is not a member of.
-	nonMember := testClientFor("carol", "dev_carol_1")
-	rawReal, _ := json.Marshal(protocol.LeaveDM{Type: "leave_dm", DM: "dm_ab"})
+	nonMember := testClientFor(testutil.UserID("carol"), "dev_carol_1")
+	rawReal, _ := json.Marshal(protocol.LeaveDM{Type: "leave_dm", DM: testutil.DMID("ab")})
 	s.handleLeaveDM(nonMember.Client, rawReal)
 
 	probeMsgs := probe.messages()
@@ -116,22 +116,22 @@ func TestHandleLeaveDM_PrivacyResponsesIdentical(t *testing.T) {
 func TestHandleSendDM_PrivacyResponsesIdentical(t *testing.T) {
 	s := newTestServer(t)
 
-	if _, err := s.store.CreateOrGetDirectMessage("dm_ab", "alice", "bob"); err != nil {
+	if _, err := s.store.CreateOrGetDirectMessage(testutil.DMID("ab"), testutil.UserID("alice"), testutil.UserID("bob")); err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
 
-	probe := testClientFor("carol", "dev_carol_1")
+	probe := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	rawProbe, _ := json.Marshal(protocol.SendDM{
-		Type: "send_dm", DM: "dm_does_not_exist",
-		WrappedKeys: map[string]string{"carol": testutil.WrappedKey("x")},
+		Type: "send_dm", DM: testutil.DMID("does_not_exist"),
+		WrappedKeys: map[string]string{testutil.UserID("carol"): testutil.WrappedKey("x")},
 		Payload:     "p", Signature: "s",
 	})
 	s.handleSendDM(probe.Client, rawProbe)
 
-	nonMember := testClientFor("carol", "dev_carol_2")
+	nonMember := testClientFor(testutil.UserID("carol"), "dev_carol_2")
 	rawReal, _ := json.Marshal(protocol.SendDM{
-		Type: "send_dm", DM: "dm_ab",
-		WrappedKeys: map[string]string{"carol": testutil.WrappedKey("x")},
+		Type: "send_dm", DM: testutil.DMID("ab"),
+		WrappedKeys: map[string]string{testutil.UserID("carol"): testutil.WrappedKey("x")},
 		Payload:     "p", Signature: "s",
 	})
 	s.handleSendDM(nonMember.Client, rawReal)
@@ -154,16 +154,16 @@ func TestHandleSendDM_PrivacyResponsesIdentical(t *testing.T) {
 func TestHandleHistory_DMPrivacyResponsesIdentical(t *testing.T) {
 	s := newTestServer(t)
 
-	if _, err := s.store.CreateOrGetDirectMessage("dm_ab", "alice", "bob"); err != nil {
+	if _, err := s.store.CreateOrGetDirectMessage(testutil.DMID("ab"), testutil.UserID("alice"), testutil.UserID("bob")); err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
 
-	probe := testClientFor("carol", "dev_carol_1")
-	rawProbe, _ := json.Marshal(protocol.History{Type: "history", DM: "dm_does_not_exist", Limit: 10})
+	probe := testClientFor(testutil.UserID("carol"), "dev_carol_1")
+	rawProbe, _ := json.Marshal(protocol.History{Type: "history", DM: testutil.DMID("does_not_exist"), Limit: 10})
 	s.handleHistory(probe.Client, rawProbe)
 
-	nonMember := testClientFor("carol", "dev_carol_2")
-	rawReal, _ := json.Marshal(protocol.History{Type: "history", DM: "dm_ab", Limit: 10})
+	nonMember := testClientFor(testutil.UserID("carol"), "dev_carol_2")
+	rawReal, _ := json.Marshal(protocol.History{Type: "history", DM: testutil.DMID("ab"), Limit: 10})
 	s.handleHistory(nonMember.Client, rawReal)
 
 	probeMsgs := probe.messages()
@@ -184,12 +184,12 @@ func TestHandleHistory_DMPrivacyResponsesIdentical(t *testing.T) {
 func TestHandleLeaveDM_MemberSucceeds(t *testing.T) {
 	s := newTestServer(t)
 
-	dm, err := s.store.CreateOrGetDirectMessage("dm_ab", "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(testutil.DMID("ab"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
 
-	cc := testClientFor("bob", "dev_bob_1")
+	cc := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	// Register the client on the server so the dm_left echo finds it.
 	s.mu.Lock()
 	s.clients["dev_bob_1"] = cc.Client
@@ -215,11 +215,11 @@ func TestHandleLeaveDM_MemberSucceeds(t *testing.T) {
 
 	// Bob's cutoff should now be set; alice's should be untouched.
 	after, _ := s.store.GetDirectMessage(dm.ID)
-	if after.CutoffFor("bob") == 0 {
+	if after.CutoffFor(testutil.UserID("bob")) == 0 {
 		t.Error("bob's cutoff should be non-zero after leave")
 	}
-	if after.CutoffFor("alice") != 0 {
-		t.Errorf("alice's cutoff should be 0, got %d", after.CutoffFor("alice"))
+	if after.CutoffFor(testutil.UserID("alice")) != 0 {
+		t.Errorf("alice's cutoff should be 0, got %d", after.CutoffFor(testutil.UserID("alice")))
 	}
 }
 
@@ -230,7 +230,7 @@ func TestHandleLeaveDM_MemberSucceeds(t *testing.T) {
 func TestHandleLeaveDM_TriggersCleanupWhenBothLeft(t *testing.T) {
 	s := newTestServer(t)
 
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
@@ -238,30 +238,30 @@ func TestHandleLeaveDM_TriggersCleanupWhenBothLeft(t *testing.T) {
 	// Insert a message so the per-DM database file exists on disk and we
 	// can verify it gets unlinked. DMDB is lazy.
 	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
-		ID: "msg_1", Sender: "alice", TS: 100, Payload: "hi",
+		ID: testutil.MsgID("1"), Sender: testutil.UserID("alice"), TS: 100, Payload: "hi",
 	}); err != nil {
 		t.Fatalf("insert msg: %v", err)
 	}
 
 	// First leaver: alice. After this, alice has a cutoff but bob does not,
 	// so cleanup should NOT fire and the row should still exist.
-	aliceClient := testClientFor("alice", "dev_alice_1")
+	aliceClient := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.handleLeaveDM(aliceClient.Client, mustJSON(t, protocol.LeaveDM{Type: "leave_dm", DM: dm.ID}))
 
 	mid, _ := s.store.GetDirectMessage(dm.ID)
 	if mid == nil {
 		t.Fatal("DM row should still exist after only one party has left")
 	}
-	if mid.CutoffFor("alice") == 0 {
+	if mid.CutoffFor(testutil.UserID("alice")) == 0 {
 		t.Error("alice's cutoff should be set after her leave")
 	}
-	if mid.CutoffFor("bob") != 0 {
+	if mid.CutoffFor(testutil.UserID("bob")) != 0 {
 		t.Error("bob's cutoff should still be zero")
 	}
 
 	// Second leaver: bob. After this, both cutoffs are set, cleanup should
 	// fire, and the row + dm-<id>.db file should be gone.
-	bobClient := testClientFor("bob", "dev_bob_1")
+	bobClient := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.handleLeaveDM(bobClient.Client, mustJSON(t, protocol.LeaveDM{Type: "leave_dm", DM: dm.ID}))
 
 	gone, _ := s.store.GetDirectMessage(dm.ID)
@@ -283,22 +283,22 @@ func TestHandleLeaveDM_TriggersCleanupWhenBothLeft(t *testing.T) {
 func TestHandleLeaveDM_NoCleanupWhenOnlyOneLeft(t *testing.T) {
 	s := newTestServer(t)
 
-	dm, err := s.store.CreateOrGetDirectMessage("dm_ab", "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(testutil.DMID("ab"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
 
-	bobClient := testClientFor("bob", "dev_bob_1")
+	bobClient := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.handleLeaveDM(bobClient.Client, mustJSON(t, protocol.LeaveDM{Type: "leave_dm", DM: dm.ID}))
 
 	after, _ := s.store.GetDirectMessage(dm.ID)
 	if after == nil {
 		t.Fatal("DM row should still exist when only one party has left")
 	}
-	if after.CutoffFor("bob") == 0 {
+	if after.CutoffFor(testutil.UserID("bob")) == 0 {
 		t.Error("bob's cutoff should be set")
 	}
-	if after.CutoffFor("alice") != 0 {
+	if after.CutoffFor(testutil.UserID("alice")) != 0 {
 		t.Error("alice's cutoff should still be 0")
 	}
 }
@@ -312,7 +312,7 @@ func TestHandleLeaveDM_NoCleanupWhenOnlyOneLeft(t *testing.T) {
 func TestHandleLeaveDM_CleanupIsIdempotent(t *testing.T) {
 	s := newTestServer(t)
 
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
@@ -320,10 +320,10 @@ func TestHandleLeaveDM_CleanupIsIdempotent(t *testing.T) {
 	// Manually advance both cutoffs (bypassing handleLeaveDM) to set up
 	// the "both have left" precondition.
 	now := time.Now().Unix()
-	if err := s.store.SetDMLeftAt(dm.ID, "alice", now); err != nil {
+	if err := s.store.SetDMLeftAt(dm.ID, testutil.UserID("alice"), now); err != nil {
 		t.Fatalf("set alice cutoff: %v", err)
 	}
-	if err := s.store.SetDMLeftAt(dm.ID, "bob", now); err != nil {
+	if err := s.store.SetDMLeftAt(dm.ID, testutil.UserID("bob"), now); err != nil {
 		t.Fatalf("set bob cutoff: %v", err)
 	}
 
@@ -347,8 +347,8 @@ func TestHandleCreateDM_BusyDuringCleanup(t *testing.T) {
 	// Simulate an in-progress cleanup by holding the mutex from the test.
 	s.dmCleanupMu.Lock()
 
-	cc := testClientFor("alice", "dev_alice_1")
-	raw := mustJSON(t, protocol.CreateDM{Type: "create_dm", Other: "bob"})
+	cc := testClientFor(testutil.UserID("alice"), "dev_alice_1")
+	raw := mustJSON(t, protocol.CreateDM{Type: "create_dm", Other: testutil.UserID("bob")})
 	s.handleCreateDM(cc.Client, raw)
 
 	// Release the mutex now that handleCreateDM has returned (TryLock
@@ -368,9 +368,9 @@ func TestHandleCreateDM_BusyDuringCleanup(t *testing.T) {
 	}
 
 	// No DM should have been created while busy.
-	dms, _ := s.store.GetDirectMessagesForUser("alice")
+	dms, _ := s.store.GetDirectMessagesForUser(testutil.UserID("alice"))
 	for _, dm := range dms {
-		if dm.UserA == "alice" && dm.UserB == "bob" || dm.UserA == "bob" && dm.UserB == "alice" {
+		if dm.UserA == testutil.UserID("alice") && dm.UserB == testutil.UserID("bob") || dm.UserA == testutil.UserID("bob") && dm.UserB == testutil.UserID("alice") {
 			t.Errorf("create_dm should not have created a row while busy: %+v", dm)
 		}
 	}
@@ -384,15 +384,15 @@ func TestHandleCreateDM_FreshAfterCleanup(t *testing.T) {
 	s := newTestServer(t)
 
 	// Create the original DM and have both parties leave.
-	original, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	original, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create original DM: %v", err)
 	}
 
-	aliceClient := testClientFor("alice", "dev_alice_1")
+	aliceClient := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.handleLeaveDM(aliceClient.Client, mustJSON(t, protocol.LeaveDM{Type: "leave_dm", DM: original.ID}))
 
-	bobClient := testClientFor("bob", "dev_bob_1")
+	bobClient := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.handleLeaveDM(bobClient.Client, mustJSON(t, protocol.LeaveDM{Type: "leave_dm", DM: original.ID}))
 
 	// Confirm the original is gone.
@@ -404,12 +404,12 @@ func TestHandleCreateDM_FreshAfterCleanup(t *testing.T) {
 	// sessions of both members via s.clients, so register alice's session
 	// on the server before the call so the encode lands somewhere we can
 	// observe.
-	freshClient := testClientFor("alice", "dev_alice_fresh")
+	freshClient := testClientFor(testutil.UserID("alice"), "dev_alice_fresh")
 	s.mu.Lock()
 	s.clients["dev_alice_fresh"] = freshClient.Client
 	s.mu.Unlock()
 
-	s.handleCreateDM(freshClient.Client, mustJSON(t, protocol.CreateDM{Type: "create_dm", Other: "bob"}))
+	s.handleCreateDM(freshClient.Client, mustJSON(t, protocol.CreateDM{Type: "create_dm", Other: testutil.UserID("bob")}))
 
 	msgs := freshClient.messages()
 	if len(msgs) == 0 {

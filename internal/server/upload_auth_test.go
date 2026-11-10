@@ -24,6 +24,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // uploadStartMsg is a small helper — the test fixture always supplies
@@ -61,7 +62,7 @@ func TestHandleUploadStart_RoomMemberAccepted(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	raw, _ := json.Marshal(uploadStartMsg(store.GenerateID("up_"), generalID, "", ""))
 	s.handleUploadStart(alice.Client, raw)
 
@@ -83,7 +84,7 @@ func TestHandleUploadStart_RoomNonMemberRejected(t *testing.T) {
 	// alice is in engineering per the seed; bob and carol are not.
 	engID := s.store.RoomDisplayNameToID("engineering")
 
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	raw, _ := json.Marshal(uploadStartMsg(store.GenerateID("up_"), engID, "", ""))
 	s.handleUploadStart(bob.Client, raw)
 
@@ -109,12 +110,12 @@ func TestHandleUploadStart_RoomNonMemberRejected(t *testing.T) {
 
 func TestHandleUploadStart_GroupMemberAccepted(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_up_happy", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("up_happy"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	bob := testClientFor("bob", "dev_bob_1")
-	raw, _ := json.Marshal(uploadStartMsg(store.GenerateID("up_"), "", "group_up_happy", ""))
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
+	raw, _ := json.Marshal(uploadStartMsg(store.GenerateID("up_"), "", testutil.GroupID("up_happy"), ""))
 	s.handleUploadStart(bob.Client, raw)
 
 	msgs := bob.messages()
@@ -132,13 +133,13 @@ func TestHandleUploadStart_GroupMemberAccepted(t *testing.T) {
 
 func TestHandleUploadStart_GroupNonMemberRejected(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_up_reject", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("up_reject"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
 	// carol is not a member.
-	carol := testClientFor("carol", "dev_carol_1")
-	raw, _ := json.Marshal(uploadStartMsg(store.GenerateID("up_"), "", "group_up_reject", ""))
+	carol := testClientFor(testutil.UserID("carol"), "dev_carol_1")
+	raw, _ := json.Marshal(uploadStartMsg(store.GenerateID("up_"), "", testutil.GroupID("up_reject"), ""))
 	s.handleUploadStart(carol.Client, raw)
 
 	msgs := carol.messages()
@@ -160,12 +161,12 @@ func TestHandleUploadStart_GroupNonMemberRejected(t *testing.T) {
 
 func TestHandleUploadStart_DMPartyAccepted(t *testing.T) {
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage("dm_up_happy", "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(testutil.DMID("up_happy"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create dm: %v", err)
 	}
 
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	raw, _ := json.Marshal(uploadStartMsg(store.GenerateID("up_"), "", "", dm.ID))
 	s.handleUploadStart(bob.Client, raw)
 
@@ -184,13 +185,13 @@ func TestHandleUploadStart_DMPartyAccepted(t *testing.T) {
 
 func TestHandleUploadStart_DMNonPartyRejected(t *testing.T) {
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage("dm_up_reject", "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(testutil.DMID("up_reject"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create dm: %v", err)
 	}
 
 	// carol is not a party.
-	carol := testClientFor("carol", "dev_carol_1")
+	carol := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	raw, _ := json.Marshal(uploadStartMsg(store.GenerateID("up_"), "", "", dm.ID))
 	s.handleUploadStart(carol.Client, raw)
 
@@ -213,7 +214,7 @@ func TestHandleUploadStart_DMNonPartyRejected(t *testing.T) {
 
 func TestHandleUploadStart_NoContextRejected(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	raw, _ := json.Marshal(uploadStartMsg(store.GenerateID("up_"), "", "", ""))
 	s.handleUploadStart(alice.Client, raw)
 
@@ -234,10 +235,10 @@ func TestHandleUploadStart_MultipleContextsRejected(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	// Set both Room and Group — invalid_context regardless of whether alice
 	// is a member of either.
-	raw, _ := json.Marshal(uploadStartMsg(store.GenerateID("up_"), generalID, "group_anything", ""))
+	raw, _ := json.Marshal(uploadStartMsg(store.GenerateID("up_"), generalID, testutil.GroupID("anything"), ""))
 	s.handleUploadStart(alice.Client, raw)
 
 	msgs := alice.messages()
@@ -268,13 +269,13 @@ func TestHandleUploadStart_PrivacyIdentical_Room(t *testing.T) {
 	sharedUploadID := store.GenerateID("up_")
 
 	// Case 1: bob tries to upload to engineering (exists; bob not a member).
-	bob1 := testClientFor("bob", "dev_bob_1")
+	bob1 := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	raw1, _ := json.Marshal(uploadStartMsg(sharedUploadID, engID, "", ""))
 	s.handleUploadStart(bob1.Client, raw1)
 
 	// Case 2: bob tries to upload to a room that doesn't exist.
-	bob2 := testClientFor("bob", "dev_bob_2")
-	raw2, _ := json.Marshal(uploadStartMsg(sharedUploadID, "room_nonexistent", "", ""))
+	bob2 := testClientFor(testutil.UserID("bob"), "dev_bob_2")
+	raw2, _ := json.Marshal(uploadStartMsg(sharedUploadID, testutil.RoomID("nonexistent"), "", ""))
 	s.handleUploadStart(bob2.Client, raw2)
 
 	msgs1 := bob1.messages()
@@ -291,7 +292,7 @@ func TestHandleUploadStart_PrivacyIdentical_Room(t *testing.T) {
 
 func TestHandleUploadStart_PrivacyIdentical_Group(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_priv_real", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("priv_real"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -299,13 +300,13 @@ func TestHandleUploadStart_PrivacyIdentical_Group(t *testing.T) {
 	sharedUploadID := store.GenerateID("up_")
 
 	// Case 1: carol tries to upload to group_priv_real (exists; carol not a member).
-	carol1 := testClientFor("carol", "dev_carol_1")
-	raw1, _ := json.Marshal(uploadStartMsg(sharedUploadID, "", "group_priv_real", ""))
+	carol1 := testClientFor(testutil.UserID("carol"), "dev_carol_1")
+	raw1, _ := json.Marshal(uploadStartMsg(sharedUploadID, "", testutil.GroupID("priv_real"), ""))
 	s.handleUploadStart(carol1.Client, raw1)
 
 	// Case 2: carol tries to upload to a group that doesn't exist.
-	carol2 := testClientFor("carol", "dev_carol_2")
-	raw2, _ := json.Marshal(uploadStartMsg(sharedUploadID, "", "group_does_not_exist", ""))
+	carol2 := testClientFor(testutil.UserID("carol"), "dev_carol_2")
+	raw2, _ := json.Marshal(uploadStartMsg(sharedUploadID, "", testutil.GroupID("does_not_exist"), ""))
 	s.handleUploadStart(carol2.Client, raw2)
 
 	msgs1 := carol1.messages()
@@ -322,7 +323,7 @@ func TestHandleUploadStart_PrivacyIdentical_Group(t *testing.T) {
 
 func TestHandleUploadStart_PrivacyIdentical_DM(t *testing.T) {
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage("dm_priv", "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(testutil.DMID("priv"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create dm: %v", err)
 	}
@@ -331,13 +332,13 @@ func TestHandleUploadStart_PrivacyIdentical_DM(t *testing.T) {
 	sharedUploadID := store.GenerateID("up_")
 
 	// Case 1: carol tries to upload to the alice-bob DM (exists; carol not a party).
-	carol1 := testClientFor("carol", "dev_carol_1")
+	carol1 := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	raw1, _ := json.Marshal(uploadStartMsg(sharedUploadID, "", "", dm.ID))
 	s.handleUploadStart(carol1.Client, raw1)
 
 	// Case 2: carol tries to upload to a DM that doesn't exist.
-	carol2 := testClientFor("carol", "dev_carol_2")
-	raw2, _ := json.Marshal(uploadStartMsg(sharedUploadID, "", "", "dm_does_not_exist"))
+	carol2 := testClientFor(testutil.UserID("carol"), "dev_carol_2")
+	raw2, _ := json.Marshal(uploadStartMsg(sharedUploadID, "", "", testutil.DMID("does_not_exist")))
 	s.handleUploadStart(carol2.Client, raw2)
 
 	msgs1 := carol1.messages()

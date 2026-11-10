@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // captureClient wraps a Client with a buffer-backed Encoder so handler
@@ -46,11 +47,11 @@ func testClientFor(userID, deviceID string) *captureClient {
 func TestListDevices_EmptyForNewUser(t *testing.T) {
 	s := newTestServer(t)
 	// Register alice's first device
-	if _, _, err := s.store.UpsertDevice("alice", "dev_alice_1"); err != nil {
+	if _, _, err := s.store.UpsertDevice(testutil.UserID("alice"), "dev_alice_1"); err != nil {
 		t.Fatalf("register device: %v", err)
 	}
 
-	cc := testClientFor("alice", "dev_alice_1")
+	cc := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.handleListDevices(cc.Client, nil)
 
 	msgs := cc.messages()
@@ -77,11 +78,11 @@ func TestListDevices_EmptyForNewUser(t *testing.T) {
 
 func TestListDevices_MultipleDevicesCurrentFlag(t *testing.T) {
 	s := newTestServer(t)
-	s.store.UpsertDevice("alice", "dev_laptop")
-	s.store.UpsertDevice("alice", "dev_phone")
-	s.store.UpsertDevice("alice", "dev_desktop")
+	s.store.UpsertDevice(testutil.UserID("alice"), "dev_laptop")
+	s.store.UpsertDevice(testutil.UserID("alice"), "dev_phone")
+	s.store.UpsertDevice(testutil.UserID("alice"), "dev_desktop")
 
-	cc := testClientFor("alice", "dev_phone")
+	cc := testClientFor(testutil.UserID("alice"), "dev_phone")
 	s.handleListDevices(cc.Client, nil)
 
 	var list protocol.DeviceList
@@ -105,12 +106,12 @@ func TestListDevices_MultipleDevicesCurrentFlag(t *testing.T) {
 
 func TestListDevices_IncludesRevokedFlag(t *testing.T) {
 	s := newTestServer(t)
-	s.store.UpsertDevice("alice", "dev_a")
-	s.store.UpsertDevice("alice", "dev_b")
+	s.store.UpsertDevice(testutil.UserID("alice"), "dev_a")
+	s.store.UpsertDevice(testutil.UserID("alice"), "dev_b")
 	// Revoke dev_b
-	s.store.RevokeDevice("alice", "dev_b", "test")
+	s.store.RevokeDevice(testutil.UserID("alice"), "dev_b", "test")
 
-	cc := testClientFor("alice", "dev_a")
+	cc := testClientFor(testutil.UserID("alice"), "dev_a")
 	s.handleListDevices(cc.Client, nil)
 
 	var list protocol.DeviceList
@@ -127,11 +128,11 @@ func TestListDevices_IncludesRevokedFlag(t *testing.T) {
 
 func TestListDevices_OnlyUserOwnDevices(t *testing.T) {
 	s := newTestServer(t)
-	s.store.UpsertDevice("alice", "dev_alice_1")
-	s.store.UpsertDevice("bob", "dev_bob_1")
-	s.store.UpsertDevice("bob", "dev_bob_2")
+	s.store.UpsertDevice(testutil.UserID("alice"), "dev_alice_1")
+	s.store.UpsertDevice(testutil.UserID("bob"), "dev_bob_1")
+	s.store.UpsertDevice(testutil.UserID("bob"), "dev_bob_2")
 
-	cc := testClientFor("alice", "dev_alice_1")
+	cc := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.handleListDevices(cc.Client, nil)
 
 	var list protocol.DeviceList
@@ -148,10 +149,10 @@ func TestListDevices_OnlyUserOwnDevices(t *testing.T) {
 
 func TestRevokeDevice_Success(t *testing.T) {
 	s := newTestServer(t)
-	s.store.UpsertDevice("alice", "dev_a")
-	s.store.UpsertDevice("alice", "dev_b")
+	s.store.UpsertDevice(testutil.UserID("alice"), "dev_a")
+	s.store.UpsertDevice(testutil.UserID("alice"), "dev_b")
 
-	cc := testClientFor("alice", "dev_a")
+	cc := testClientFor(testutil.UserID("alice"), "dev_a")
 	raw := json.RawMessage(`{"type":"revoke_device","device_id":"dev_b"}`)
 	s.handleRevokeDevice(cc.Client, raw)
 
@@ -166,7 +167,7 @@ func TestRevokeDevice_Success(t *testing.T) {
 	}
 
 	// Confirm revoked in store
-	revoked, err := s.store.IsDeviceRevoked("alice", "dev_b")
+	revoked, err := s.store.IsDeviceRevoked(testutil.UserID("alice"), "dev_b")
 	if err != nil {
 		t.Fatalf("IsDeviceRevoked: %v", err)
 	}
@@ -178,10 +179,10 @@ func TestRevokeDevice_Success(t *testing.T) {
 func TestRevokeDevice_RejectsForeignDevice(t *testing.T) {
 	// Alice tries to revoke bob's device — should fail.
 	s := newTestServer(t)
-	s.store.UpsertDevice("alice", "dev_a")
-	s.store.UpsertDevice("bob", "dev_b")
+	s.store.UpsertDevice(testutil.UserID("alice"), "dev_a")
+	s.store.UpsertDevice(testutil.UserID("bob"), "dev_b")
 
-	cc := testClientFor("alice", "dev_a")
+	cc := testClientFor(testutil.UserID("alice"), "dev_a")
 	raw := json.RawMessage(`{"type":"revoke_device","device_id":"dev_b"}`)
 	s.handleRevokeDevice(cc.Client, raw)
 
@@ -195,7 +196,7 @@ func TestRevokeDevice_RejectsForeignDevice(t *testing.T) {
 	}
 
 	// Confirm NOT revoked
-	revoked, _ := s.store.IsDeviceRevoked("bob", "dev_b")
+	revoked, _ := s.store.IsDeviceRevoked(testutil.UserID("bob"), "dev_b")
 	if revoked {
 		t.Error("bob's device should not be revoked")
 	}
@@ -203,7 +204,7 @@ func TestRevokeDevice_RejectsForeignDevice(t *testing.T) {
 
 func TestRevokeDevice_EmptyDeviceID(t *testing.T) {
 	s := newTestServer(t)
-	cc := testClientFor("alice", "dev_a")
+	cc := testClientFor(testutil.UserID("alice"), "dev_a")
 	raw := json.RawMessage(`{"type":"revoke_device","device_id":""}`)
 	s.handleRevokeDevice(cc.Client, raw)
 
@@ -216,7 +217,7 @@ func TestRevokeDevice_EmptyDeviceID(t *testing.T) {
 
 func TestRevokeDevice_Malformed(t *testing.T) {
 	s := newTestServer(t)
-	cc := testClientFor("alice", "dev_a")
+	cc := testClientFor(testutil.UserID("alice"), "dev_a")
 	raw := json.RawMessage(`{"type":"revoke_device","device_id":`)
 	s.handleRevokeDevice(cc.Client, raw)
 
@@ -231,9 +232,9 @@ func TestRevokeDevice_Malformed(t *testing.T) {
 func TestRevokeDevice_SelfRevocationAllowed(t *testing.T) {
 	// A user can revoke their own current device.
 	s := newTestServer(t)
-	s.store.UpsertDevice("alice", "dev_a")
+	s.store.UpsertDevice(testutil.UserID("alice"), "dev_a")
 
-	cc := testClientFor("alice", "dev_a")
+	cc := testClientFor(testutil.UserID("alice"), "dev_a")
 	raw := json.RawMessage(`{"type":"revoke_device","device_id":"dev_a"}`)
 	s.handleRevokeDevice(cc.Client, raw)
 
@@ -243,7 +244,7 @@ func TestRevokeDevice_SelfRevocationAllowed(t *testing.T) {
 		t.Errorf("self-revocation should succeed, got: %q", result.Error)
 	}
 
-	revoked, _ := s.store.IsDeviceRevoked("alice", "dev_a")
+	revoked, _ := s.store.IsDeviceRevoked(testutil.UserID("alice"), "dev_a")
 	if !revoked {
 		t.Error("current device should be revoked")
 	}
@@ -251,9 +252,9 @@ func TestRevokeDevice_SelfRevocationAllowed(t *testing.T) {
 
 func TestRevokeDevice_NonExistentDevice(t *testing.T) {
 	s := newTestServer(t)
-	s.store.UpsertDevice("alice", "dev_a")
+	s.store.UpsertDevice(testutil.UserID("alice"), "dev_a")
 
-	cc := testClientFor("alice", "dev_a")
+	cc := testClientFor(testutil.UserID("alice"), "dev_a")
 	raw := json.RawMessage(`{"type":"revoke_device","device_id":"dev_never_registered"}`)
 	s.handleRevokeDevice(cc.Client, raw)
 

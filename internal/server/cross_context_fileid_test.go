@@ -25,6 +25,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // newCrossContextTestClient is a minimal *Client whose Encoder writes
@@ -36,7 +37,7 @@ import (
 // work as written.
 func newCrossContextTestClient(deviceID string, encBuf *bytes.Buffer) *Client {
 	return &Client{
-		UserID:   "alice",
+		UserID:   testutil.UserID("alice"),
 		DeviceID: deviceID,
 		Encoder:  newSafeEncoder(protocol.NewEncoder(encBuf)),
 	}
@@ -136,7 +137,7 @@ func TestValidateFileIDsForContext_CrossRoomToGroup_Rejects(t *testing.T) {
 		t.Fatalf("bind file: %v", err)
 	}
 
-	if s.validateFileIDsForContext(c, []string{fileID}, store.FileContextGroup, "group_anything") {
+	if s.validateFileIDsForContext(c, []string{fileID}, store.FileContextGroup, testutil.GroupID("anything")) {
 		t.Error("room-bound file must not be acceptable in group send")
 	}
 	assertUnknownFile(t, &encBuf)
@@ -151,7 +152,7 @@ func TestValidateFileIDsForContext_CrossGroupToDM_Rejects(t *testing.T) {
 	if err := s.store.InsertFileContext(fileID, store.FileContextGroup, "group_xyz", 100); err != nil {
 		t.Fatalf("bind file: %v", err)
 	}
-	dm, err := s.store.CreateOrGetDirectMessage("dm_cross", "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(testutil.DMID("cross"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create dm: %v", err)
 	}

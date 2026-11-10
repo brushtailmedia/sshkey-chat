@@ -2,6 +2,8 @@ package store
 
 import (
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestStoreRoundTrip(t *testing.T) {
@@ -22,12 +24,12 @@ func TestStoreRoundTrip(t *testing.T) {
 
 	// Insert a room message
 	_, err = s.InsertRoomMessage(generalID, StoredMessage{
-		ID:        "msg_test001",
-		Sender:    "alice",
+		ID:        testutil.MsgID("test001"),
+		Sender:    testutil.UserID("alice"),
 		TS:        1712345678,
 		Epoch:     3,
 		Payload:   "base64encrypted...",
-		FileIDs:   []string{"file_abc"},
+		FileIDs:   []string{testutil.FileID("abc")},
 		Signature: "base64sig...",
 	})
 	if err != nil {
@@ -42,27 +44,27 @@ func TestStoreRoundTrip(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
-	if msgs[0].ID != "msg_test001" {
+	if msgs[0].ID != testutil.MsgID("test001") {
 		t.Errorf("id = %q, want msg_test001", msgs[0].ID)
 	}
-	if msgs[0].Sender != "alice" {
+	if msgs[0].Sender != testutil.UserID("alice") {
 		t.Errorf("sender = %q, want alice", msgs[0].Sender)
 	}
 	if msgs[0].Epoch != 3 {
 		t.Errorf("epoch = %d, want 3", msgs[0].Epoch)
 	}
-	if len(msgs[0].FileIDs) != 1 || msgs[0].FileIDs[0] != "file_abc" {
+	if len(msgs[0].FileIDs) != 1 || msgs[0].FileIDs[0] != testutil.FileID("abc") {
 		t.Errorf("file_ids = %v, want [file_abc]", msgs[0].FileIDs)
 	}
 
 	// Insert a group DM message
 	groupID := GenerateID("group_")
 	_, err = s.InsertGroupMessage(groupID, StoredMessage{
-		ID:          "msg_dm001",
-		Sender:      "alice",
+		ID:          testutil.MsgID("dm001"),
+		Sender:      testutil.UserID("alice"),
 		TS:          1712345680,
 		Payload:     "base64encrypted_dm...",
-		WrappedKeys: map[string]string{"alice": "wrapped_a", "bob": "wrapped_b"},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): "wrapped_a", testutil.UserID("bob"): "wrapped_b"},
 		Signature:   "base64sig_dm...",
 	})
 	if err != nil {
@@ -76,14 +78,14 @@ func TestStoreRoundTrip(t *testing.T) {
 	if len(dmMsgs) != 1 {
 		t.Fatalf("expected 1 DM, got %d", len(dmMsgs))
 	}
-	if dmMsgs[0].WrappedKeys["bob"] != "wrapped_b" {
-		t.Errorf("wrapped_keys[bob] = %q, want wrapped_b", dmMsgs[0].WrappedKeys["bob"])
+	if dmMsgs[0].WrappedKeys[testutil.UserID("bob")] != "wrapped_b" {
+		t.Errorf("wrapped_keys[bob] = %q, want wrapped_b", dmMsgs[0].WrappedKeys[testutil.UserID("bob")])
 	}
 
 	// Test device registration. isNew must be true for a first-seen device
 	// and false for a reconnect — this drives the Tier 1 new-device
 	// notification, and locks in the RowsAffected semantics it relies on.
-	count, isNew, err := s.UpsertDevice("alice", "dev_test_001")
+	count, isNew, err := s.UpsertDevice(testutil.UserID("alice"), "dev_test_001")
 	if err != nil {
 		t.Fatalf("upsert device: %v", err)
 	}
@@ -94,7 +96,7 @@ func TestStoreRoundTrip(t *testing.T) {
 		t.Error("first registration of dev_test_001 should report isNew=true")
 	}
 
-	count, isNew, err = s.UpsertDevice("alice", "dev_test_002")
+	count, isNew, err = s.UpsertDevice(testutil.UserID("alice"), "dev_test_002")
 	if err != nil {
 		t.Fatalf("upsert device 2: %v", err)
 	}
@@ -106,7 +108,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 
 	// Duplicate device shouldn't increase count or report isNew.
-	count, isNew, err = s.UpsertDevice("alice", "dev_test_001")
+	count, isNew, err = s.UpsertDevice(testutil.UserID("alice"), "dev_test_001")
 	if err != nil {
 		t.Fatalf("upsert device dup: %v", err)
 	}
@@ -118,7 +120,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 
 	// Test group creation
-	err = s.CreateGroup(groupID, "alice", []string{"alice", "bob", "carol"})
+	err = s.CreateGroup(groupID, testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob"), testutil.UserID("carol")})
 	if err != nil {
 		t.Fatalf("create group: %v", err)
 	}
@@ -132,11 +134,11 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 
 	// Test 1:1 DM dedup
-	dm1, err := s.CreateOrGetDirectMessage(GenerateID("dm_"), "alice", "bob")
+	dm1, err := s.CreateOrGetDirectMessage(GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
-	dm2, err := s.CreateOrGetDirectMessage(GenerateID("dm_"), "bob", "alice")
+	dm2, err := s.CreateOrGetDirectMessage(GenerateID("dm_"), testutil.UserID("bob"), testutil.UserID("alice"))
 	if err != nil {
 		t.Fatalf("create DM 2: %v", err)
 	}
@@ -145,12 +147,12 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 
 	// Test epoch key storage
-	err = s.StoreEpochKey(generalID, 3, "alice", "wrapped_epoch_key_alice")
+	err = s.StoreEpochKey(generalID, 3, testutil.UserID("alice"), "wrapped_epoch_key_alice")
 	if err != nil {
 		t.Fatalf("store epoch key: %v", err)
 	}
 
-	key, err := s.GetEpochKey(generalID, 3, "alice")
+	key, err := s.GetEpochKey(generalID, 3, testutil.UserID("alice"))
 	if err != nil {
 		t.Fatalf("get epoch key: %v", err)
 	}
@@ -167,7 +169,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 
 	// Test message deletion
-	_, err = s.DeleteRoomMessage(generalID, "msg_test001", "alice")
+	_, err = s.DeleteRoomMessage(generalID, testutil.MsgID("test001"), testutil.UserID("alice"))
 	if err != nil {
 		t.Fatalf("delete message: %v", err)
 	}
@@ -184,7 +186,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 
 	// Test leave group
-	err = s.RemoveGroupMember(groupID, "bob")
+	err = s.RemoveGroupMember(groupID, testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("remove member: %v", err)
 	}
@@ -197,7 +199,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 	// Verify bob is no longer a member
 	for _, m := range members {
-		if m == "bob" {
+		if m == testutil.UserID("bob") {
 			t.Errorf("bob should have been removed from group, got %v", members)
 		}
 	}

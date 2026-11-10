@@ -69,9 +69,9 @@ func generateTestFixtures() (string, []testFixtureUser, error) {
 
 	// Generate the three test keys + pub keys
 	users := []testFixtureUser{
-		{UserID: "usr_alice_test", DisplayName: "alice", KeyPath: filepath.Join(keyDir, "alice_ed25519"), Rooms: []string{"general", "engineering"}},
-		{UserID: "usr_bob_test", DisplayName: "bob", KeyPath: filepath.Join(keyDir, "bob_ed25519"), Rooms: []string{"general"}},
-		{UserID: "usr_carol_test", DisplayName: "carol", KeyPath: filepath.Join(keyDir, "carol_ed25519"), Rooms: []string{"general"}},
+		{UserID: testutil.UserID("alice_test"), DisplayName: "alice", KeyPath: filepath.Join(keyDir, "alice_ed25519"), Rooms: []string{"general", "engineering"}},
+		{UserID: testutil.UserID("bob_test"), DisplayName: "bob", KeyPath: filepath.Join(keyDir, "bob_ed25519"), Rooms: []string{"general"}},
+		{UserID: testutil.UserID("carol_test"), DisplayName: "carol", KeyPath: filepath.Join(keyDir, "carol_ed25519"), Rooms: []string{"general"}},
 	}
 
 	tmpConfigDir, err := os.MkdirTemp("", "sshkey-test-config-")
@@ -505,7 +505,7 @@ func TestRoomMessaging(t *testing.T) {
 	if aliceMsg.ID != bobMsg.ID {
 		t.Errorf("message IDs don't match: alice=%s bob=%s", aliceMsg.ID, bobMsg.ID)
 	}
-	if aliceMsg.From != "usr_alice_test" {
+	if aliceMsg.From != testutil.UserID("alice_test") {
 		t.Errorf("from = %q, want alice", aliceMsg.From)
 	}
 	if aliceMsg.Room != generalID {
@@ -607,7 +607,7 @@ func TestSyncOnReconnect(t *testing.T) {
 			Type:    "send",
 			Room:    generalID,
 			Epoch:   1,
-			Payload: fmt.Sprintf("msg_%d", i),
+			Payload: testutil.MsgID(fmt.Sprintf("%d", i)),
 		})
 		// Read our own message back
 		alice.readMessage()
@@ -689,7 +689,7 @@ func TestSyncOnReconnect(t *testing.T) {
 	for i, raw := range batch.Messages {
 		var msg protocol.Message
 		json.Unmarshal(raw, &msg)
-		expected := fmt.Sprintf("msg_%d", i)
+		expected := testutil.MsgID(fmt.Sprintf("%d", i))
 		if msg.Payload != expected {
 			t.Errorf("message %d payload = %q, want %q", i, msg.Payload, expected)
 		}
@@ -777,7 +777,7 @@ func TestDMConversations(t *testing.T) {
 	// Alice creates a 1:1 DM with bob
 	alice.enc.Encode(protocol.CreateDM{
 		Type:  "create_dm",
-		Other: "usr_bob_test",
+		Other: testutil.UserID("bob_test"),
 	})
 
 	// Alice receives dm_created
@@ -799,7 +799,7 @@ func TestDMConversations(t *testing.T) {
 	// Alice creates the same DM again -- should get back the existing one (1:1 dedup)
 	alice.enc.Encode(protocol.CreateDM{
 		Type:  "create_dm",
-		Other: "usr_bob_test",
+		Other: testutil.UserID("bob_test"),
 	})
 	msgType, raw = alice.readMessage()
 	if msgType != "dm_created" {
@@ -817,7 +817,7 @@ func TestDMConversations(t *testing.T) {
 	alice.enc.Encode(protocol.SendDM{
 		Type:        "send_dm",
 		DM:          dmID,
-		WrappedKeys: map[string]string{"usr_alice_test": testutil.WrappedKey("wrapped_a"), "usr_bob_test": testutil.WrappedKey("wrapped_b")},
+		WrappedKeys: map[string]string{testutil.UserID("alice_test"): testutil.WrappedKey("wrapped_a"), testutil.UserID("bob_test"): testutil.WrappedKey("wrapped_b")},
 		Payload:     "base64_encrypted_dm",
 		Signature:   "base64_sig_dm",
 	})
@@ -844,7 +844,7 @@ func TestDMConversations(t *testing.T) {
 	var bobDM protocol.DM
 	json.Unmarshal(raw, &bobDM)
 
-	if bobDM.From != "usr_alice_test" {
+	if bobDM.From != testutil.UserID("alice_test") {
 		t.Errorf("from = %q, want alice", bobDM.From)
 	}
 	if bobDM.DM != dmID {
@@ -853,8 +853,8 @@ func TestDMConversations(t *testing.T) {
 	if bobDM.Payload != "base64_encrypted_dm" {
 		t.Errorf("payload = %q, want base64_encrypted_dm", bobDM.Payload)
 	}
-	if bobDM.WrappedKeys["usr_bob_test"] != testutil.WrappedKey("wrapped_b") {
-		t.Errorf("wrapped_keys[bob] = %q, want the wrap seeded wrapped_b", bobDM.WrappedKeys["usr_bob_test"])
+	if bobDM.WrappedKeys[testutil.UserID("bob_test")] != testutil.WrappedKey("wrapped_b") {
+		t.Errorf("wrapped_keys[bob] = %q, want the wrap seeded wrapped_b", bobDM.WrappedKeys[testutil.UserID("bob_test")])
 	}
 
 	t.Logf("DM delivered: id=%s from=%s dm=%s", bobDM.ID, bobDM.From, bobDM.DM)
@@ -863,7 +863,7 @@ func TestDMConversations(t *testing.T) {
 	alice.enc.Encode(protocol.SendDM{
 		Type:        "send_dm",
 		DM:          dmID,
-		WrappedKeys: map[string]string{"usr_alice_test": testutil.WrappedKey("wrapped_a")}, // missing bob
+		WrappedKeys: map[string]string{testutil.UserID("alice_test"): testutil.WrappedKey("wrapped_a")}, // missing bob
 		Payload:     "base64_bad",
 	})
 
@@ -980,7 +980,7 @@ func TestEdit_GroupEndToEnd(t *testing.T) {
 	bob := env.connect(fixtureKeyPath(t, "bob"), "dev_bob_edit_group")
 
 	groupID := store.GenerateID("group_")
-	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test", "usr_bob_test"}, "Edit Group"); err != nil {
+	if err := env.srv.Store().CreateGroup(groupID, testutil.UserID("alice_test"), []string{testutil.UserID("alice_test"), testutil.UserID("bob_test")}, "Edit Group"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -988,8 +988,8 @@ func TestEdit_GroupEndToEnd(t *testing.T) {
 		Type:  "send_group",
 		Group: groupID,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": testutil.WrappedKey("wrapped_alice_orig"),
-			"usr_bob_test":   testutil.WrappedKey("wrapped_bob_orig"),
+			testutil.UserID("alice_test"): testutil.WrappedKey("wrapped_alice_orig"),
+			testutil.UserID("bob_test"):   testutil.WrappedKey("wrapped_bob_orig"),
 		},
 		Payload:   "base64_group_original",
 		Signature: "base64_group_sig",
@@ -1015,8 +1015,8 @@ func TestEdit_GroupEndToEnd(t *testing.T) {
 		ID:    original.ID,
 		Group: groupID,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": testutil.WrappedKey("wrapped_alice_edit"),
-			"usr_bob_test":   testutil.WrappedKey("wrapped_bob_edit"),
+			testutil.UserID("alice_test"): testutil.WrappedKey("wrapped_alice_edit"),
+			testutil.UserID("bob_test"):   testutil.WrappedKey("wrapped_bob_edit"),
 		},
 		Payload:   "base64_group_edited",
 		Signature: "base64_group_sig_edit",
@@ -1051,9 +1051,9 @@ func TestEdit_GroupEndToEnd(t *testing.T) {
 	if editedA.EditedAt <= 0 || editedB.EditedAt <= 0 {
 		t.Fatalf("group edited_at must be set: alice=%d bob=%d", editedA.EditedAt, editedB.EditedAt)
 	}
-	if editedA.WrappedKeys["usr_bob_test"] != testutil.WrappedKey("wrapped_bob_edit") || editedB.WrappedKeys["usr_bob_test"] != testutil.WrappedKey("wrapped_bob_edit") {
+	if editedA.WrappedKeys[testutil.UserID("bob_test")] != testutil.WrappedKey("wrapped_bob_edit") || editedB.WrappedKeys[testutil.UserID("bob_test")] != testutil.WrappedKey("wrapped_bob_edit") {
 		t.Fatalf("group wrapped_keys did not round-trip edit payload: alice=%q bob=%q",
-			editedA.WrappedKeys["usr_bob_test"], editedB.WrappedKeys["usr_bob_test"])
+			editedA.WrappedKeys[testutil.UserID("bob_test")], editedB.WrappedKeys[testutil.UserID("bob_test")])
 	}
 	if editedA.TS != original.TS || editedB.TS != original.TS {
 		t.Fatalf("group ts should stay original: original=%d alice=%d bob=%d", original.TS, editedA.TS, editedB.TS)
@@ -1068,7 +1068,7 @@ func TestEdit_DMEndToEnd(t *testing.T) {
 
 	if err := alice.enc.Encode(protocol.CreateDM{
 		Type:  "create_dm",
-		Other: "usr_bob_test",
+		Other: testutil.UserID("bob_test"),
 	}); err != nil {
 		t.Fatalf("create_dm: %v", err)
 	}
@@ -1093,8 +1093,8 @@ func TestEdit_DMEndToEnd(t *testing.T) {
 		Type: "send_dm",
 		DM:   created.DM,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": testutil.WrappedKey("wrapped_dm_alice_orig"),
-			"usr_bob_test":   testutil.WrappedKey("wrapped_dm_bob_orig"),
+			testutil.UserID("alice_test"): testutil.WrappedKey("wrapped_dm_alice_orig"),
+			testutil.UserID("bob_test"):   testutil.WrappedKey("wrapped_dm_bob_orig"),
 		},
 		Payload:   "base64_dm_original",
 		Signature: "base64_dm_sig",
@@ -1120,8 +1120,8 @@ func TestEdit_DMEndToEnd(t *testing.T) {
 		ID:   original.ID,
 		DM:   created.DM,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": testutil.WrappedKey("wrapped_dm_alice_edit"),
-			"usr_bob_test":   testutil.WrappedKey("wrapped_dm_bob_edit"),
+			testutil.UserID("alice_test"): testutil.WrappedKey("wrapped_dm_alice_edit"),
+			testutil.UserID("bob_test"):   testutil.WrappedKey("wrapped_dm_bob_edit"),
 		},
 		Payload:   "base64_dm_edited",
 		Signature: "base64_dm_sig_edit",
@@ -1166,10 +1166,10 @@ func TestEdit_RateLimitEnforced(t *testing.T) {
 	roomID := env.roomID("general")
 	groupID := store.GenerateID("group_")
 
-	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test", "usr_bob_test"}, "Edit RL"); err != nil {
+	if err := env.srv.Store().CreateGroup(groupID, testutil.UserID("alice_test"), []string{testutil.UserID("alice_test"), testutil.UserID("bob_test")}, "Edit RL"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	dm, err := env.srv.Store().CreateOrGetDirectMessage(store.GenerateID("dm_"), "usr_alice_test", "usr_bob_test")
+	dm, err := env.srv.Store().CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice_test"), testutil.UserID("bob_test"))
 	if err != nil {
 		t.Fatalf("create dm: %v", err)
 	}
@@ -1201,8 +1201,8 @@ func TestEdit_RateLimitEnforced(t *testing.T) {
 		Type:  "send_group",
 		Group: groupID,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": testutil.WrappedKey("wrapped_rl_group_alice_seed"),
-			"usr_bob_test":   testutil.WrappedKey("wrapped_rl_group_bob_seed"),
+			testutil.UserID("alice_test"): testutil.WrappedKey("wrapped_rl_group_alice_seed"),
+			testutil.UserID("bob_test"):   testutil.WrappedKey("wrapped_rl_group_bob_seed"),
 		},
 		Payload:   "base64_rl_group_seed",
 		Signature: "sig_rl_group_seed",
@@ -1222,8 +1222,8 @@ func TestEdit_RateLimitEnforced(t *testing.T) {
 		Type: "send_dm",
 		DM:   dmID,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": testutil.WrappedKey("wrapped_rl_dm_alice_seed"),
-			"usr_bob_test":   testutil.WrappedKey("wrapped_rl_dm_bob_seed"),
+			testutil.UserID("alice_test"): testutil.WrappedKey("wrapped_rl_dm_alice_seed"),
+			testutil.UserID("bob_test"):   testutil.WrappedKey("wrapped_rl_dm_bob_seed"),
 		},
 		Payload:   "base64_rl_dm_seed",
 		Signature: "sig_rl_dm_seed",
@@ -1275,8 +1275,8 @@ func TestEdit_RateLimitEnforced(t *testing.T) {
 				ID:    groupSeed.ID,
 				Group: groupID,
 				WrappedKeys: map[string]string{
-					"usr_alice_test": testutil.WrappedKey("wrapped_rl_group_alice_edit"),
-					"usr_bob_test":   testutil.WrappedKey("wrapped_rl_group_bob_edit"),
+					testutil.UserID("alice_test"): testutil.WrappedKey("wrapped_rl_group_alice_edit"),
+					testutil.UserID("bob_test"):   testutil.WrappedKey("wrapped_rl_group_bob_edit"),
 				},
 				Payload:   fmt.Sprintf("base64_rl_group_edit_%02d", i),
 				Signature: "sig_rl_group_edit",
@@ -1289,8 +1289,8 @@ func TestEdit_RateLimitEnforced(t *testing.T) {
 				ID:   dmSeed.ID,
 				DM:   dmID,
 				WrappedKeys: map[string]string{
-					"usr_alice_test": testutil.WrappedKey("wrapped_rl_dm_alice_edit"),
-					"usr_bob_test":   testutil.WrappedKey("wrapped_rl_dm_bob_edit"),
+					testutil.UserID("alice_test"): testutil.WrappedKey("wrapped_rl_dm_alice_edit"),
+					testutil.UserID("bob_test"):   testutil.WrappedKey("wrapped_rl_dm_bob_edit"),
 				},
 				Payload:   fmt.Sprintf("base64_rl_dm_edit_%02d", i),
 				Signature: "sig_rl_dm_edit",
@@ -1385,7 +1385,7 @@ func TestDMDelete_MultiDeviceSync(t *testing.T) {
 	bob := env.connect(fixtureKeyPath(t, "bob"), "dev_bob_delete")
 
 	// alice on device A creates the DM
-	aliceA.enc.Encode(protocol.CreateDM{Type: "create_dm", Other: "usr_bob_test"})
+	aliceA.enc.Encode(protocol.CreateDM{Type: "create_dm", Other: testutil.UserID("bob_test")})
 
 	// Each connected session receives dm_created: A (as sender), B (sibling),
 	// and bob. Drain all three.
@@ -1409,7 +1409,7 @@ func TestDMDelete_MultiDeviceSync(t *testing.T) {
 	aliceA.enc.Encode(protocol.SendDM{
 		Type:        "send_dm",
 		DM:          dmID,
-		WrappedKeys: map[string]string{"usr_alice_test": testutil.WrappedKey("wa"), "usr_bob_test": testutil.WrappedKey("wb")},
+		WrappedKeys: map[string]string{testutil.UserID("alice_test"): testutil.WrappedKey("wa"), testutil.UserID("bob_test"): testutil.WrappedKey("wb")},
 		Payload:     "base64_hi",
 		Signature:   "base64_sig",
 	})
@@ -1458,7 +1458,7 @@ func TestDMDelete_MultiDeviceSync(t *testing.T) {
 	bob.enc.Encode(protocol.SendDM{
 		Type:        "send_dm",
 		DM:          dmID,
-		WrappedKeys: map[string]string{"usr_alice_test": testutil.WrappedKey("wa2"), "usr_bob_test": testutil.WrappedKey("wb2")},
+		WrappedKeys: map[string]string{testutil.UserID("alice_test"): testutil.WrappedKey("wa2"), testutil.UserID("bob_test"): testutil.WrappedKey("wb2")},
 		Payload:     "base64_followup",
 		Signature:   "base64_sig2",
 	})
@@ -1499,7 +1499,7 @@ func TestDMDelete_OfflineCatchupViaDMList(t *testing.T) {
 	device1 := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_catchup1")
 	bob := env.connect(fixtureKeyPath(t, "bob"), "dev_bob_catchup")
 
-	device1.enc.Encode(protocol.CreateDM{Type: "create_dm", Other: "usr_bob_test"})
+	device1.enc.Encode(protocol.CreateDM{Type: "create_dm", Other: testutil.UserID("bob_test")})
 	msgType, raw := device1.readMessage()
 	if msgType != "dm_created" {
 		t.Fatalf("expected dm_created, got %s", msgType)
@@ -1616,7 +1616,7 @@ func TestRetirement_DMCutoffPropagation(t *testing.T) {
 	bob := env.connect(fixtureKeyPath(t, "bob"), "dev_bob_retire")
 
 	// Create a DM and drain the echoes
-	alice.enc.Encode(protocol.CreateDM{Type: "create_dm", Other: "usr_bob_test"})
+	alice.enc.Encode(protocol.CreateDM{Type: "create_dm", Other: testutil.UserID("bob_test")})
 	msgType, raw := alice.readMessage()
 	if msgType != "dm_created" {
 		t.Fatalf("expected dm_created, got %s", msgType)
@@ -1648,7 +1648,7 @@ func TestRetirement_DMCutoffPropagation(t *testing.T) {
 		if mt == "user_retired" {
 			var ur protocol.UserRetired
 			json.Unmarshal(raw, &ur)
-			if ur.User == "usr_bob_test" {
+			if ur.User == testutil.UserID("bob_test") {
 				sawRetired = true
 				break
 			}
@@ -1751,11 +1751,11 @@ func TestDeleteGroup_HappyPath(t *testing.T) {
 	// so alice isn't the sole admin when she /delete's — otherwise the
 	// inline last-admin gate would reject her delete (the solo-member
 	// carve-out only applies when alice is the ONLY member).
-	groupID := "group_happy"
-	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test", "usr_bob_test"}, "Happy"); err != nil {
+	groupID := testutil.GroupID("happy")
+	if err := env.srv.Store().CreateGroup(groupID, testutil.UserID("alice_test"), []string{testutil.UserID("alice_test"), testutil.UserID("bob_test")}, "Happy"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	if err := env.srv.Store().SetGroupMemberAdmin(groupID, "usr_bob_test", true); err != nil {
+	if err := env.srv.Store().SetGroupMemberAdmin(groupID, testutil.UserID("bob_test"), true); err != nil {
 		t.Fatalf("promote bob: %v", err)
 	}
 
@@ -1780,20 +1780,20 @@ func TestDeleteGroup_HappyPath(t *testing.T) {
 	}
 	var ev protocol.GroupEvent
 	json.Unmarshal(raw, &ev)
-	if ev.Event != "leave" || ev.User != "usr_alice_test" {
+	if ev.Event != "leave" || ev.User != testutil.UserID("alice_test") {
 		t.Errorf("unexpected group_event: %+v", ev)
 	}
 
 	// alice removed from group_members
 	members, _ := env.srv.Store().GetGroupMembers(groupID)
 	for _, m := range members {
-		if m == "usr_alice_test" {
+		if m == testutil.UserID("alice_test") {
 			t.Error("alice should be removed from group_members")
 		}
 	}
 
 	// deletion record exists for alice
-	deleted := env.deletedGroupsForUser("usr_alice_test")
+	deleted := env.deletedGroupsForUser(testutil.UserID("alice_test"))
 	found := false
 	for _, id := range deleted {
 		if id == groupID {
@@ -1823,7 +1823,7 @@ func TestDeleteGroup_LastMemberCleanupAndOfflineCatchup(t *testing.T) {
 
 	// alice solo in a group
 	groupID := store.GenerateID("group_")
-	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test"}, "Solo"); err != nil {
+	if err := env.srv.Store().CreateGroup(groupID, testutil.UserID("alice_test"), []string{testutil.UserID("alice_test")}, "Solo"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -1842,7 +1842,7 @@ func TestDeleteGroup_LastMemberCleanupAndOfflineCatchup(t *testing.T) {
 
 	// CRITICAL: alice's deletion record must SURVIVE the cleanup so
 	// offline devices can catch up.
-	deleted := env.deletedGroupsForUser("usr_alice_test")
+	deleted := env.deletedGroupsForUser(testutil.UserID("alice_test"))
 	found := false
 	for _, id := range deleted {
 		if id == groupID {
@@ -1933,11 +1933,11 @@ func TestDeleteGroup_MultiDeviceLiveEcho(t *testing.T) {
 	// Phase 14: promote bob to co-admin so alice isn't blocked by the
 	// last-admin gate when she /delete's (same rationale as
 	// TestDeleteGroup_HappyPath).
-	groupID := "group_multi"
-	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test", "usr_bob_test"}, "Multi"); err != nil {
+	groupID := testutil.GroupID("multi")
+	if err := env.srv.Store().CreateGroup(groupID, testutil.UserID("alice_test"), []string{testutil.UserID("alice_test"), testutil.UserID("bob_test")}, "Multi"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	if err := env.srv.Store().SetGroupMemberAdmin(groupID, "usr_bob_test", true); err != nil {
+	if err := env.srv.Store().SetGroupMemberAdmin(groupID, testutil.UserID("bob_test"), true); err != nil {
 		t.Fatalf("promote bob: %v", err)
 	}
 
@@ -1976,8 +1976,8 @@ func TestDeleteGroup_AlreadyLeft(t *testing.T) {
 	alice := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_already")
 
 	// Group exists but alice is NOT a member
-	groupID := "group_not_a_member"
-	if err := env.srv.Store().CreateGroup(groupID, "usr_bob_test", []string{"usr_bob_test", "usr_carol_test"}, "Without Alice"); err != nil {
+	groupID := testutil.GroupID("not_a_member")
+	if err := env.srv.Store().CreateGroup(groupID, testutil.UserID("bob_test"), []string{testutil.UserID("bob_test"), testutil.UserID("carol_test")}, "Without Alice"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -1996,7 +1996,7 @@ func TestDeleteGroup_AlreadyLeft(t *testing.T) {
 	}
 
 	// Deletion record exists for alice
-	deleted := env.deletedGroupsForUser("usr_alice_test")
+	deleted := env.deletedGroupsForUser(testutil.UserID("alice_test"))
 	found := false
 	for _, id := range deleted {
 		if id == groupID {
@@ -2022,8 +2022,8 @@ func TestGroupAdmin_PromoteE2E(t *testing.T) {
 	env := newTestEnv(t)
 	alice := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_promote_e2e")
 
-	groupID := "group_promote_e2e"
-	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test", "usr_bob_test"}, "PromoteE2E"); err != nil {
+	groupID := testutil.GroupID("promote_e2e")
+	if err := env.srv.Store().CreateGroup(groupID, testutil.UserID("alice_test"), []string{testutil.UserID("alice_test"), testutil.UserID("bob_test")}, "PromoteE2E"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -2032,17 +2032,17 @@ func TestGroupAdmin_PromoteE2E(t *testing.T) {
 	alice.enc.Encode(protocol.PromoteGroupAdmin{
 		Type:  "promote_group_admin",
 		Group: groupID,
-		User:  "usr_bob_test",
+		User:  testutil.UserID("bob_test"),
 	})
 	raw, _ := alice.drainUntil("promote_admin_result")
 	var result protocol.PromoteAdminResult
 	json.Unmarshal(raw, &result)
-	if result.Group != groupID || result.User != "usr_bob_test" {
+	if result.Group != groupID || result.User != testutil.UserID("bob_test") {
 		t.Errorf("result echo wrong: %+v", result)
 	}
 
 	// Server-side state: bob is now an admin
-	if isAdmin, err := env.srv.Store().IsGroupAdmin(groupID, "usr_bob_test"); err != nil || !isAdmin {
+	if isAdmin, err := env.srv.Store().IsGroupAdmin(groupID, testutil.UserID("bob_test")); err != nil || !isAdmin {
 		t.Errorf("bob should be admin after promote (isAdmin=%v err=%v)", isAdmin, err)
 	}
 }
@@ -2056,8 +2056,8 @@ func TestGroupAdmin_LastAdminRejectionOnLeave_E2E(t *testing.T) {
 	alice := env.connect(fixtureKeyPath(t, "alice"), "dev_alice_lastadmin")
 
 	// alice is the sole admin of a 2-member group (she + bob regular member)
-	groupID := "group_lastadmin"
-	if err := env.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test", "usr_bob_test"}, "Last Admin"); err != nil {
+	groupID := testutil.GroupID("lastadmin")
+	if err := env.srv.Store().CreateGroup(groupID, testutil.UserID("alice_test"), []string{testutil.UserID("alice_test"), testutil.UserID("bob_test")}, "Last Admin"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -2074,7 +2074,7 @@ func TestGroupAdmin_LastAdminRejectionOnLeave_E2E(t *testing.T) {
 	}
 
 	// alice is still a member — the rejection didn't touch state
-	isMember, _ := env.srv.Store().IsGroupMember(groupID, "usr_alice_test")
+	isMember, _ := env.srv.Store().IsGroupMember(groupID, testutil.UserID("alice_test"))
 	if !isMember {
 		t.Error("alice should still be a member after rejected leave")
 	}

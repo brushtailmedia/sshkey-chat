@@ -9,6 +9,7 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // Phase 22 C.5: broadcast fanout hot-path benchmark.
@@ -23,7 +24,7 @@ func BenchmarkFanOut_100Recipients(b *testing.B) {
 	recipients := make([]*Client, 100)
 	for i := range recipients {
 		recipients[i] = &Client{
-			UserID:   "usr_bench",
+			UserID:   testutil.UserID("bench"),
 			DeviceID: "dev_bench",
 			Encoder:  newSafeEncoder(protocol.NewEncoder(io.Discard)),
 			// Nil sendCh forces sync test path in fanOutOne.
@@ -32,9 +33,9 @@ func BenchmarkFanOut_100Recipients(b *testing.B) {
 
 	msg := protocol.Message{
 		Type:    "message",
-		ID:      "msg_bench",
-		Room:    "room_bench",
-		From:    "usr_sender",
+		ID:      testutil.MsgID("bench"),
+		Room:    testutil.RoomID("bench"),
+		From:    testutil.UserID("sender"),
 		Payload: "payload",
 		TS:      1,
 	}
@@ -51,8 +52,8 @@ func BenchmarkSyncBatchAssembly_200Messages(b *testing.B) {
 	msgs := make([]store.StoredMessage, 200)
 	for i := range msgs {
 		msgs[i] = store.StoredMessage{
-			ID:        "msg_bench",
-			Sender:    "usr_sender",
+			ID:        testutil.MsgID("bench"),
+			Sender:    testutil.UserID("sender"),
 			TS:        int64(i + 1),
 			Epoch:     1,
 			Payload:   "ciphertext",
@@ -64,7 +65,7 @@ func BenchmarkSyncBatchAssembly_200Messages(b *testing.B) {
 		events[i] = store.GroupEventRow{
 			ID:    int64(i + 1),
 			Event: "rename",
-			User:  "usr_sender",
+			User:  testutil.UserID("sender"),
 			Name:  "bench",
 			TS:    int64(i + 1),
 		}
@@ -73,7 +74,7 @@ func BenchmarkSyncBatchAssembly_200Messages(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = storedToRawMessages(msgs, "room_bench", "")
-		_ = roomEventsToRaw(events, "room_bench")
+		_ = storedToRawMessages(msgs, testutil.RoomID("bench"), "")
+		_ = roomEventsToRaw(events, testutil.RoomID("bench"))
 	}
 }

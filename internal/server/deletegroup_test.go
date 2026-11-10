@@ -19,32 +19,32 @@ import (
 // delete proceed, and this test has two members).
 func TestHandleDeleteGroup_MemberRemoved(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_test", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("test"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	if err := s.store.SetGroupMemberAdmin("group_test", "bob", true); err != nil {
+	if err := s.store.SetGroupMemberAdmin(testutil.GroupID("test"), testutil.UserID("bob"), true); err != nil {
 		t.Fatalf("promote bob: %v", err)
 	}
 
-	cc := testClientFor("alice", "dev_alice_1")
+	cc := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = cc.Client
 	s.mu.Unlock()
 
-	raw, _ := json.Marshal(protocol.DeleteGroup{Type: "delete_group", Group: "group_test"})
+	raw, _ := json.Marshal(protocol.DeleteGroup{Type: "delete_group", Group: testutil.GroupID("test")})
 	s.handleDeleteGroup(cc.Client, raw)
 
 	// alice should be removed from group_members
-	members, _ := s.store.GetGroupMembers("group_test")
+	members, _ := s.store.GetGroupMembers(testutil.GroupID("test"))
 	for _, m := range members {
-		if m == "alice" {
+		if m == testutil.UserID("alice") {
 			t.Error("alice should have been removed from group_members")
 		}
 	}
 
 	// deletion record should exist for alice
-	deleted, _ := s.store.GetDeletedGroupsForUser("alice")
-	if len(deleted) != 1 || deleted[0] != "group_test" {
+	deleted, _ := s.store.GetDeletedGroupsForUser(testutil.UserID("alice"))
+	if len(deleted) != 1 || deleted[0] != testutil.GroupID("test") {
 		t.Errorf("expected deletion record for group_test, got %v", deleted)
 	}
 
@@ -57,7 +57,7 @@ func TestHandleDeleteGroup_MemberRemoved(t *testing.T) {
 	if err := json.Unmarshal(msgs[0], &del); err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if del.Type != "group_deleted" || del.Group != "group_test" {
+	if del.Type != "group_deleted" || del.Group != testutil.GroupID("test") {
 		t.Errorf("unexpected echo: %+v", del)
 	}
 }
@@ -68,28 +68,28 @@ func TestHandleDeleteGroup_MemberRemoved(t *testing.T) {
 // no error is returned.
 func TestHandleDeleteGroup_AlreadyLeft(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_test", "bob", []string{"bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("test"), testutil.UserID("bob"), []string{testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 	// alice is NOT in the group (was never added)
 
-	cc := testClientFor("alice", "dev_alice_1")
+	cc := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = cc.Client
 	s.mu.Unlock()
 
-	raw, _ := json.Marshal(protocol.DeleteGroup{Type: "delete_group", Group: "group_test"})
+	raw, _ := json.Marshal(protocol.DeleteGroup{Type: "delete_group", Group: testutil.GroupID("test")})
 	s.handleDeleteGroup(cc.Client, raw)
 
 	// alice should NOT have been added to group_members or anything weird
-	members, _ := s.store.GetGroupMembers("group_test")
-	if len(members) != 1 || members[0] != "bob" {
+	members, _ := s.store.GetGroupMembers(testutil.GroupID("test"))
+	if len(members) != 1 || members[0] != testutil.UserID("bob") {
 		t.Errorf("group_members should be unchanged [bob], got %v", members)
 	}
 
 	// deletion record SHOULD exist for alice
-	deleted, _ := s.store.GetDeletedGroupsForUser("alice")
-	if len(deleted) != 1 || deleted[0] != "group_test" {
+	deleted, _ := s.store.GetDeletedGroupsForUser(testutil.UserID("alice"))
+	if len(deleted) != 1 || deleted[0] != testutil.GroupID("test") {
 		t.Errorf("expected deletion record for group_test, got %v", deleted)
 	}
 
@@ -105,22 +105,22 @@ func TestHandleDeleteGroup_AlreadyLeft(t *testing.T) {
 // cleanup of the group_conversations row + the group-<id>.db file.
 func TestHandleDeleteGroup_LastMemberCleanup(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_solo", "alice", []string{"alice"}, "Solo"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("solo"), testutil.UserID("alice"), []string{testutil.UserID("alice")}, "Solo"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	cc := testClientFor("alice", "dev_alice_1")
+	cc := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = cc.Client
 	s.mu.Unlock()
 
-	raw, _ := json.Marshal(protocol.DeleteGroup{Type: "delete_group", Group: "group_solo"})
+	raw, _ := json.Marshal(protocol.DeleteGroup{Type: "delete_group", Group: testutil.GroupID("solo")})
 	s.handleDeleteGroup(cc.Client, raw)
 
 	// Group row should be gone
-	groups, _ := s.store.GetUserGroups("alice")
+	groups, _ := s.store.GetUserGroups(testutil.UserID("alice"))
 	for _, g := range groups {
-		if g.ID == "group_solo" {
+		if g.ID == testutil.GroupID("solo") {
 			t.Error("group_solo should have been cleaned up after last member /delete")
 		}
 	}
@@ -128,8 +128,8 @@ func TestHandleDeleteGroup_LastMemberCleanup(t *testing.T) {
 	// CRITICAL: alice's deletion record must STILL exist after the cleanup.
 	// This is the regression for the design decision: deleted_groups
 	// rows survive group cleanup so offline devices can catch up.
-	deleted, _ := s.store.GetDeletedGroupsForUser("alice")
-	if len(deleted) != 1 || deleted[0] != "group_solo" {
+	deleted, _ := s.store.GetDeletedGroupsForUser(testutil.UserID("alice"))
+	if len(deleted) != 1 || deleted[0] != testutil.GroupID("solo") {
 		t.Errorf("deletion record must survive last-member cleanup, got %v", deleted)
 	}
 }
@@ -141,17 +141,17 @@ func TestHandleDeleteGroup_LastMemberCleanup(t *testing.T) {
 // deletion record so it can purge its local copy of the group.
 func TestHandleDeleteGroup_LastMemberOfflineCatchup(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_solo", "alice", []string{"alice"}, "Solo"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("solo"), testutil.UserID("alice"), []string{testutil.UserID("alice")}, "Solo"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
 	// Device A: runs /delete
-	deviceA := testClientFor("alice", "dev_alice_A")
+	deviceA := testClientFor(testutil.UserID("alice"), "dev_alice_A")
 	s.mu.Lock()
 	s.clients["dev_alice_A"] = deviceA.Client
 	s.mu.Unlock()
 
-	raw, _ := json.Marshal(protocol.DeleteGroup{Type: "delete_group", Group: "group_solo"})
+	raw, _ := json.Marshal(protocol.DeleteGroup{Type: "delete_group", Group: testutil.GroupID("solo")})
 	s.handleDeleteGroup(deviceA.Client, raw)
 
 	// Device A got the live echo
@@ -160,14 +160,14 @@ func TestHandleDeleteGroup_LastMemberOfflineCatchup(t *testing.T) {
 	}
 
 	// Group is gone server-side (last member)
-	if _, err := s.store.GetGroupMembers("group_solo"); err != nil {
+	if _, err := s.store.GetGroupMembers(testutil.GroupID("solo")); err != nil {
 		// table query should still work, just return empty
 		t.Fatalf("get members: %v", err)
 	}
 
 	// Device B (was offline) connects and runs sendDeletedGroups manually
 	// (simulating the handshake step). It should see group_solo in the list.
-	deviceB := testClientFor("alice", "dev_alice_B")
+	deviceB := testClientFor(testutil.UserID("alice"), "dev_alice_B")
 	s.sendDeletedGroups(deviceB.Client)
 
 	msgs := deviceB.messages()
@@ -181,7 +181,7 @@ func TestHandleDeleteGroup_LastMemberOfflineCatchup(t *testing.T) {
 	if list.Type != "deleted_groups" {
 		t.Errorf("type = %q, want deleted_groups", list.Type)
 	}
-	if len(list.Groups) != 1 || list.Groups[0] != "group_solo" {
+	if len(list.Groups) != 1 || list.Groups[0] != testutil.GroupID("solo") {
 		t.Errorf("expected [group_solo] in catchup list, got %v", list.Groups)
 	}
 }
@@ -194,21 +194,21 @@ func TestHandleDeleteGroup_LastMemberOfflineCatchup(t *testing.T) {
 // by the last-admin gate (same rationale as TestHandleDeleteGroup_MemberRemoved).
 func TestHandleDeleteGroup_MultiDeviceLiveEcho(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_test", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("test"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	if err := s.store.SetGroupMemberAdmin("group_test", "bob", true); err != nil {
+	if err := s.store.SetGroupMemberAdmin(testutil.GroupID("test"), testutil.UserID("bob"), true); err != nil {
 		t.Fatalf("promote bob: %v", err)
 	}
 
-	deviceA := testClientFor("alice", "dev_alice_A")
-	deviceB := testClientFor("alice", "dev_alice_B")
+	deviceA := testClientFor(testutil.UserID("alice"), "dev_alice_A")
+	deviceB := testClientFor(testutil.UserID("alice"), "dev_alice_B")
 	s.mu.Lock()
 	s.clients["dev_alice_A"] = deviceA.Client
 	s.clients["dev_alice_B"] = deviceB.Client
 	s.mu.Unlock()
 
-	raw, _ := json.Marshal(protocol.DeleteGroup{Type: "delete_group", Group: "group_test"})
+	raw, _ := json.Marshal(protocol.DeleteGroup{Type: "delete_group", Group: testutil.GroupID("test")})
 	s.handleDeleteGroup(deviceA.Client, raw)
 
 	// Both sessions should have received group_deleted
@@ -220,7 +220,7 @@ func TestHandleDeleteGroup_MultiDeviceLiveEcho(t *testing.T) {
 		}
 		var del protocol.GroupDeleted
 		json.Unmarshal(msgs[0], &del)
-		if del.Group != "group_test" {
+		if del.Group != testutil.GroupID("test") {
 			t.Errorf("wrong group in echo: %s", del.Group)
 		}
 	}
@@ -229,7 +229,7 @@ func TestHandleDeleteGroup_MultiDeviceLiveEcho(t *testing.T) {
 // TestSendDeletedGroups_None verifies the no-op case.
 func TestSendDeletedGroups_None(t *testing.T) {
 	s := newTestServer(t)
-	cc := testClientFor("alice", "dev_alice_1")
+	cc := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 
 	s.sendDeletedGroups(cc.Client)
 	if msgs := cc.messages(); len(msgs) != 0 {
@@ -242,22 +242,22 @@ func TestSendDeletedGroups_None(t *testing.T) {
 // leak when users use the regular /leave command.
 func TestHandleLeaveGroup_LastMemberCleanup(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_solo", "alice", []string{"alice"}, "Solo"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("solo"), testutil.UserID("alice"), []string{testutil.UserID("alice")}, "Solo"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	cc := testClientFor("alice", "dev_alice_1")
+	cc := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = cc.Client
 	s.mu.Unlock()
 
-	raw, _ := json.Marshal(protocol.LeaveGroup{Type: "leave_group", Group: "group_solo"})
+	raw, _ := json.Marshal(protocol.LeaveGroup{Type: "leave_group", Group: testutil.GroupID("solo")})
 	s.handleLeaveGroup(cc.Client, raw)
 
 	// Group should be cleaned up
-	groups, _ := s.store.GetUserGroups("alice")
+	groups, _ := s.store.GetUserGroups(testutil.UserID("alice"))
 	for _, g := range groups {
-		if g.ID == "group_solo" {
+		if g.ID == testutil.GroupID("solo") {
 			t.Error("group_solo should be cleaned up after last member /leave")
 		}
 	}
@@ -269,18 +269,18 @@ func TestHandleLeaveGroup_LastMemberCleanup(t *testing.T) {
 // group existence or membership.
 func TestHandleLeaveGroup_PrivacyResponsesIdentical(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_real", "alice", []string{"alice"}, "Real"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("real"), testutil.UserID("alice"), []string{testutil.UserID("alice")}, "Real"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
 	// carol probes a group that does not exist
-	probe := testClientFor("carol", "dev_carol_1")
-	rawProbe, _ := json.Marshal(protocol.LeaveGroup{Type: "leave_group", Group: "group_does_not_exist"})
+	probe := testClientFor(testutil.UserID("carol"), "dev_carol_1")
+	rawProbe, _ := json.Marshal(protocol.LeaveGroup{Type: "leave_group", Group: testutil.GroupID("does_not_exist")})
 	s.handleLeaveGroup(probe.Client, rawProbe)
 
 	// carol probes the real group (alice is a member, carol is not)
-	nonMember := testClientFor("carol", "dev_carol_1")
-	rawReal, _ := json.Marshal(protocol.LeaveGroup{Type: "leave_group", Group: "group_real"})
+	nonMember := testClientFor(testutil.UserID("carol"), "dev_carol_1")
+	rawReal, _ := json.Marshal(protocol.LeaveGroup{Type: "leave_group", Group: testutil.GroupID("real")})
 	s.handleLeaveGroup(nonMember.Client, rawReal)
 
 	probeMsgs := probe.messages()
@@ -299,18 +299,18 @@ func TestHandleLeaveGroup_PrivacyResponsesIdentical(t *testing.T) {
 // self-leave path still works after the refactor (regression).
 func TestPerformGroupLeave_EmptyReasonIsSelfLeave(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_self", "alice", []string{"alice", "bob"}, "Self"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("self"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Self"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	aliceClient := testClientFor("alice", "dev_alice_1")
-	bobClient := testClientFor("bob", "dev_bob_1")
+	aliceClient := testClientFor(testutil.UserID("alice"), "dev_alice_1")
+	bobClient := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = aliceClient.Client
 	s.clients["dev_bob_1"] = bobClient.Client
 	s.mu.Unlock()
 
-	s.performGroupLeave("group_self", "alice", "", "", "alice")
+	s.performGroupLeave(testutil.GroupID("self"), testutil.UserID("alice"), "", "", testutil.UserID("alice"))
 
 	// Alice receives group_left with empty reason
 	msgs := aliceClient.messages()
@@ -341,19 +341,19 @@ func TestPerformGroupLeave_EmptyReasonIsSelfLeave(t *testing.T) {
 // (including the renamer themselves).
 func TestHandleRenameGroup_BroadcastsToMembers(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_rename", "alice", []string{"alice", "bob"}, "Old Name"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("rename"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Old Name"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	aliceClient := testClientFor("alice", "dev_alice_1")
-	bobClient := testClientFor("bob", "dev_bob_1")
+	aliceClient := testClientFor(testutil.UserID("alice"), "dev_alice_1")
+	bobClient := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = aliceClient.Client
 	s.clients["dev_bob_1"] = bobClient.Client
 	s.mu.Unlock()
 
 	raw, _ := json.Marshal(protocol.RenameGroup{
-		Type: "rename_group", Group: "group_rename", Name: "New Name",
+		Type: "rename_group", Group: testutil.GroupID("rename"), Name: "New Name",
 	})
 	s.handleRenameGroup(aliceClient.Client, raw)
 
@@ -376,7 +376,7 @@ func TestHandleRenameGroup_BroadcastsToMembers(t *testing.T) {
 		if renamed.Type != "group_renamed" {
 			t.Errorf("type = %q, want group_renamed", renamed.Type)
 		}
-		if renamed.Group != "group_rename" || renamed.Name != "New Name" || renamed.RenamedBy != "alice" {
+		if renamed.Group != testutil.GroupID("rename") || renamed.Name != "New Name" || renamed.RenamedBy != testutil.UserID("alice") {
 			t.Errorf("unexpected legacy broadcast: %+v", renamed)
 		}
 
@@ -391,16 +391,16 @@ func TestHandleRenameGroup_BroadcastsToMembers(t *testing.T) {
 		if ev.Event != "rename" {
 			t.Errorf("event = %q, want rename", ev.Event)
 		}
-		if ev.Group != "group_rename" || ev.Name != "New Name" || ev.By != "alice" {
+		if ev.Group != testutil.GroupID("rename") || ev.Name != "New Name" || ev.By != testutil.UserID("alice") {
 			t.Errorf("unexpected group_event{rename}: %+v", ev)
 		}
 	}
 
 	// Server-side: the group's stored name is updated. We verify by
 	// inspecting via GetUserGroups (which joins on the conversation row).
-	groups, _ := s.store.GetUserGroups("alice")
+	groups, _ := s.store.GetUserGroups(testutil.UserID("alice"))
 	for _, g := range groups {
-		if g.ID == "group_rename" {
+		if g.ID == testutil.GroupID("rename") {
 			if g.Name != "New Name" {
 				t.Errorf("stored name = %q, want New Name", g.Name)
 			}
@@ -416,19 +416,19 @@ func TestHandleRenameGroup_BroadcastsToMembers(t *testing.T) {
 // the same response.
 func TestHandleRenameGroup_PrivacyResponsesIdentical(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_real", "alice", []string{"alice"}, "Real"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("real"), testutil.UserID("alice"), []string{testutil.UserID("alice")}, "Real"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	probe := testClientFor("carol", "dev_carol_1")
+	probe := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	rawProbe, _ := json.Marshal(protocol.RenameGroup{
-		Type: "rename_group", Group: "group_does_not_exist", Name: "Hijack",
+		Type: "rename_group", Group: testutil.GroupID("does_not_exist"), Name: "Hijack",
 	})
 	s.handleRenameGroup(probe.Client, rawProbe)
 
-	nonMember := testClientFor("carol", "dev_carol_1")
+	nonMember := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	rawReal, _ := json.Marshal(protocol.RenameGroup{
-		Type: "rename_group", Group: "group_real", Name: "Hijack",
+		Type: "rename_group", Group: testutil.GroupID("real"), Name: "Hijack",
 	})
 	s.handleRenameGroup(nonMember.Client, rawReal)
 
@@ -444,9 +444,9 @@ func TestHandleRenameGroup_PrivacyResponsesIdentical(t *testing.T) {
 	}
 
 	// And the group_real name should NOT have been changed
-	groups, _ := s.store.GetUserGroups("alice")
+	groups, _ := s.store.GetUserGroups(testutil.UserID("alice"))
 	for _, g := range groups {
-		if g.ID == "group_real" && g.Name != "Real" {
+		if g.ID == testutil.GroupID("real") && g.Name != "Real" {
 			t.Errorf("non-member rename should not change name, got %q", g.Name)
 		}
 	}
@@ -456,22 +456,22 @@ func TestHandleRenameGroup_PrivacyResponsesIdentical(t *testing.T) {
 // byte-identical property for handleSendGroup.
 func TestHandleSendGroup_PrivacyResponsesIdentical(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_real", "alice", []string{"alice"}, "Real"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("real"), testutil.UserID("alice"), []string{testutil.UserID("alice")}, "Real"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	probe := testClientFor("carol", "dev_carol_1")
+	probe := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	rawProbe, _ := json.Marshal(protocol.SendGroup{
-		Type: "send_group", Group: "group_does_not_exist",
-		WrappedKeys: map[string]string{"carol": testutil.WrappedKey("x")},
+		Type: "send_group", Group: testutil.GroupID("does_not_exist"),
+		WrappedKeys: map[string]string{testutil.UserID("carol"): testutil.WrappedKey("x")},
 		Payload:     "p", Signature: "s",
 	})
 	s.handleSendGroup(probe.Client, rawProbe)
 
-	nonMember := testClientFor("carol", "dev_carol_1")
+	nonMember := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	rawReal, _ := json.Marshal(protocol.SendGroup{
-		Type: "send_group", Group: "group_real",
-		WrappedKeys: map[string]string{"carol": testutil.WrappedKey("x")},
+		Type: "send_group", Group: testutil.GroupID("real"),
+		WrappedKeys: map[string]string{testutil.UserID("carol"): testutil.WrappedKey("x")},
 		Payload:     "p", Signature: "s",
 	})
 	s.handleSendGroup(nonMember.Client, rawReal)

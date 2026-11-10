@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // Every handle the store opens has a two-connection pool and a per-handle
@@ -67,8 +69,8 @@ func TestPoolCap_ConcurrentWritersToOneFileLoseNothing(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < each; i++ {
 				msg := StoredMessage{
-					ID:        fmt.Sprintf("msg_w%02d_%04d", w, i),
-					Sender:    "usr_bench_sender",
+					ID:        testutil.MsgID(fmt.Sprintf("w%02d_%04d", w, i)),
+					Sender:    testutil.UserID("bench_sender"),
 					TS:        int64(1_700_000_000 + w*each + i),
 					Epoch:     1,
 					Payload:   "cGF5bG9hZA==",
@@ -119,7 +121,7 @@ func TestPoolCap_ReadOverlapsAnOpenTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
-	if _, err := tx.Exec(benchInsertSQL, "msg_in_tx", "usr_a", int64(1), int64(1), "cA==", "", "c2ln", ""); err != nil {
+	if _, err := tx.Exec(benchInsertSQL, "msg_in_tx", testutil.UserID("a"), int64(1), int64(1), "cA==", "", "c2ln", ""); err != nil {
 		t.Fatalf("insert in tx: %v", err)
 	}
 

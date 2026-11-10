@@ -137,6 +137,10 @@ func looksLikeSQL(s string) bool {
 
 func allowedSQLSprintf(path, format string) bool {
 	p := filepath.ToSlash(path)
+	// Read-only rejection snapshots quote schema-derived identifiers, never client input.
+	if strings.HasSuffix(p, "/internal/server/id_validation_test.go") && format == `SELECT * FROM "%s"` {
+		return true
+	}
 	if strings.HasSuffix(p, "/internal/store/direct_messages.go") &&
 		strings.Contains(format, "UPDATE direct_messages SET %s = ? WHERE id = ? AND %s < ?") {
 		return true

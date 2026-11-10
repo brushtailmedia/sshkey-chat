@@ -6,6 +6,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // Pinned-message envelopes must carry server_order like the live / sync /
@@ -19,7 +20,7 @@ func TestSendPins_MessageDataCarriesServerOrder(t *testing.T) {
 	// Far-future ts so the pin clears alice's first_seen (joined_at) gate in
 	// sendPins; first_epoch is 0 so the epoch gate is a no-op.
 	const ts = int64(4000000000)
-	order, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{ID: "pm1", Sender: "alice", TS: ts, Epoch: 1, Payload: "p"})
+	order, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{ID: testutil.MsgID("pm1"), Sender: testutil.UserID("alice"), TS: ts, Epoch: 1, Payload: "p"})
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -30,11 +31,11 @@ func TestSendPins_MessageDataCarriesServerOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("roomdb: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO pins (message_id, pinned_by, ts) VALUES (?, ?, ?)`, "pm1", "alice", ts); err != nil {
+	if _, err := db.Exec(`INSERT INTO pins (message_id, pinned_by, ts) VALUES (?, ?, ?)`, testutil.MsgID("pm1"), testutil.UserID("alice"), ts); err != nil {
 		t.Fatalf("pin: %v", err)
 	}
 
-	cc := testClientFor("alice", "dev_alice_pins")
+	cc := testClientFor(testutil.UserID("alice"), "dev_alice_pins")
 	s.sendPins(cc.Client)
 
 	found := false
@@ -51,7 +52,7 @@ func TestSendPins_MessageDataCarriesServerOrder(t *testing.T) {
 		}
 		for _, raw := range pins.MessageData {
 			var msg protocol.Message
-			if json.Unmarshal(raw, &msg) == nil && msg.ID == "pm1" {
+			if json.Unmarshal(raw, &msg) == nil && msg.ID == testutil.MsgID("pm1") {
 				found = true
 				if msg.ServerOrder != order {
 					t.Errorf("pinned message_data server_order = %d, want %d (committed order)", msg.ServerOrder, order)

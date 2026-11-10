@@ -13,6 +13,8 @@ package store
 import (
 	"strings"
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // helper: insert a room and return its ID.
@@ -59,7 +61,7 @@ func TestSetRoomTopic_MissingRoom(t *testing.T) {
 	}
 	defer st.Close()
 
-	err = st.SetRoomTopic("nonexistent", "topic")
+	err = st.SetRoomTopic(testutil.RoomID("nonexistent"), "topic")
 	if err == nil {
 		t.Fatal("expected error for missing room")
 	}
@@ -74,7 +76,7 @@ func TestSetRoomTopic_RetiredRoom(t *testing.T) {
 	defer st.Close()
 
 	id := insertTestRoom(t, st, "general", "topic")
-	if err := st.SetRoomRetired(id, "alice", "test"); err != nil {
+	if err := st.SetRoomRetired(id, testutil.UserID("alice"), "test"); err != nil {
 		t.Fatalf("retire: %v", err)
 	}
 
@@ -117,7 +119,7 @@ func TestSetRoomDisplayName_MissingRoom(t *testing.T) {
 	}
 	defer st.Close()
 
-	err = st.SetRoomDisplayName("nonexistent", "newname")
+	err = st.SetRoomDisplayName(testutil.RoomID("nonexistent"), "newname")
 	if err == nil {
 		t.Fatal("expected error for missing room")
 	}
@@ -132,7 +134,7 @@ func TestSetRoomDisplayName_RetiredRoom(t *testing.T) {
 	defer st.Close()
 
 	id := insertTestRoom(t, st, "general", "topic")
-	st.SetRoomRetired(id, "alice", "test")
+	st.SetRoomRetired(id, testutil.UserID("alice"), "test")
 
 	err = st.SetRoomDisplayName(id, "engineering")
 	if err == nil {
@@ -188,7 +190,7 @@ func TestRecordAndConsumePendingRoomUpdate_UpdateTopic(t *testing.T) {
 	}
 	defer st.Close()
 
-	if err := st.RecordPendingRoomUpdate("rm_general", RoomUpdateActionUpdateTopic, "os:1000", "test_value"); err != nil {
+	if err := st.RecordPendingRoomUpdate(testutil.RoomID("rm_general"), RoomUpdateActionUpdateTopic, "os:1000", "test_value"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
@@ -196,7 +198,7 @@ func TestRecordAndConsumePendingRoomUpdate_UpdateTopic(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(got))
 	}
-	if got[0].RoomID != "rm_general" {
+	if got[0].RoomID != testutil.RoomID("rm_general") {
 		t.Errorf("RoomID = %q", got[0].RoomID)
 	}
 	if got[0].Action != RoomUpdateActionUpdateTopic {
@@ -215,7 +217,7 @@ func TestRecordAndConsumePendingRoomUpdate_RenameRoom(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.RecordPendingRoomUpdate("rm_general", RoomUpdateActionRenameRoom, "os:1000", "test_value")
+	st.RecordPendingRoomUpdate(testutil.RoomID("rm_general"), RoomUpdateActionRenameRoom, "os:1000", "test_value")
 	got, _ := st.ConsumePendingRoomUpdates()
 	if len(got) != 1 || got[0].Action != RoomUpdateActionRenameRoom {
 		t.Errorf("expected 1 rename-room row, got %+v", got)
@@ -230,8 +232,8 @@ func TestConsumePendingRoomUpdates_AtomicDelete(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.RecordPendingRoomUpdate("rm_a", RoomUpdateActionUpdateTopic, "os:1000", "test_value")
-	st.RecordPendingRoomUpdate("rm_b", RoomUpdateActionRenameRoom, "os:1000", "test_value")
+	st.RecordPendingRoomUpdate(testutil.RoomID("rm_a"), RoomUpdateActionUpdateTopic, "os:1000", "test_value")
+	st.RecordPendingRoomUpdate(testutil.RoomID("rm_b"), RoomUpdateActionRenameRoom, "os:1000", "test_value")
 
 	first, _ := st.ConsumePendingRoomUpdates()
 	if len(first) != 2 {
@@ -276,7 +278,7 @@ func TestRecordPendingRoomUpdate_RejectsUnknownAction(t *testing.T) {
 	}
 	defer st.Close()
 
-	err = st.RecordPendingRoomUpdate("rm_general", RoomUpdateAction("bogus"), "os:1000", "test_value")
+	err = st.RecordPendingRoomUpdate(testutil.RoomID("rm_general"), RoomUpdateAction("bogus"), "os:1000", "test_value")
 	if err == nil {
 		t.Fatal("expected CHECK constraint to reject unknown action")
 	}

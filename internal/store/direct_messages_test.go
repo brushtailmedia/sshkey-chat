@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestDeleteDirectMessage_RemovesRowAndFile verifies that DeleteDirectMessage
@@ -17,7 +19,7 @@ func TestDeleteDirectMessage_RemovesRowAndFile(t *testing.T) {
 	}
 	defer s.Close()
 
-	dm, err := s.CreateOrGetDirectMessage(GenerateID("dm_"), "alice", "bob")
+	dm, err := s.CreateOrGetDirectMessage(GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
@@ -25,7 +27,7 @@ func TestDeleteDirectMessage_RemovesRowAndFile(t *testing.T) {
 	// Insert a message so the per-DM database file is actually created
 	// on disk (DMDB is lazy — it only opens the file on first use).
 	if _, err := s.InsertDMMessage(dm.ID, StoredMessage{
-		ID: "msg_1", Sender: "alice", TS: 100, Payload: "hi",
+		ID: testutil.MsgID("1"), Sender: testutil.UserID("alice"), TS: 100, Payload: "hi",
 	}); err != nil {
 		t.Fatalf("insert DM message: %v", err)
 	}
@@ -83,7 +85,7 @@ func TestDeleteDirectMessage_Idempotent(t *testing.T) {
 	}
 
 	// Create, delete, then delete again.
-	dm, _ := s.CreateOrGetDirectMessage(GenerateID("dm_"), "alice", "bob")
+	dm, _ := s.CreateOrGetDirectMessage(GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err := s.DeleteDirectMessage(dm.ID); err != nil {
 		t.Fatalf("first delete: %v", err)
 	}

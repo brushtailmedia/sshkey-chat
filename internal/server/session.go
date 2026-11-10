@@ -908,6 +908,10 @@ func (s *Server) handleSend(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	if !s.validateIDOrReject(c, "send", msg.Room, "room_", func() { s.respondError(c, msg.CorrID, protocol.ErrUnknownRoom, "You are not a member of this room", 0) }) {
+		return
+	}
+
 	// Verify user is in this room. Privacy: the response for "room
 	// does not exist", "DB lookup failed", and "you are not a member
 	// of an existing room" MUST be byte-identical so a probing client
@@ -1068,6 +1072,12 @@ func (s *Server) handleSendGroup(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	if !s.validateIDOrReject(c, "send_group", msg.Group, "group_", func() {
+		s.respondError(c, msg.CorrID, protocol.ErrUnknownGroup, "You are not a member of this group", 0)
+	}) {
+		return
+	}
+
 	// Validate group exists and user is a member
 	if s.store != nil {
 		isMember, err := s.store.IsGroupMember(msg.Group, c.UserID)
@@ -1199,6 +1209,10 @@ func (s *Server) handleTyping(c *Client, raw json.RawMessage) {
 		s.rejectAndLog(c, counters.SignalMalformedFrame, "typing", "empty/ambiguous typing context (silent-drop)", nil)
 		return
 	}
+	if !s.validateOptionalContexts(c, "typing", msg.Room, msg.Group, msg.DM, nil) {
+		return
+	}
+
 	if s.store == nil {
 		return
 	}
@@ -1329,6 +1343,10 @@ func (s *Server) handleRead(c *Client, raw json.RawMessage) {
 		s.rejectAndLog(c, counters.SignalMalformedFrame, "read", "empty/ambiguous read context (silent-drop)", nil)
 		return
 	}
+	if !s.validateOptionalContexts(c, "read", msg.Room, msg.Group, msg.DM, nil) {
+		return
+	}
+
 	if s.store == nil {
 		return
 	}
@@ -1348,6 +1366,12 @@ func (s *Server) handleRead(c *Client, raw json.RawMessage) {
 		dm, err := s.store.GetDirectMessage(msg.DM)
 		if err != nil || dm == nil || (c.UserID != dm.UserA && c.UserID != dm.UserB) {
 			s.rejectAndLog(c, counters.SignalNonMemberContext, "read", "read for non-party DM (silent-drop)", nil)
+			return
+		}
+	}
+
+	if msg.LastRead != "" {
+		if !s.validateIDOrReject(c, "read", msg.LastRead, "msg_", nil) {
 			return
 		}
 	}
@@ -1436,6 +1460,21 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	if !s.validateOptionalContexts(c, "react", msg.Room, msg.Group, msg.DM, func(kind string) {
+		switch kind {
+		case "room":
+			s.respondError(c, msg.CorrID, protocol.ErrUnknownRoom, "You are not a member of this room", 0)
+		case "group":
+			// The existing unknown-group path checks a non-empty wrapped-key
+			// map against an empty roster before reaching its silent store drop.
+			if s.store != nil && len(msg.WrappedKeys) > 0 {
+				s.respondError(c, msg.CorrID, protocol.ErrInvalidWrappedKeys, "wrapped_keys must match group member list", 0)
+			}
+		}
+	}) {
+		return
+	}
+
 	// Room branch: verify membership (byte-identical privacy) and
 	// reject writes to retired rooms (Q11: informative message, only
 	// visible after the membership gate so non-members can't probe for
@@ -1478,6 +1517,10 @@ func (s *Server) handleReact(c *Client, raw json.RawMessage) {
 				}
 			}
 		}
+	}
+
+	if !s.validateIDOrReject(c, "react", msg.ID, "msg_", nil) {
+		return
 	}
 
 	reactionID := generateID("react_")
@@ -1658,6 +1701,13 @@ func (s *Server) handleUnreact(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	if !s.validateOptionalContexts(c, "unreact", msg.Room, msg.Group, msg.DM, nil) {
+		return
+	}
+	if !s.validateIDOrReject(c, "unreact", msg.ReactionID, "react_", nil) {
+		return
+	}
+
 	// Search room DBs, group DBs, and DM DBs for this reaction.
 	//
 	// Phase 12 note: GetUserRoomIDs filters WHERE r.retired = 0, so
@@ -1808,6 +1858,10 @@ func (s *Server) handlePin(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	if !s.validateIDOrReject(c, "pin", msg.Room, "room_", func() { s.respondError(c, msg.CorrID, protocol.ErrUnknownRoom, "You are not a member of this room", 0) }) {
+		return
+	}
+
 	// Verify membership (byte-identical privacy) and reject writes to
 	// retired rooms. Ordered so non-members get ErrUnknownRoom and
 	// members of retired rooms get the informative ErrRoomRetired
@@ -1821,6 +1875,10 @@ func (s *Server) handlePin(c *Client, raw json.RawMessage) {
 	}
 	if s.store.IsRoomRetired(msg.Room) {
 		s.respondError(c, msg.CorrID, protocol.ErrRoomRetired, "This room has been archived and is read-only", 0)
+		return
+	}
+
+	if !s.validateIDOrReject(c, "pin", msg.ID, "msg_", func() { s.respondError(c, msg.CorrID, protocol.ErrUnknownRoom, "You are not a member of this room", 0) }) {
 		return
 	}
 
@@ -1858,6 +1916,10 @@ func (s *Server) handleUnpin(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	if !s.validateIDOrReject(c, "unpin", msg.Room, "room_", func() { s.respondError(c, msg.CorrID, protocol.ErrUnknownRoom, "You are not a member of this room", 0) }) {
+		return
+	}
+
 	// Verify membership (byte-identical privacy) and reject writes to
 	// retired rooms. Same pattern as handlePin.
 	if s.store == nil {
@@ -1869,6 +1931,10 @@ func (s *Server) handleUnpin(c *Client, raw json.RawMessage) {
 	}
 	if s.store.IsRoomRetired(msg.Room) {
 		s.respondError(c, msg.CorrID, protocol.ErrRoomRetired, "This room has been archived and is read-only", 0)
+		return
+	}
+
+	if !s.validateIDOrReject(c, "unpin", msg.ID, "msg_", func() { s.respondError(c, msg.CorrID, protocol.ErrUnknownRoom, "You are not a member of this room", 0) }) {
 		return
 	}
 
@@ -1916,13 +1982,6 @@ func (s *Server) handleCreateGroup(c *Client, raw json.RawMessage) {
 	// Add sender to members
 	allMembers := append([]string{c.UserID}, msg.Members...)
 
-	// Reject if any proposed member is retired
-	if retired := s.findRetiredMember(msg.Members); retired != "" {
-		s.respondError(c, "", protocol.ErrUserRetired,
-			fmt.Sprintf("Cannot create group — %s's account has been retired", retired), 0)
-		return
-	}
-
 	// Max group size is operator-configurable via [groups] max_members
 	// (default config.DefaultMaxGroupMembers, 100). Per-message wrapped
 	// keys scale linearly with member count (~155 bytes per member per
@@ -1936,6 +1995,19 @@ func (s *Server) handleCreateGroup(c *Client, raw json.RawMessage) {
 	if len(allMembers) > maxMembers {
 		s.respondError(c, "", "too_many_members",
 			fmt.Sprintf("Group DMs are limited to %d members. Use a room for larger groups.", maxMembers), 0)
+		return
+	}
+
+	for _, userID := range msg.Members {
+		if !s.validateIDOrReject(c, "create_group", userID, "usr_", func() { s.respondOpaque(c, "") }) {
+			return
+		}
+	}
+
+	// Reject if any proposed member is retired
+	if retired := s.findRetiredMember(msg.Members); retired != "" {
+		s.respondError(c, "", protocol.ErrUserRetired,
+			fmt.Sprintf("Cannot create group — %s's account has been retired", retired), 0)
 		return
 	}
 
@@ -2046,6 +2118,19 @@ func (s *Server) handleDelete(c *Client, raw json.RawMessage) {
 	if err != nil {
 		s.rejectAndLog(c, counters.SignalMalformedFrame, "delete", "delete missing or malformed signature",
 			&protocol.Error{Type: "error", Code: "invalid_message", Message: "delete signature missing or malformed", CorrID: msg.CorrID})
+		return
+	}
+
+	if !s.validateIDOrReject(c, "delete", contextID, kind+"_", func() {
+		switch kind {
+		case "room":
+			s.respondError(c, msg.CorrID, protocol.ErrUnknownRoom, "You are not a member of this room", 0)
+		case "group":
+			s.respondError(c, msg.CorrID, protocol.ErrUnknownGroup, "You are not a member of this group", 0)
+		case "dm":
+			s.respondError(c, msg.CorrID, protocol.ErrUnknownDM, "You are not a party to this DM", 0)
+		}
+	}) {
 		return
 	}
 
@@ -2226,6 +2311,10 @@ func (s *Server) handleLeaveGroup(c *Client, raw json.RawMessage) {
 		// Phase 17c Step 3: silent-drop fixed.
 		s.rejectAndLog(c, counters.SignalMalformedFrame, "leave_group", "malformed leave_group frame",
 			&protocol.Error{Type: "error", Code: "invalid_message", Message: "malformed leave_group"})
+		return
+	}
+
+	if !s.validateIDOrReject(c, "leave_group", msg.Group, "group_", func() { s.respondError(c, "", protocol.ErrUnknownGroup, "You are not a member of this group", 0) }) {
 		return
 	}
 
@@ -2429,6 +2518,10 @@ func (s *Server) handleDeleteGroup(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	if !s.validateIDOrReject(c, "delete_group", msg.Group, "group_", func() { s.respondError(c, "", protocol.ErrUnknownGroup, "You are not a member of this group", 0) }) {
+		return
+	}
+
 	// Phase 14: inline last-admin gate. Only applies when caller is
 	// currently a member — non-members can always /delete to clean up
 	// their own view because they cannot be the last admin of a group
@@ -2583,6 +2676,10 @@ func (s *Server) handleLeaveRoom(c *Client, raw json.RawMessage) {
 	}
 
 	if s.store == nil {
+		return
+	}
+
+	if !s.validateIDOrReject(c, "leave_room", msg.Room, "room_", func() { s.respondError(c, "", protocol.ErrUnknownRoom, "You are not a member of this room", 0) }) {
 		return
 	}
 
@@ -2785,6 +2882,10 @@ func (s *Server) handleDeleteRoom(c *Client, raw json.RawMessage) {
 	}
 
 	if s.store == nil {
+		return
+	}
+
+	if !s.validateIDOrReject(c, "delete_room", msg.Room, "room_", func() { s.respondError(c, "", protocol.ErrUnknownRoom, "You are not a member of this room", 0) }) {
 		return
 	}
 
@@ -3011,6 +3112,10 @@ func (s *Server) handleCreateDM(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	if !s.validateIDOrReject(c, "create_dm", msg.Other, "usr_", func() { s.respondError(c, "", "invalid_message", "malformed create_dm", 0) }) {
+		return
+	}
+
 	if msg.Other == c.UserID {
 		s.rejectAndLog(c, counters.SignalMalformedFrame, "create_dm", "create_dm with self",
 			&protocol.Error{Type: "error", Code: "invalid_message", Message: "Cannot create a DM with yourself"})
@@ -3126,6 +3231,10 @@ func (s *Server) handleSendDM(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	if !s.validateIDOrReject(c, "send_dm", msg.DM, "dm_", func() { s.respondError(c, msg.CorrID, protocol.ErrUnknownDM, "You are not a party to this DM", 0) }) {
+		return
+	}
+
 	// Validate DM exists and caller is a party
 	dm, err := s.store.GetDirectMessage(msg.DM)
 	if err != nil || dm == nil || (dm.UserA != c.UserID && dm.UserB != c.UserID) {
@@ -3222,6 +3331,10 @@ func (s *Server) handleLeaveDM(c *Client, raw json.RawMessage) {
 	}
 
 	if s.store == nil {
+		return
+	}
+
+	if !s.validateIDOrReject(c, "leave_dm", msg.DM, "dm_", func() { s.respondError(c, "", protocol.ErrUnknownDM, "You are not a party to this DM", 0) }) {
 		return
 	}
 
@@ -3661,6 +3774,10 @@ func (s *Server) handleRoomMembers(c *Client, raw json.RawMessage) {
 		return
 	}
 	if !s.validateCorrIDOrReject(c, "room_members", req.CorrID) {
+		return
+	}
+
+	if !s.validateIDOrReject(c, "room_members", req.Room, "room_", func() { s.sendUnknownRoom(c) }) {
 		return
 	}
 

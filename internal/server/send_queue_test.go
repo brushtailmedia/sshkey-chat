@@ -31,13 +31,14 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // newQueuedClient builds a Client with a real sendCh + sessionDone so
 // we can exercise the Step 5b code paths in tests.
 func newQueuedClient(deviceID string, bufSize int, out io.Writer) *Client {
 	c := &Client{
-		UserID:      "usr_test",
+		UserID:      testutil.UserID("test"),
 		DeviceID:    deviceID,
 		Encoder:     newSafeEncoder(protocol.NewEncoder(out)),
 		sendCh:      make(chan any, bufSize),
@@ -84,7 +85,7 @@ func TestTryEnqueue_FullQueueIncrementsDrops(t *testing.T) {
 }
 
 func TestTryEnqueue_NilSendCh(t *testing.T) {
-	c := &Client{UserID: "u", DeviceID: "d"} // no sendCh
+	c := &Client{UserID: testutil.UserID("u"), DeviceID: "d"} // no sendCh
 	queued, drops := c.TryEnqueue("msg")
 	if queued {
 		t.Error("nil sendCh TryEnqueue = true, want false")
@@ -379,7 +380,7 @@ func TestFanOutOne_TestModeFallback(t *testing.T) {
 
 	var out bytes.Buffer
 	c := &Client{
-		UserID:   "usr_test",
+		UserID:   testutil.UserID("test"),
 		DeviceID: "dev_fallback",
 		Encoder:  newSafeEncoder(protocol.NewEncoder(&out)),
 		// No sendCh — test-mode fallback

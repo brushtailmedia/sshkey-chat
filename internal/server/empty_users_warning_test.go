@@ -22,6 +22,8 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestServerNew_EmptyUsersDBEmitsWarning(t *testing.T) {
@@ -74,10 +76,10 @@ func TestServerNew_NonEmptyUsersDBSuppressesWarning(t *testing.T) {
 	}
 	// Seed an admin directly into the store. InsertUser takes
 	// (id, key, displayName); admin flag is a separate SetAdmin call.
-	if err := first.store.InsertUser("usr_admin_test", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAbcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQR admin@test", "Admin"); err != nil {
+	if err := first.store.InsertUser(testutil.UserID("admin_test"), "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAbcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQR admin@test", "Admin"); err != nil {
 		t.Fatalf("InsertUser: %v", err)
 	}
-	if err := first.store.SetAdmin("usr_admin_test", true); err != nil {
+	if err := first.store.SetAdmin(testutil.UserID("admin_test"), true); err != nil {
 		t.Fatalf("SetAdmin: %v", err)
 	}
 	first.Close()

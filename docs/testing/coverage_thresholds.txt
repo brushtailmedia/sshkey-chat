@@ -10,5 +10,5 @@
 ./internal/lockfile | 80.0 | single-instance and stale-lock behavior
 ./internal/protocol | 75.0 | protocol codec and error taxonomy helpers
 ./internal/push | 37.0 | push sender baseline
-./internal/server | 66.0 | handler and policy layer
+./internal/server | 70.0 | handler and policy layer
 ./internal/store | 58.0 | persistence and DB invariants

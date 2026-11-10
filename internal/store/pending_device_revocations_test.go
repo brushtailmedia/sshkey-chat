@@ -5,6 +5,8 @@ package store
 
 import (
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestConsumePendingDeviceRevocations_Empty(t *testing.T) {
@@ -32,7 +34,7 @@ func TestRecordAndConsumePendingDeviceRevocation(t *testing.T) {
 	}
 	defer st.Close()
 
-	if err := st.RecordPendingDeviceRevocation("usr_alice", "dev_laptop", "stolen", "os:1000"); err != nil {
+	if err := st.RecordPendingDeviceRevocation(testutil.UserID("alice"), "dev_laptop", "stolen", "os:1000"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
@@ -41,7 +43,7 @@ func TestRecordAndConsumePendingDeviceRevocation(t *testing.T) {
 		t.Fatalf("expected 1 row, got %d", len(got))
 	}
 	row := got[0]
-	if row.UserID != "usr_alice" {
+	if row.UserID != testutil.UserID("alice") {
 		t.Errorf("UserID = %q", row.UserID)
 	}
 	if row.DeviceID != "dev_laptop" {
@@ -67,7 +69,7 @@ func TestRecordPendingDeviceRevocation_DefaultsReason(t *testing.T) {
 	defer st.Close()
 
 	// Empty reason should default to "admin_action".
-	if err := st.RecordPendingDeviceRevocation("usr_alice", "dev_x", "", "os:1000"); err != nil {
+	if err := st.RecordPendingDeviceRevocation(testutil.UserID("alice"), "dev_x", "", "os:1000"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	got, _ := st.ConsumePendingDeviceRevocations()
@@ -87,8 +89,8 @@ func TestConsumePendingDeviceRevocations_AtomicDelete(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.RecordPendingDeviceRevocation("usr_alice", "dev_a", "x", "os:1000")
-	st.RecordPendingDeviceRevocation("usr_alice", "dev_b", "y", "os:1000")
+	st.RecordPendingDeviceRevocation(testutil.UserID("alice"), "dev_a", "x", "os:1000")
+	st.RecordPendingDeviceRevocation(testutil.UserID("alice"), "dev_b", "y", "os:1000")
 
 	first, _ := st.ConsumePendingDeviceRevocations()
 	if len(first) != 2 {
@@ -111,7 +113,7 @@ func TestRecordPendingDeviceRevocation_PreservesOrder(t *testing.T) {
 
 	devices := []string{"dev_alpha", "dev_beta", "dev_gamma"}
 	for _, d := range devices {
-		st.RecordPendingDeviceRevocation("usr_alice", d, "test", "os:1000")
+		st.RecordPendingDeviceRevocation(testutil.UserID("alice"), d, "test", "os:1000")
 	}
 
 	got, _ := st.ConsumePendingDeviceRevocations()

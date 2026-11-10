@@ -20,6 +20,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // oversizedRawOf returns a raw JSON blob of n+1 bytes, regardless of what
@@ -50,7 +51,7 @@ func oversizedGroupRaw(s *Server) json.RawMessage {
 
 func TestHandleSend_OversizedBodyFiresCounter(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_send_oversized")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_send_oversized")
 	s.handleSend(alice.Client, oversizedRaw())
 
 	if got := s.counters.Get(counters.SignalOversizedBody, "dev_alice_send_oversized"); got != 1 {
@@ -70,7 +71,7 @@ func TestHandleSend_OversizedBodyFiresCounter(t *testing.T) {
 
 func TestHandleSendGroup_OversizedBodyFiresCounter(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_sendgroup_oversized")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_sendgroup_oversized")
 	s.handleSendGroup(alice.Client, oversizedGroupRaw(s))
 
 	if got := s.counters.Get(counters.SignalOversizedBody, "dev_alice_sendgroup_oversized"); got != 1 {
@@ -80,7 +81,7 @@ func TestHandleSendGroup_OversizedBodyFiresCounter(t *testing.T) {
 
 func TestHandleSendDM_OversizedBodyFiresCounter(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_senddm_oversized")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_senddm_oversized")
 	s.handleSendDM(alice.Client, oversizedRaw())
 
 	if got := s.counters.Get(counters.SignalOversizedBody, "dev_alice_senddm_oversized"); got != 1 {
@@ -90,7 +91,7 @@ func TestHandleSendDM_OversizedBodyFiresCounter(t *testing.T) {
 
 func TestHandleEdit_OversizedBodyFiresCounter(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_edit_oversized")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_edit_oversized")
 	s.handleEdit(alice.Client, oversizedRaw())
 
 	if got := s.counters.Get(counters.SignalOversizedBody, "dev_alice_edit_oversized"); got != 1 {
@@ -100,7 +101,7 @@ func TestHandleEdit_OversizedBodyFiresCounter(t *testing.T) {
 
 func TestHandleEditGroup_OversizedBodyFiresCounter(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_editgroup_oversized")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_editgroup_oversized")
 	s.handleEditGroup(alice.Client, oversizedGroupRaw(s))
 
 	if got := s.counters.Get(counters.SignalOversizedBody, "dev_alice_editgroup_oversized"); got != 1 {
@@ -110,7 +111,7 @@ func TestHandleEditGroup_OversizedBodyFiresCounter(t *testing.T) {
 
 func TestHandleEditDM_OversizedBodyFiresCounter(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_editdm_oversized")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_editdm_oversized")
 	s.handleEditDM(alice.Client, oversizedRaw())
 
 	if got := s.counters.Get(counters.SignalOversizedBody, "dev_alice_editdm_oversized"); got != 1 {

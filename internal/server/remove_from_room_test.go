@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestProcessPendingRemoveFromRoom_HappyPath verifies the end-to-end
@@ -28,19 +29,19 @@ func TestProcessPendingRemoveFromRoom_HappyPath(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	// Precondition: bob is in general.
-	if !s.store.IsRoomMemberByID(generalID, "bob") {
+	if !s.store.IsRoomMemberByID(generalID, testutil.UserID("bob")) {
 		t.Fatal("precondition: bob should be in general")
 	}
 
 	// CLI side: enqueue the removal.
-	if err := s.store.RecordPendingRemoveFromRoom("bob", generalID, "removed", "os:1000"); err != nil {
+	if err := s.store.RecordPendingRemoveFromRoom(testutil.UserID("bob"), generalID, "removed", "os:1000"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
 	// Connect alice (remaining member) and bob (the leaver) so
 	// both can observe the broadcast.
-	alice := testClientFor("alice", "dev_alice_1")
-	bob := testClientFor("bob", "dev_bob_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.clients["dev_bob_1"] = bob.Client
@@ -49,7 +50,7 @@ func TestProcessPendingRemoveFromRoom_HappyPath(t *testing.T) {
 	s.processPendingRemoveFromRoom()
 
 	// Bob should no longer be a member.
-	if s.store.IsRoomMemberByID(generalID, "bob") {
+	if s.store.IsRoomMemberByID(generalID, testutil.UserID("bob")) {
 		t.Error("bob should be removed from general")
 	}
 
@@ -68,7 +69,7 @@ func TestProcessPendingRemoveFromRoom_HappyPath(t *testing.T) {
 	if event.Reason != "removed" {
 		t.Errorf("alice event reason = %q, want removed", event.Reason)
 	}
-	if event.User != "bob" {
+	if event.User != testutil.UserID("bob") {
 		t.Errorf("alice event user = %q, want bob", event.User)
 	}
 
@@ -105,12 +106,12 @@ func TestProcessPendingRemoveFromRoom_SkipsNonMember(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	// Insert dave but DON'T add him to general.
-	s.store.InsertUser("dave", "ssh-ed25519 AAAA fake", "dave")
+	s.store.InsertUser(testutil.UserID("dave"), "ssh-ed25519 AAAA fake", "dave")
 
 	// Enqueue a removal for dave from general.
-	s.store.RecordPendingRemoveFromRoom("dave", generalID, "removed", "os:1000")
+	s.store.RecordPendingRemoveFromRoom(testutil.UserID("dave"), generalID, "removed", "os:1000")
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
@@ -130,7 +131,7 @@ func TestProcessPendingRemoveFromRoom_AuditCreditsOperator(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	s.store.RecordPendingRemoveFromRoom("bob", generalID, "removed", "os:5678")
+	s.store.RecordPendingRemoveFromRoom(testutil.UserID("bob"), generalID, "removed", testutil.UserID("os:5678"))
 	s.processPendingRemoveFromRoom()
 
 	auditBytes, err := readAuditLog(s)
@@ -140,9 +141,9 @@ func TestProcessPendingRemoveFromRoom_AuditCreditsOperator(t *testing.T) {
 	auditContent := string(auditBytes)
 
 	for _, want := range []string{
-		"os:5678",
+		testutil.UserID("os:5678"),
 		"remove-from-room",
-		"user=bob",
+		"user=" + testutil.UserID("bob"),
 		"room=" + generalID,
 		"reason=removed",
 	} {
@@ -159,20 +160,20 @@ func TestProcessPendingRemoveFromRoom_MultipleRowsInOneTick(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	// Both bob and carol are in general per the test fixtures.
-	s.store.RecordPendingRemoveFromRoom("bob", generalID, "removed", "os:1000")
-	s.store.RecordPendingRemoveFromRoom("carol", generalID, "removed", "os:1000")
+	s.store.RecordPendingRemoveFromRoom(testutil.UserID("bob"), generalID, "removed", "os:1000")
+	s.store.RecordPendingRemoveFromRoom(testutil.UserID("carol"), generalID, "removed", "os:1000")
 
 	s.processPendingRemoveFromRoom()
 
-	if s.store.IsRoomMemberByID(generalID, "bob") {
+	if s.store.IsRoomMemberByID(generalID, testutil.UserID("bob")) {
 		t.Error("bob should be removed")
 	}
-	if s.store.IsRoomMemberByID(generalID, "carol") {
+	if s.store.IsRoomMemberByID(generalID, testutil.UserID("carol")) {
 		t.Error("carol should be removed")
 	}
 
 	// alice (still in general) should remain.
-	if !s.store.IsRoomMemberByID(generalID, "alice") {
+	if !s.store.IsRoomMemberByID(generalID, testutil.UserID("alice")) {
 		t.Error("alice should still be in general")
 	}
 }

@@ -13,6 +13,8 @@ package store
 import (
 	"strings"
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestConsumePendingAdminStateChanges_Empty(t *testing.T) {
@@ -40,7 +42,7 @@ func TestRecordAndConsumePendingAdminStateChange_Promote(t *testing.T) {
 	}
 	defer st.Close()
 
-	if err := st.RecordPendingAdminStateChange("usr_alice", AdminStateChangePromote, "os:1000"); err != nil {
+	if err := st.RecordPendingAdminStateChange(testutil.UserID("alice"), AdminStateChangePromote, "os:1000"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
@@ -48,7 +50,7 @@ func TestRecordAndConsumePendingAdminStateChange_Promote(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(got))
 	}
-	if got[0].UserID != "usr_alice" {
+	if got[0].UserID != testutil.UserID("alice") {
 		t.Errorf("UserID = %q, want usr_alice", got[0].UserID)
 	}
 	if got[0].Action != AdminStateChangePromote {
@@ -67,7 +69,7 @@ func TestRecordAndConsumePendingAdminStateChange_Demote(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.RecordPendingAdminStateChange("usr_bob", AdminStateChangeDemote, "os:1000")
+	st.RecordPendingAdminStateChange(testutil.UserID("bob"), AdminStateChangeDemote, "os:1000")
 	got, _ := st.ConsumePendingAdminStateChanges()
 	if len(got) != 1 || got[0].Action != AdminStateChangeDemote {
 		t.Errorf("expected 1 demote row, got %+v", got)
@@ -82,7 +84,7 @@ func TestRecordAndConsumePendingAdminStateChange_Rename(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.RecordPendingAdminStateChange("usr_carol", AdminStateChangeRename, "os:1000")
+	st.RecordPendingAdminStateChange(testutil.UserID("carol"), AdminStateChangeRename, "os:1000")
 	got, _ := st.ConsumePendingAdminStateChanges()
 	if len(got) != 1 || got[0].Action != AdminStateChangeRename {
 		t.Errorf("expected 1 rename row, got %+v", got)
@@ -97,9 +99,9 @@ func TestConsumePendingAdminStateChanges_AtomicDelete(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.RecordPendingAdminStateChange("usr_alice", AdminStateChangePromote, "os:1000")
-	st.RecordPendingAdminStateChange("usr_bob", AdminStateChangeDemote, "os:1000")
-	st.RecordPendingAdminStateChange("usr_carol", AdminStateChangeRename, "os:1000")
+	st.RecordPendingAdminStateChange(testutil.UserID("alice"), AdminStateChangePromote, "os:1000")
+	st.RecordPendingAdminStateChange(testutil.UserID("bob"), AdminStateChangeDemote, "os:1000")
+	st.RecordPendingAdminStateChange(testutil.UserID("carol"), AdminStateChangeRename, "os:1000")
 
 	first, _ := st.ConsumePendingAdminStateChanges()
 	if len(first) != 3 {
@@ -120,7 +122,7 @@ func TestRecordPendingAdminStateChange_PreservesOrder(t *testing.T) {
 	}
 	defer st.Close()
 
-	users := []string{"usr_alice", "usr_bob", "usr_carol", "usr_dave"}
+	users := []string{testutil.UserID("alice"), testutil.UserID("bob"), testutil.UserID("carol"), "usr_dave"}
 	actions := []AdminStateChangeAction{
 		AdminStateChangePromote,
 		AdminStateChangeDemote,
@@ -157,7 +159,7 @@ func TestRecordPendingAdminStateChange_RejectsUnknownAction(t *testing.T) {
 	}
 	defer st.Close()
 
-	err = st.RecordPendingAdminStateChange("usr_alice", AdminStateChangeAction("bogus"), "os:1000")
+	err = st.RecordPendingAdminStateChange(testutil.UserID("alice"), AdminStateChangeAction("bogus"), "os:1000")
 	if err == nil {
 		t.Fatal("expected CHECK constraint to reject unknown action")
 	}

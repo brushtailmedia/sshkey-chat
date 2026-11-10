@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // Audit S6: handleBinaryChannel must bind the byte-commit to the authenticated
@@ -17,13 +18,13 @@ func TestHandleBinaryChannel_CrossUserCommitRejected(t *testing.T) {
 	s := newTestServer(t)
 
 	// alice has a legitimate in-flight upload.
-	uploadID := "up_victim_alice_42xyz0"
+	uploadID := testutil.UploadID("victim_alice_42xyz0")
 	s.files.mu.Lock()
 	s.files.uploads[uploadID] = &pendingUpload{
 		uploadID: uploadID,
-		fileID:   "file_victim_alice_000",
+		fileID:   testutil.FileID("victim_alice_000"),
 		size:     1024,
-		user:     "alice",
+		user:     testutil.UserID("alice"),
 		room:     s.store.RoomDisplayNameToID("general"),
 	}
 	s.files.mu.Unlock()
@@ -31,7 +32,7 @@ func TestHandleBinaryChannel_CrossUserCommitRejected(t *testing.T) {
 	// mallory writes bytes to alice's uploadID on mallory's own channel.
 	frame := buildUploadFrame(uploadID, 11, []byte("hello world"))
 	ch := newBufferedChannel(frame)
-	s.handleBinaryChannel("mallory", ch)
+	s.handleBinaryChannel(testutil.UserID("mallory"), ch)
 
 	// Offending channel torn down.
 	if ch.closed.Load() == 0 {
@@ -50,7 +51,7 @@ func TestHandleBinaryChannel_CrossUserCommitRejected(t *testing.T) {
 	if !exists {
 		t.Fatal("victim's pending upload was dropped by a cross-user write (DoS) — it must stay intact")
 	}
-	if pending.user != "alice" {
+	if pending.user != testutil.UserID("alice") {
 		t.Errorf("victim pending.user = %q, want alice (unchanged)", pending.user)
 	}
 }

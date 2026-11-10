@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestSendDeletedRooms_FiltersCurrentMemberRooms(t *testing.T) {
@@ -21,23 +22,23 @@ func TestSendDeletedRooms_FiltersCurrentMemberRooms(t *testing.T) {
 		t.Fatal("seed should have general room")
 	}
 
-	bob := testClientFor("bob", "dev_bob_deldrooms")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_deldrooms")
 
 	// bob is a current member of general. Record a STALE deleted_rooms row
 	// for it (simulates "deleted then re-added" where the row outlived the
 	// re-add) — it must NOT be emitted, or his devices would purge a room
 	// he's currently in.
-	if _, err := s.store.AddRoomMemberIfMissing(generalID, "bob", 0); err != nil {
+	if _, err := s.store.AddRoomMemberIfMissing(generalID, testutil.UserID("bob"), 0); err != nil {
 		t.Fatalf("ensure membership: %v", err)
 	}
-	if err := s.store.RecordRoomDeletion("bob", generalID); err != nil {
+	if err := s.store.RecordRoomDeletion(testutil.UserID("bob"), generalID); err != nil {
 		t.Fatalf("record general deletion: %v", err)
 	}
 
 	// A genuinely-deleted room bob is NOT a member of — the offline catchup
 	// must still emit this one.
-	const goneRoom = "room_gone0000000000000001"
-	if err := s.store.RecordRoomDeletion("bob", goneRoom); err != nil {
+	var goneRoom = testutil.RoomID("gone0000000000000001")
+	if err := s.store.RecordRoomDeletion(testutil.UserID("bob"), goneRoom); err != nil {
 		t.Fatalf("record gone deletion: %v", err)
 	}
 
@@ -76,11 +77,11 @@ func TestSendDeletedRooms_AllCurrentMemberRoomsIsNoFrame(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	bob := testClientFor("bob", "dev_bob_deldrooms_none")
-	if _, err := s.store.AddRoomMemberIfMissing(generalID, "bob", 0); err != nil {
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_deldrooms_none")
+	if _, err := s.store.AddRoomMemberIfMissing(generalID, testutil.UserID("bob"), 0); err != nil {
 		t.Fatalf("ensure membership: %v", err)
 	}
-	if err := s.store.RecordRoomDeletion("bob", generalID); err != nil {
+	if err := s.store.RecordRoomDeletion(testutil.UserID("bob"), generalID); err != nil {
 		t.Fatalf("record deletion: %v", err)
 	}
 

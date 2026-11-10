@@ -1,8 +1,11 @@
 package store
 
 import (
+	"sort"
 	"strings"
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestRoomsDB_SchemaCreated(t *testing.T) {
@@ -197,7 +200,7 @@ func TestGetRoomByID(t *testing.T) {
 	}
 
 	// Not found
-	room, _ = st.GetRoomByID("room_nonexistent")
+	room, _ = st.GetRoomByID(testutil.RoomID("nonexistent"))
 	if room != nil {
 		t.Error("should return nil for nonexistent ID")
 	}
@@ -301,7 +304,7 @@ func TestRoomMembersEmpty(t *testing.T) {
 
 	st.SeedRooms(map[string]RoomSeed{"general": {Topic: "Chat"}})
 	generalID := st.RoomDisplayNameToID("general")
-	if err := st.AddRoomMember(generalID, "usr_alice", 0); err != nil {
+	if err := st.AddRoomMember(generalID, testutil.UserID("alice"), 0); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
 
@@ -321,17 +324,17 @@ func TestAddRoomMember(t *testing.T) {
 	st.SeedRooms(map[string]RoomSeed{"general": {Topic: "Chat"}})
 	roomID := st.RoomDisplayNameToID("general")
 
-	err = st.AddRoomMember(roomID, "usr_alice", 0)
+	err = st.AddRoomMember(roomID, testutil.UserID("alice"), 0)
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
 
-	if !st.IsRoomMemberByID(roomID, "usr_alice") {
+	if !st.IsRoomMemberByID(roomID, testutil.UserID("alice")) {
 		t.Error("alice should be a member")
 	}
 
 	// Idempotent — adding again should not error
-	err = st.AddRoomMember(roomID, "usr_alice", 0)
+	err = st.AddRoomMember(roomID, testutil.UserID("alice"), 0)
 	if err != nil {
 		t.Fatalf("add again: %v", err)
 	}
@@ -357,7 +360,7 @@ func TestGetRoomMemberIDsByRoomID_DeterministicOrder(t *testing.T) {
 	// joined_at afterwards: left to the clock, three inserts straddling a
 	// second boundary (seen once under a parallel race run) would make the
 	// order follow insertion and fail the test for a reason it is not about.
-	for _, uid := range []string{"usr_charlie", "usr_alice", "usr_bob"} {
+	for _, uid := range []string{testutil.UserID("charlie"), testutil.UserID("alice"), testutil.UserID("bob")} {
 		if err := st.AddRoomMember(roomID, uid, 0); err != nil {
 			t.Fatalf("add %s: %v", uid, err)
 		}
@@ -367,7 +370,8 @@ func TestGetRoomMemberIDsByRoomID_DeterministicOrder(t *testing.T) {
 	}
 
 	first := st.GetRoomMemberIDsByRoomID(roomID)
-	want := []string{"usr_alice", "usr_bob", "usr_charlie"}
+	want := []string{testutil.UserID("alice"), testutil.UserID("bob"), testutil.UserID("charlie")}
+	sort.Strings(want)
 	if len(first) != len(want) {
 		t.Fatalf("got %d members, want %d: %v", len(first), len(want), first)
 	}
@@ -397,23 +401,23 @@ func TestRemoveRoomMember(t *testing.T) {
 	st.SeedRooms(map[string]RoomSeed{"general": {Topic: "Chat"}})
 	roomID := st.RoomDisplayNameToID("general")
 
-	st.AddRoomMember(roomID, "usr_alice", 0)
-	st.AddRoomMember(roomID, "usr_bob", 0)
+	st.AddRoomMember(roomID, testutil.UserID("alice"), 0)
+	st.AddRoomMember(roomID, testutil.UserID("bob"), 0)
 
-	err = st.RemoveRoomMember(roomID, "usr_alice")
+	err = st.RemoveRoomMember(roomID, testutil.UserID("alice"))
 	if err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 
-	if st.IsRoomMemberByID(roomID, "usr_alice") {
+	if st.IsRoomMemberByID(roomID, testutil.UserID("alice")) {
 		t.Error("alice should be removed")
 	}
-	if !st.IsRoomMemberByID(roomID, "usr_bob") {
+	if !st.IsRoomMemberByID(roomID, testutil.UserID("bob")) {
 		t.Error("bob should still be a member")
 	}
 
 	// Remove non-member — should not error
-	err = st.RemoveRoomMember(roomID, "usr_nobody")
+	err = st.RemoveRoomMember(roomID, testutil.UserID("nobody"))
 	if err != nil {
 		t.Fatalf("remove non-member: %v", err)
 	}
@@ -434,19 +438,19 @@ func TestRemoveAllRoomMembers(t *testing.T) {
 	generalID := st.RoomDisplayNameToID("general")
 	supportID := st.RoomDisplayNameToID("support")
 
-	st.AddRoomMember(generalID, "usr_alice", 0)
-	st.AddRoomMember(supportID, "usr_alice", 0)
-	st.AddRoomMember(generalID, "usr_bob", 0)
+	st.AddRoomMember(generalID, testutil.UserID("alice"), 0)
+	st.AddRoomMember(supportID, testutil.UserID("alice"), 0)
+	st.AddRoomMember(generalID, testutil.UserID("bob"), 0)
 
-	st.RemoveAllRoomMembers("usr_alice")
+	st.RemoveAllRoomMembers(testutil.UserID("alice"))
 
-	if st.IsRoomMemberByID(generalID, "usr_alice") {
+	if st.IsRoomMemberByID(generalID, testutil.UserID("alice")) {
 		t.Error("alice should be removed from general")
 	}
-	if st.IsRoomMemberByID(supportID, "usr_alice") {
+	if st.IsRoomMemberByID(supportID, testutil.UserID("alice")) {
 		t.Error("alice should be removed from support")
 	}
-	if !st.IsRoomMemberByID(generalID, "usr_bob") {
+	if !st.IsRoomMemberByID(generalID, testutil.UserID("bob")) {
 		t.Error("bob should still be in general")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestNotifyNewDevice_PushesToOtherSessionsOnly locks in the Tier 1
@@ -15,9 +16,9 @@ import (
 func TestNotifyNewDevice_PushesToOtherSessionsOnly(t *testing.T) {
 	s := newTestServer(t)
 
-	aliceOld := testClientFor("alice", "dev_alice_old")
-	aliceNew := testClientFor("alice", "dev_alice_new")
-	bob := testClientFor("bob", "dev_bob_1")
+	aliceOld := testClientFor(testutil.UserID("alice"), "dev_alice_old")
+	aliceNew := testClientFor(testutil.UserID("alice"), "dev_alice_new")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 
 	s.mu.Lock()
 	s.clients["dev_alice_old"] = aliceOld.Client
@@ -25,7 +26,7 @@ func TestNotifyNewDevice_PushesToOtherSessionsOnly(t *testing.T) {
 	s.clients["dev_bob_1"] = bob.Client
 	s.mu.Unlock()
 
-	s.notifyNewDevice("alice", "dev_alice_new")
+	s.notifyNewDevice(testutil.UserID("alice"), "dev_alice_new")
 
 	// alice's OTHER device is notified about the new one.
 	oldMsgs := aliceOld.messages()
@@ -63,12 +64,12 @@ func TestNotifyNewDevice_PushesToOtherSessionsOnly(t *testing.T) {
 func TestNotifyNewDevice_NoOtherSessions(t *testing.T) {
 	s := newTestServer(t)
 
-	only := testClientFor("alice", "dev_alice_only")
+	only := testClientFor(testutil.UserID("alice"), "dev_alice_only")
 	s.mu.Lock()
 	s.clients["dev_alice_only"] = only.Client
 	s.mu.Unlock()
 
-	s.notifyNewDevice("alice", "dev_alice_only") // the only session IS the new device
+	s.notifyNewDevice(testutil.UserID("alice"), "dev_alice_only") // the only session IS the new device
 
 	if n := len(only.messages()); n != 0 {
 		t.Errorf("no other sessions → no push; got %d messages", n)

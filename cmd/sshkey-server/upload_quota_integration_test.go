@@ -16,6 +16,7 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func uploadStartForPayload(uploadID, roomID string, payload []byte) protocol.UploadStart {
@@ -169,7 +170,7 @@ func TestUploadQuota_BlockEnforcementEndToEnd(t *testing.T) {
 	}
 
 	st := mustOpenStore(t, e.dataDir)
-	bytesToday, _, exists, err := st.GetDailyUploadRow("usr_alice_test", todayKeyUTC())
+	bytesToday, _, exists, err := st.GetDailyUploadRow(testutil.UserID("alice_test"), todayKeyUTC())
 	if err != nil {
 		t.Fatalf("GetDailyUploadRow: %v", err)
 	}
@@ -210,7 +211,7 @@ func TestUploadQuota_TOCTOURejectsSecondUploadAndCleansArtifacts(t *testing.T) {
 		cfg.Server.Server.Quotas.User.RetentionDays = 30
 	})
 
-	if err := e.srv.Store().SetAdmin("usr_bob_test", true); err != nil {
+	if err := e.srv.Store().SetAdmin(testutil.UserID("bob_test"), true); err != nil {
 		t.Fatalf("set bob admin: %v", err)
 	}
 	bob := e.connect(fixtureKeyPath(t, "bob"), "dev_bob_quota_admin")
@@ -282,12 +283,12 @@ func TestUploadQuota_TOCTOURejectsSecondUploadAndCleansArtifacts(t *testing.T) {
 			t.Fatalf("unexpected admin_notify event before quota_block: %q", notify.Event)
 		}
 	}
-	if notify.User != "usr_alice_test" {
+	if notify.User != testutil.UserID("alice_test") {
 		t.Fatalf("admin_notify user = %q, want usr_alice_test", notify.User)
 	}
 
 	st := mustOpenStore(t, e.dataDir)
-	bytesToday, _, exists, err := st.GetDailyUploadRow("usr_alice_test", todayKeyUTC())
+	bytesToday, _, exists, err := st.GetDailyUploadRow(testutil.UserID("alice_test"), todayKeyUTC())
 	if err != nil {
 		t.Fatalf("GetDailyUploadRow: %v", err)
 	}
@@ -327,7 +328,7 @@ func TestUploadQuota_WarnNotifyFiresOncePerDay(t *testing.T) {
 		cfg.Server.Server.Quotas.User.RetentionDays = 30
 	})
 
-	if err := e.srv.Store().SetAdmin("usr_bob_test", true); err != nil {
+	if err := e.srv.Store().SetAdmin(testutil.UserID("bob_test"), true); err != nil {
 		t.Fatalf("set bob admin: %v", err)
 	}
 	bob := e.connect(fixtureKeyPath(t, "bob"), "dev_bob_quota_warn_admin")
@@ -379,7 +380,7 @@ func TestUploadQuota_WarnNotifyFiresOncePerDay(t *testing.T) {
 	}
 
 	st := mustOpenStore(t, e.dataDir)
-	_, warned, _, err := st.GetDailyUploadRow("usr_alice_test", todayKeyUTC())
+	_, warned, _, err := st.GetDailyUploadRow(testutil.UserID("alice_test"), todayKeyUTC())
 	if err != nil {
 		t.Fatalf("GetDailyUploadRow: %v", err)
 	}
@@ -398,16 +399,16 @@ func TestUploadQuota_SustainedPatternFiresQuotaSustained(t *testing.T) {
 		cfg.Server.Server.Quotas.User.RetentionDays = 30
 	})
 	st := mustOpenStore(t, e.dataDir)
-	if _, err := st.IncrementDailyUploadBytes("usr_alice_test", yesterdayKeyUTC(), 120, true); err != nil {
+	if _, err := st.IncrementDailyUploadBytes(testutil.UserID("alice_test"), yesterdayKeyUTC(), 120, true); err != nil {
 		t.Fatalf("seed yesterday row: %v", err)
 	}
-	if _, _, exists, err := st.GetDailyUploadRow("usr_alice_test", todayKeyUTC()); err != nil {
+	if _, _, exists, err := st.GetDailyUploadRow(testutil.UserID("alice_test"), todayKeyUTC()); err != nil {
 		t.Fatalf("read today row: %v", err)
 	} else if exists {
 		t.Fatal("today row should be empty before first upload")
 	}
 
-	if err := e.srv.Store().SetAdmin("usr_bob_test", true); err != nil {
+	if err := e.srv.Store().SetAdmin(testutil.UserID("bob_test"), true); err != nil {
 		t.Fatalf("set bob admin: %v", err)
 	}
 	bob := e.connect(fixtureKeyPath(t, "bob"), "dev_bob_quota_sustained_admin")
@@ -484,7 +485,7 @@ func TestUploadQuota_EnabledTransitionDoesNotCorruptAccounting(t *testing.T) {
 	}
 
 	st := mustOpenStore(t, e.dataDir)
-	bytesToday, _, _, err := st.GetDailyUploadRow("usr_alice_test", todayKeyUTC())
+	bytesToday, _, _, err := st.GetDailyUploadRow(testutil.UserID("alice_test"), todayKeyUTC())
 	if err != nil {
 		t.Fatalf("GetDailyUploadRow: %v", err)
 	}

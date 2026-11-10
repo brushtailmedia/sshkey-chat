@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestHandleEpochRotate_ExtraNonMemberWrappedKeyRejected guards the audit-S8
@@ -17,8 +18,8 @@ import (
 func TestHandleEpochRotate_ExtraNonMemberWrappedKeyRejected(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
-	alice := testClientFor("alice", "dev_alice_s8")
-	if err := s.store.AddRoomMember(generalID, "alice", 0); err != nil {
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_s8")
+	if err := s.store.AddRoomMember(generalID, testutil.UserID("alice"), 0); err != nil {
 		t.Fatalf("AddRoomMember: %v", err)
 	}
 

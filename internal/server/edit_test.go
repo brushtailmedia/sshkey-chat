@@ -32,37 +32,37 @@ func TestHandleEdit_PrivacyResponsesIdentical(t *testing.T) {
 	}
 
 	// Insert alice's message in general so bob can try to impersonate.
-	aliceMsgID := "msg_alice_edit"
+	aliceMsgID := testutil.MsgID("alice_edit")
 	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
-		ID: aliceMsgID, Sender: "alice", TS: 1000, Epoch: 1, Payload: "orig", Signature: "sig",
+		ID: aliceMsgID, Sender: testutil.UserID("alice"), TS: 1000, Epoch: 1, Payload: "orig", Signature: "sig",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
 	// Case 1: unknown room.
-	probe1 := testClientFor("bob", "dev_bob_1")
+	probe1 := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	raw1, _ := json.Marshal(protocol.Edit{
-		Type: "edit", ID: "msg_x", Room: "room_does_not_exist", Epoch: 1, Payload: "new", Signature: "new",
+		Type: "edit", ID: testutil.MsgID("x"), Room: testutil.RoomID("does_not_exist"), Epoch: 1, Payload: "new", Signature: "new",
 	})
 	s.handleEdit(probe1.Client, raw1)
 
 	// Case 2: non-member (carol is not in general per the seed; reseed needed).
 	// Actually, per testdata seed, carol IS in general. Use dave (not seeded) instead.
-	probe2 := testClientFor("dave", "dev_dave_1")
+	probe2 := testClientFor(testutil.UserID("dave"), "dev_dave_1")
 	raw2, _ := json.Marshal(protocol.Edit{
 		Type: "edit", ID: aliceMsgID, Room: generalID, Epoch: 1, Payload: "new", Signature: "new",
 	})
 	s.handleEdit(probe2.Client, raw2)
 
 	// Case 3: member, unknown row.
-	probe3 := testClientFor("bob", "dev_bob_2")
+	probe3 := testClientFor(testutil.UserID("bob"), "dev_bob_2")
 	raw3, _ := json.Marshal(protocol.Edit{
-		Type: "edit", ID: "msg_nonexistent", Room: generalID, Epoch: 1, Payload: "new", Signature: "new",
+		Type: "edit", ID: testutil.MsgID("nonexistent"), Room: generalID, Epoch: 1, Payload: "new", Signature: "new",
 	})
 	s.handleEdit(probe3.Client, raw3)
 
 	// Case 4: member, row exists, wrong author.
-	probe4 := testClientFor("bob", "dev_bob_3")
+	probe4 := testClientFor(testutil.UserID("bob"), "dev_bob_3")
 	raw4, _ := json.Marshal(protocol.Edit{
 		Type: "edit", ID: aliceMsgID, Room: generalID, Epoch: 1, Payload: "new", Signature: "new",
 	})
@@ -98,14 +98,14 @@ func TestHandleEdit_HappyPath_ReplacesPayloadAndBroadcasts(t *testing.T) {
 	pinEditClock(t, 1000) // fixtures use small fixed timestamps; keep them inside the edit window
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	msgID := "msg_happy"
+	msgID := testutil.MsgID("happy")
 	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
-		ID: msgID, Sender: "alice", TS: 500, Epoch: 1, Payload: "original", Signature: "orig_sig",
+		ID: msgID, Sender: testutil.UserID("alice"), TS: 500, Epoch: 1, Payload: "original", Signature: "orig_sig",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
@@ -167,19 +167,19 @@ func TestHandleEdit_NotMostRecent_ReturnsSpecificError(t *testing.T) {
 
 	// Alice sends two messages; the OLDER one can't be edited.
 	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
-		ID: "msg_older", Sender: "alice", TS: 100, Epoch: 1, Payload: "1", Signature: "s",
+		ID: testutil.MsgID("older"), Sender: testutil.UserID("alice"), TS: 100, Epoch: 1, Payload: "1", Signature: "s",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
-		ID: "msg_newer", Sender: "alice", TS: 200, Epoch: 1, Payload: "2", Signature: "s",
+		ID: testutil.MsgID("newer"), Sender: testutil.UserID("alice"), TS: 200, Epoch: 1, Payload: "2", Signature: "s",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	raw, _ := json.Marshal(protocol.Edit{
-		Type: "edit", ID: "msg_older", Room: generalID, Epoch: 1, Payload: "new", Signature: "new",
+		Type: "edit", ID: testutil.MsgID("older"), Room: generalID, Epoch: 1, Payload: "new", Signature: "new",
 	})
 	s.handleEdit(alice.Client, raw)
 
@@ -203,9 +203,9 @@ func TestHandleEdit_DeletedMessage_CollapsedToUnknown(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	// Baseline: unknown message in the same room.
-	baselineClient := testClientFor("alice", "dev_alice_base")
+	baselineClient := testClientFor(testutil.UserID("alice"), "dev_alice_base")
 	rawBaseline, _ := json.Marshal(protocol.Edit{
-		Type: "edit", ID: "msg_nonexistent", Room: generalID, Epoch: 1, Payload: "n", Signature: "n",
+		Type: "edit", ID: testutil.MsgID("nonexistent"), Room: generalID, Epoch: 1, Payload: "n", Signature: "n",
 	})
 	s.handleEdit(baselineClient.Client, rawBaseline)
 	baselineMsgs := baselineClient.messages()
@@ -215,17 +215,17 @@ func TestHandleEdit_DeletedMessage_CollapsedToUnknown(t *testing.T) {
 
 	// Insert and tombstone a message.
 	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
-		ID: "msg_tombstoned", Sender: "alice", TS: 100, Epoch: 1, Payload: "p", Signature: "s",
+		ID: testutil.MsgID("tombstoned"), Sender: testutil.UserID("alice"), TS: 100, Epoch: 1, Payload: "p", Signature: "s",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	if _, err := s.store.DeleteRoomMessage(generalID, "msg_tombstoned", "alice"); err != nil {
+	if _, err := s.store.DeleteRoomMessage(generalID, testutil.MsgID("tombstoned"), testutil.UserID("alice")); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
-	aliceClient := testClientFor("alice", "dev_alice_1")
+	aliceClient := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	raw, _ := json.Marshal(protocol.Edit{
-		Type: "edit", ID: "msg_tombstoned", Room: generalID, Epoch: 1, Payload: "new", Signature: "new",
+		Type: "edit", ID: testutil.MsgID("tombstoned"), Room: generalID, Epoch: 1, Payload: "new", Signature: "new",
 	})
 	s.handleEdit(aliceClient.Client, raw)
 
@@ -249,15 +249,15 @@ func TestHandleEdit_RetiredRoom(t *testing.T) {
 
 	// Insert alice's message first, then retire the room.
 	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
-		ID: "msg_retire", Sender: "alice", TS: 100, Epoch: 1, Payload: "p", Signature: "s",
+		ID: testutil.MsgID("retire"), Sender: testutil.UserID("alice"), TS: 100, Epoch: 1, Payload: "p", Signature: "s",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 	retireRoomForTest(t, s, generalID)
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	raw, _ := json.Marshal(protocol.Edit{
-		Type: "edit", ID: "msg_retire", Room: generalID, Epoch: 1, Payload: "new", Signature: "new",
+		Type: "edit", ID: testutil.MsgID("retire"), Room: generalID, Epoch: 1, Payload: "new", Signature: "new",
 	})
 	s.handleEdit(alice.Client, raw)
 
@@ -285,7 +285,7 @@ func TestHandleEdit_EpochTooOld(t *testing.T) {
 	// Simpler approach: insert the message at epoch 1 and then set
 	// the current epoch to 5 manually via the epochs manager.
 	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
-		ID: "msg_old", Sender: "alice", TS: 100, Epoch: 1, Payload: "p", Signature: "s",
+		ID: testutil.MsgID("old"), Sender: testutil.UserID("alice"), TS: 100, Epoch: 1, Payload: "p", Signature: "s",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -298,9 +298,9 @@ func TestHandleEdit_EpochTooOld(t *testing.T) {
 	state.confirmedEpoch = 5
 	s.epochs.mu.Unlock()
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	raw, _ := json.Marshal(protocol.Edit{
-		Type: "edit", ID: "msg_old", Room: generalID, Epoch: 1, Payload: "new", Signature: "new",
+		Type: "edit", ID: testutil.MsgID("old"), Room: generalID, Epoch: 1, Payload: "new", Signature: "new",
 	})
 	s.handleEdit(alice.Client, raw)
 
@@ -325,7 +325,7 @@ func TestHandleEdit_ClearsReactions(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
-		ID: "msg_rx", Sender: "alice", TS: 100, Epoch: 1, Payload: "p", Signature: "s",
+		ID: testutil.MsgID("rx"), Sender: testutil.UserID("alice"), TS: 100, Epoch: 1, Payload: "p", Signature: "s",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -336,19 +336,19 @@ func TestHandleEdit_ClearsReactions(t *testing.T) {
 		t.Fatalf("RoomDB: %v", err)
 	}
 	_, err = db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, payload) VALUES (?, ?, ?, ?, ?)`,
-		"react_1", "msg_rx", "bob", 150, "emoji_payload")
+		"react_1", testutil.MsgID("rx"), testutil.UserID("bob"), 150, "emoji_payload")
 	if err != nil {
 		t.Fatalf("seed reaction: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	raw, _ := json.Marshal(protocol.Edit{
-		Type: "edit", ID: "msg_rx", Room: generalID, Epoch: 1, Payload: "new", Signature: "new",
+		Type: "edit", ID: testutil.MsgID("rx"), Room: generalID, Epoch: 1, Payload: "new", Signature: "new",
 	})
 	s.handleEdit(alice.Client, raw)
 
 	var count int
-	db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, "msg_rx").Scan(&count)
+	db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, testutil.MsgID("rx")).Scan(&count)
 	if count != 0 {
 		t.Errorf("reactions not cleared after edit: count = %d", count)
 	}
@@ -360,47 +360,47 @@ func TestHandleEdit_ClearsReactions(t *testing.T) {
 func TestHandleEditGroup_PrivacyResponsesIdentical(t *testing.T) {
 	s := newTestServer(t)
 	groupPriv := store.GenerateID("group_")
-	if err := s.store.CreateGroup(groupPriv, "alice", []string{"alice", "bob"}, "Priv"); err != nil {
+	if err := s.store.CreateGroup(groupPriv, testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Priv"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
 	// Insert alice's message.
 	if _, err := s.store.InsertGroupMessage(groupPriv, store.StoredMessage{
-		ID: "msg_alice_g", Sender: "alice", TS: 1000, Payload: "p", Signature: "s",
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		ID: testutil.MsgID("alice_g"), Sender: testutil.UserID("alice"), TS: 1000, Payload: "p", Signature: "s",
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
 	// Case 1: unknown group.
-	probe1 := testClientFor("alice", "dev_alice_1")
+	probe1 := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	raw1, _ := json.Marshal(protocol.EditGroup{
-		Type: "edit_group", ID: "msg_x", Group: store.GenerateID("group_"),
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa")}, Payload: "p", Signature: "s",
+		Type: "edit_group", ID: testutil.MsgID("x"), Group: store.GenerateID("group_"),
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa")}, Payload: "p", Signature: "s",
 	})
 	s.handleEditGroup(probe1.Client, raw1)
 
 	// Case 2: non-member (carol is not in groupPriv).
-	probe2 := testClientFor("carol", "dev_carol_1")
+	probe2 := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	raw2, _ := json.Marshal(protocol.EditGroup{
-		Type: "edit_group", ID: "msg_alice_g", Group: groupPriv,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
+		Type: "edit_group", ID: testutil.MsgID("alice_g"), Group: groupPriv,
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
 	})
 	s.handleEditGroup(probe2.Client, raw2)
 
 	// Case 3: member, unknown row.
-	probe3 := testClientFor("bob", "dev_bob_1")
+	probe3 := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	raw3, _ := json.Marshal(protocol.EditGroup{
-		Type: "edit_group", ID: "msg_nonexistent", Group: groupPriv,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
+		Type: "edit_group", ID: testutil.MsgID("nonexistent"), Group: groupPriv,
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
 	})
 	s.handleEditGroup(probe3.Client, raw3)
 
 	// Case 4: member, row exists, wrong author.
-	probe4 := testClientFor("bob", "dev_bob_2")
+	probe4 := testClientFor(testutil.UserID("bob"), "dev_bob_2")
 	raw4, _ := json.Marshal(protocol.EditGroup{
-		Type: "edit_group", ID: "msg_alice_g", Group: groupPriv,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
+		Type: "edit_group", ID: testutil.MsgID("alice_g"), Group: groupPriv,
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
 	})
 	s.handleEditGroup(probe4.Client, raw4)
 
@@ -428,37 +428,37 @@ func TestHandleEditGroup_HappyPath(t *testing.T) {
 	s := newTestServer(t)
 	pinEditClock(t, 1000) // fixtures use small fixed timestamps; keep them inside the edit window
 	groupHappy := store.GenerateID("group_")
-	if err := s.store.CreateGroup(groupHappy, "alice", []string{"alice", "bob"}, "Happy"); err != nil {
+	if err := s.store.CreateGroup(groupHappy, testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Happy"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if _, err := s.store.InsertGroupMessage(groupHappy, store.StoredMessage{
-		ID: "msg_gh", Sender: "alice", TS: 500, Payload: "orig", Signature: "orig_sig",
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("v1a"), "bob": testutil.WrappedKey("v1b")},
+		ID: testutil.MsgID("gh"), Sender: testutil.UserID("alice"), TS: 500, Payload: "orig", Signature: "orig_sig",
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("v1a"), testutil.UserID("bob"): testutil.WrappedKey("v1b")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
 
 	raw, _ := json.Marshal(protocol.EditGroup{
-		Type: "edit_group", ID: "msg_gh", Group: groupHappy,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("v2a"), "bob": testutil.WrappedKey("v2b")},
+		Type: "edit_group", ID: testutil.MsgID("gh"), Group: groupHappy,
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("v2a"), testutil.UserID("bob"): testutil.WrappedKey("v2b")},
 		Payload:     "new_payload", Signature: "new_sig",
 	})
 	s.handleEditGroup(alice.Client, raw)
 
-	got, err := s.store.GetGroupMessageByID(groupHappy, "msg_gh")
+	got, err := s.store.GetGroupMessageByID(groupHappy, testutil.MsgID("gh"))
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	if got.Payload != "new_payload" {
 		t.Errorf("payload = %q", got.Payload)
 	}
-	if got.WrappedKeys["alice"] != testutil.WrappedKey("v2a") {
-		t.Errorf("alice key not rewrapped: %q", got.WrappedKeys["alice"])
+	if got.WrappedKeys[testutil.UserID("alice")] != testutil.WrappedKey("v2a") {
+		t.Errorf("alice key not rewrapped: %q", got.WrappedKeys[testutil.UserID("alice")])
 	}
 	if got.EditedAt == 0 {
 		t.Error("edited_at unset")
@@ -473,47 +473,47 @@ func TestHandleEditGroup_HappyPath(t *testing.T) {
 // all return byte-identical ErrUnknownDM.
 func TestHandleEditDM_PrivacyResponsesIdentical(t *testing.T) {
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
 	dmID := dm.ID
 	if _, err := s.store.InsertDMMessage(dmID, store.StoredMessage{
-		ID: "msg_dm_alice", Sender: "alice", TS: time.Now().Unix(), Payload: "p", Signature: "s",
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		ID: testutil.MsgID("dm_alice"), Sender: testutil.UserID("alice"), TS: time.Now().Unix(), Payload: "p", Signature: "s",
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
 	// Case 1: unknown DM.
-	probe1 := testClientFor("alice", "dev_alice_1")
+	probe1 := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	raw1, _ := json.Marshal(protocol.EditDM{
-		Type: "edit_dm", ID: "msg_x", DM: store.GenerateID("dm_"),
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
+		Type: "edit_dm", ID: testutil.MsgID("x"), DM: store.GenerateID("dm_"),
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
 	})
 	s.handleEditDM(probe1.Client, raw1)
 
 	// Case 2: non-party (carol is not part of the alice-bob DM).
-	probe2 := testClientFor("carol", "dev_carol_1")
+	probe2 := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	raw2, _ := json.Marshal(protocol.EditDM{
-		Type: "edit_dm", ID: "msg_dm_alice", DM: dmID,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
+		Type: "edit_dm", ID: testutil.MsgID("dm_alice"), DM: dmID,
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
 	})
 	s.handleEditDM(probe2.Client, raw2)
 
 	// Case 3: party, unknown row.
-	probe3 := testClientFor("bob", "dev_bob_1")
+	probe3 := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	raw3, _ := json.Marshal(protocol.EditDM{
-		Type: "edit_dm", ID: "msg_nonexistent", DM: dmID,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
+		Type: "edit_dm", ID: testutil.MsgID("nonexistent"), DM: dmID,
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
 	})
 	s.handleEditDM(probe3.Client, raw3)
 
 	// Case 4: party, row exists, wrong author (bob tries to edit alice's message).
-	probe4 := testClientFor("bob", "dev_bob_2")
+	probe4 := testClientFor(testutil.UserID("bob"), "dev_bob_2")
 	raw4, _ := json.Marshal(protocol.EditDM{
-		Type: "edit_dm", ID: "msg_dm_alice", DM: dmID,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
+		Type: "edit_dm", ID: testutil.MsgID("dm_alice"), DM: dmID,
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")}, Payload: "p", Signature: "s",
 	})
 	s.handleEditDM(probe4.Client, raw4)
 
@@ -538,28 +538,28 @@ func TestHandleEditDM_PrivacyResponsesIdentical(t *testing.T) {
 func TestHandleEditGroup_NotMostRecent_ReturnsSpecificError(t *testing.T) {
 	s := newTestServer(t)
 	groupID := store.GenerateID("group_")
-	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "recent"); err != nil {
+	if err := s.store.CreateGroup(groupID, testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "recent"); err != nil {
 		t.Fatalf("CreateGroup: %v", err)
 	}
 	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
-		ID: "msg_old", Sender: "alice", TS: 100, Payload: "old", Signature: "s",
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		ID: testutil.MsgID("old"), Sender: testutil.UserID("alice"), TS: 100, Payload: "old", Signature: "s",
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert old: %v", err)
 	}
 	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
-		ID: "msg_new", Sender: "alice", TS: 200, Payload: "new", Signature: "s",
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		ID: testutil.MsgID("new"), Sender: testutil.UserID("alice"), TS: 200, Payload: "new", Signature: "s",
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert new: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_group_recent")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_group_recent")
 	raw, _ := json.Marshal(protocol.EditGroup{
 		Type:        "edit_group",
-		ID:          "msg_old",
+		ID:          testutil.MsgID("old"),
 		Group:       groupID,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa2"), "bob": testutil.WrappedKey("wb2")},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa2"), testutil.UserID("bob"): testutil.WrappedKey("wb2")},
 		Payload:     "edited",
 		Signature:   "sig2",
 	})
@@ -581,16 +581,16 @@ func TestHandleEditGroup_NotMostRecent_ReturnsSpecificError(t *testing.T) {
 func TestHandleEditGroup_DeletedMessage_CollapsedToUnknown(t *testing.T) {
 	s := newTestServer(t)
 	groupID := store.GenerateID("group_")
-	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "del"); err != nil {
+	if err := s.store.CreateGroup(groupID, testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "del"); err != nil {
 		t.Fatalf("CreateGroup: %v", err)
 	}
 
-	baselineClient := testClientFor("alice", "dev_alice_group_base")
+	baselineClient := testClientFor(testutil.UserID("alice"), "dev_alice_group_base")
 	rawBaseline, _ := json.Marshal(protocol.EditGroup{
 		Type:        "edit_group",
-		ID:          "msg_missing",
+		ID:          testutil.MsgID("missing"),
 		Group:       groupID,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 		Payload:     "p",
 		Signature:   "s",
 	})
@@ -601,21 +601,21 @@ func TestHandleEditGroup_DeletedMessage_CollapsedToUnknown(t *testing.T) {
 	}
 
 	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
-		ID: "msg_deleted", Sender: "alice", TS: 123, Payload: "body", Signature: "sig",
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		ID: testutil.MsgID("deleted"), Sender: testutil.UserID("alice"), TS: 123, Payload: "body", Signature: "sig",
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	if _, err := s.store.DeleteGroupMessage(groupID, "msg_deleted", "alice"); err != nil {
+	if _, err := s.store.DeleteGroupMessage(groupID, testutil.MsgID("deleted"), testutil.UserID("alice")); err != nil {
 		t.Fatalf("DeleteGroupMessage: %v", err)
 	}
 
-	probe := testClientFor("alice", "dev_alice_group_deleted")
+	probe := testClientFor(testutil.UserID("alice"), "dev_alice_group_deleted")
 	rawProbe, _ := json.Marshal(protocol.EditGroup{
 		Type:        "edit_group",
-		ID:          "msg_deleted",
+		ID:          testutil.MsgID("deleted"),
 		Group:       groupID,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa2"), "bob": testutil.WrappedKey("wb2")},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa2"), testutil.UserID("bob"): testutil.WrappedKey("wb2")},
 		Payload:     "new",
 		Signature:   "sig2",
 	})
@@ -633,12 +633,12 @@ func TestHandleEditGroup_ClearsReactions(t *testing.T) {
 	s := newTestServer(t)
 	pinEditClock(t, 1000) // fixtures use small fixed timestamps; keep them inside the edit window
 	groupID := store.GenerateID("group_")
-	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "react"); err != nil {
+	if err := s.store.CreateGroup(groupID, testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "react"); err != nil {
 		t.Fatalf("CreateGroup: %v", err)
 	}
 	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
-		ID: "msg_group_rx", Sender: "alice", TS: 100, Payload: "body", Signature: "sig",
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		ID: testutil.MsgID("group_rx"), Sender: testutil.UserID("alice"), TS: 100, Payload: "body", Signature: "sig",
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -647,23 +647,23 @@ func TestHandleEditGroup_ClearsReactions(t *testing.T) {
 		t.Fatalf("GroupDB: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, payload) VALUES (?, ?, ?, ?, ?)`,
-		"react_group_1", "msg_group_rx", "bob", 150, "emoji_payload"); err != nil {
+		"react_group_1", testutil.MsgID("group_rx"), testutil.UserID("bob"), 150, "emoji_payload"); err != nil {
 		t.Fatalf("seed reaction: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_group_rx")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_group_rx")
 	raw, _ := json.Marshal(protocol.EditGroup{
 		Type:        "edit_group",
-		ID:          "msg_group_rx",
+		ID:          testutil.MsgID("group_rx"),
 		Group:       groupID,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa2"), "bob": testutil.WrappedKey("wb2")},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa2"), testutil.UserID("bob"): testutil.WrappedKey("wb2")},
 		Payload:     "new",
 		Signature:   "newsig",
 	})
 	s.handleEditGroup(alice.Client, raw)
 
 	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, "msg_group_rx").Scan(&count); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, testutil.MsgID("group_rx")).Scan(&count); err != nil {
 		t.Fatalf("count reactions: %v", err)
 	}
 	if count != 0 {
@@ -675,22 +675,22 @@ func TestHandleEditGroup_InvalidWrappedKeys(t *testing.T) {
 	s := newTestServer(t)
 	pinEditClock(t, 1000) // fixtures use small fixed timestamps; keep them inside the edit window
 	groupID := store.GenerateID("group_")
-	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "keys"); err != nil {
+	if err := s.store.CreateGroup(groupID, testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "keys"); err != nil {
 		t.Fatalf("CreateGroup: %v", err)
 	}
 	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
-		ID: "msg_group_keys", Sender: "alice", TS: 100, Payload: "body", Signature: "sig",
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		ID: testutil.MsgID("group_keys"), Sender: testutil.UserID("alice"), TS: 100, Payload: "body", Signature: "sig",
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_group_keys")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_group_keys")
 	raw, _ := json.Marshal(protocol.EditGroup{
 		Type:        "edit_group",
-		ID:          "msg_group_keys",
+		ID:          testutil.MsgID("group_keys"),
 		Group:       groupID,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("only_one")},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("only_one")},
 		Payload:     "new",
 		Signature:   "newsig",
 	})
@@ -712,19 +712,19 @@ func TestHandleEditGroup_InvalidWrappedKeys(t *testing.T) {
 func TestHandleEditDM_HappyPath(t *testing.T) {
 	s := newTestServer(t)
 	pinEditClock(t, 1000) // fixtures use small fixed timestamps; keep them inside the edit window
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("CreateOrGetDirectMessage: %v", err)
 	}
 	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
-		ID: "msg_dm_happy", Sender: "alice", TS: 500, Payload: "orig", Signature: "sig",
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		ID: testutil.MsgID("dm_happy"), Sender: testutil.UserID("alice"), TS: 500, Payload: "orig", Signature: "sig",
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_dm_happy")
-	bob := testClientFor("bob", "dev_bob_dm_happy")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_dm_happy")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_dm_happy")
 	s.mu.Lock()
 	s.clients["dev_alice_dm_happy"] = alice.Client
 	s.clients["dev_bob_dm_happy"] = bob.Client
@@ -732,22 +732,22 @@ func TestHandleEditDM_HappyPath(t *testing.T) {
 
 	raw, _ := json.Marshal(protocol.EditDM{
 		Type:        "edit_dm",
-		ID:          "msg_dm_happy",
+		ID:          testutil.MsgID("dm_happy"),
 		DM:          dm.ID,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa2"), "bob": testutil.WrappedKey("wb2")},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa2"), testutil.UserID("bob"): testutil.WrappedKey("wb2")},
 		Payload:     "new_payload",
 		Signature:   "new_sig",
 	})
 	s.handleEditDM(alice.Client, raw)
 
-	got, err := s.store.GetDMMessageByID(dm.ID, "msg_dm_happy")
+	got, err := s.store.GetDMMessageByID(dm.ID, testutil.MsgID("dm_happy"))
 	if err != nil {
 		t.Fatalf("GetDMMessageByID: %v", err)
 	}
 	if got.Payload != "new_payload" {
 		t.Fatalf("payload = %q, want new_payload", got.Payload)
 	}
-	if got.WrappedKeys["alice"] != testutil.WrappedKey("wa2") || got.WrappedKeys["bob"] != testutil.WrappedKey("wb2") {
+	if got.WrappedKeys[testutil.UserID("alice")] != testutil.WrappedKey("wa2") || got.WrappedKeys[testutil.UserID("bob")] != testutil.WrappedKey("wb2") {
 		t.Fatalf("wrapped keys not updated: %+v", got.WrappedKeys)
 	}
 	if got.EditedAt == 0 {
@@ -773,29 +773,29 @@ func TestHandleEditDM_HappyPath(t *testing.T) {
 
 func TestHandleEditDM_NotMostRecent(t *testing.T) {
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("CreateOrGetDirectMessage: %v", err)
 	}
 	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
-		ID: "msg_dm_old", Sender: "alice", TS: 100, Payload: "old", Signature: "s",
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		ID: testutil.MsgID("dm_old"), Sender: testutil.UserID("alice"), TS: 100, Payload: "old", Signature: "s",
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert old: %v", err)
 	}
 	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
-		ID: "msg_dm_new", Sender: "alice", TS: 200, Payload: "new", Signature: "s",
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		ID: testutil.MsgID("dm_new"), Sender: testutil.UserID("alice"), TS: 200, Payload: "new", Signature: "s",
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert new: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_dm_recent")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_dm_recent")
 	raw, _ := json.Marshal(protocol.EditDM{
 		Type:        "edit_dm",
-		ID:          "msg_dm_old",
+		ID:          testutil.MsgID("dm_old"),
 		DM:          dm.ID,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa2"), "bob": testutil.WrappedKey("wb2")},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa2"), testutil.UserID("bob"): testutil.WrappedKey("wb2")},
 		Payload:     "edited",
 		Signature:   "sig2",
 	})
@@ -816,17 +816,17 @@ func TestHandleEditDM_NotMostRecent(t *testing.T) {
 
 func TestHandleEditDM_DeletedMessage_CollapsedToUnknown(t *testing.T) {
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("CreateOrGetDirectMessage: %v", err)
 	}
 
-	baseline := testClientFor("alice", "dev_alice_dm_base")
+	baseline := testClientFor(testutil.UserID("alice"), "dev_alice_dm_base")
 	rawBaseline, _ := json.Marshal(protocol.EditDM{
 		Type:        "edit_dm",
-		ID:          "msg_missing",
+		ID:          testutil.MsgID("missing"),
 		DM:          dm.ID,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 		Payload:     "p",
 		Signature:   "s",
 	})
@@ -837,21 +837,21 @@ func TestHandleEditDM_DeletedMessage_CollapsedToUnknown(t *testing.T) {
 	}
 
 	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
-		ID: "msg_dm_deleted", Sender: "alice", TS: 123, Payload: "body", Signature: "sig",
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		ID: testutil.MsgID("dm_deleted"), Sender: testutil.UserID("alice"), TS: 123, Payload: "body", Signature: "sig",
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	if _, err := s.store.DeleteDMMessage(dm.ID, "msg_dm_deleted", "alice"); err != nil {
+	if _, err := s.store.DeleteDMMessage(dm.ID, testutil.MsgID("dm_deleted"), testutil.UserID("alice")); err != nil {
 		t.Fatalf("DeleteDMMessage: %v", err)
 	}
 
-	probe := testClientFor("alice", "dev_alice_dm_deleted")
+	probe := testClientFor(testutil.UserID("alice"), "dev_alice_dm_deleted")
 	rawProbe, _ := json.Marshal(protocol.EditDM{
 		Type:        "edit_dm",
-		ID:          "msg_dm_deleted",
+		ID:          testutil.MsgID("dm_deleted"),
 		DM:          dm.ID,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa2"), "bob": testutil.WrappedKey("wb2")},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa2"), testutil.UserID("bob"): testutil.WrappedKey("wb2")},
 		Payload:     "new",
 		Signature:   "sig2",
 	})
@@ -868,13 +868,13 @@ func TestHandleEditDM_DeletedMessage_CollapsedToUnknown(t *testing.T) {
 func TestHandleEditDM_ClearsReactions(t *testing.T) {
 	s := newTestServer(t)
 	pinEditClock(t, 1000) // fixtures use small fixed timestamps; keep them inside the edit window
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("CreateOrGetDirectMessage: %v", err)
 	}
 	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
-		ID: "msg_dm_rx", Sender: "alice", TS: 100, Payload: "body", Signature: "sig",
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		ID: testutil.MsgID("dm_rx"), Sender: testutil.UserID("alice"), TS: 100, Payload: "body", Signature: "sig",
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -883,23 +883,23 @@ func TestHandleEditDM_ClearsReactions(t *testing.T) {
 		t.Fatalf("DMDB: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO reactions (reaction_id, message_id, user, ts, payload) VALUES (?, ?, ?, ?, ?)`,
-		"react_dm_1", "msg_dm_rx", "bob", 150, "emoji_payload"); err != nil {
+		"react_dm_1", testutil.MsgID("dm_rx"), testutil.UserID("bob"), 150, "emoji_payload"); err != nil {
 		t.Fatalf("seed reaction: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_dm_rx")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_dm_rx")
 	raw, _ := json.Marshal(protocol.EditDM{
 		Type:        "edit_dm",
-		ID:          "msg_dm_rx",
+		ID:          testutil.MsgID("dm_rx"),
 		DM:          dm.ID,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa2"), "bob": testutil.WrappedKey("wb2")},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa2"), testutil.UserID("bob"): testutil.WrappedKey("wb2")},
 		Payload:     "new",
 		Signature:   "newsig",
 	})
 	s.handleEditDM(alice.Client, raw)
 
 	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, "msg_dm_rx").Scan(&count); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, testutil.MsgID("dm_rx")).Scan(&count); err != nil {
 		t.Fatalf("count reactions: %v", err)
 	}
 	if count != 0 {
@@ -910,24 +910,24 @@ func TestHandleEditDM_ClearsReactions(t *testing.T) {
 func TestHandleEditDM_FrozenCallerRejected(t *testing.T) {
 	s := newTestServer(t)
 	pinEditClock(t, 1000) // fixtures use small fixed timestamps; keep them inside the edit window
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("CreateOrGetDirectMessage: %v", err)
 	}
 	if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{
-		ID: "msg_dm_frozen", Sender: "alice", TS: 100, Payload: "body", Signature: "sig",
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		ID: testutil.MsgID("dm_frozen"), Sender: testutil.UserID("alice"), TS: 100, Payload: "body", Signature: "sig",
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
 	// Baseline unknown-DM response for byte-identical comparison.
-	baseline := testClientFor("alice", "dev_alice_dm_frozen_base")
+	baseline := testClientFor(testutil.UserID("alice"), "dev_alice_dm_frozen_base")
 	rawBaseline, _ := json.Marshal(protocol.EditDM{
 		Type:        "edit_dm",
-		ID:          "msg_any",
+		ID:          testutil.MsgID("any"),
 		DM:          store.GenerateID("dm_"),
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 		Payload:     "p",
 		Signature:   "s",
 	})
@@ -937,16 +937,16 @@ func TestHandleEditDM_FrozenCallerRejected(t *testing.T) {
 		t.Fatalf("baseline expected 1 reply, got %d", len(baseMsgs))
 	}
 
-	if err := s.store.SetDMLeftAt(dm.ID, "alice", time.Now().Unix()); err != nil {
+	if err := s.store.SetDMLeftAt(dm.ID, testutil.UserID("alice"), time.Now().Unix()); err != nil {
 		t.Fatalf("SetDMLeftAt: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_dm_frozen")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_dm_frozen")
 	raw, _ := json.Marshal(protocol.EditDM{
 		Type:        "edit_dm",
-		ID:          "msg_dm_frozen",
+		ID:          testutil.MsgID("dm_frozen"),
 		DM:          dm.ID,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa2"), "bob": testutil.WrappedKey("wb2")},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa2"), testutil.UserID("bob"): testutil.WrappedKey("wb2")},
 		Payload:     "new",
 		Signature:   "newsig",
 	})
@@ -992,10 +992,10 @@ func editOutcome(t *testing.T, cc *captureClient, handle func()) string {
 // all three verbs and every attempt counts against it.
 func TestHandleEdit_TimeWindow_BoundaryInAllContexts(t *testing.T) {
 	const sent = 1_000_000
-	keys := map[string]string{"alice": testutil.WrappedKey("wa2"), "bob": testutil.WrappedKey("wb2")}
+	keys := map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa2"), testutil.UserID("bob"): testutil.WrappedKey("wb2")}
 	for _, ctx := range []string{"room", "group", "dm"} {
 		s := newTestServer(t)
-		alice := testClientFor("alice", "dev_alice_window_"+ctx)
+		alice := testClientFor(testutil.UserID("alice"), "dev_alice_window_"+ctx)
 		s.mu.Lock()
 		s.clients[alice.DeviceID] = alice.Client
 		s.mu.Unlock()
@@ -1004,35 +1004,35 @@ func TestHandleEdit_TimeWindow_BoundaryInAllContexts(t *testing.T) {
 		switch ctx {
 		case "room":
 			generalID := s.store.RoomDisplayNameToID("general")
-			if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{ID: "msg_r", Sender: "alice", TS: sent, Epoch: 1, Payload: "p", Signature: "s"}); err != nil {
+			if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{ID: testutil.MsgID("r"), Sender: testutil.UserID("alice"), TS: sent, Epoch: 1, Payload: "p", Signature: "s"}); err != nil {
 				t.Fatal(err)
 			}
 			attempt = func() {
-				raw, _ := json.Marshal(protocol.Edit{Type: "edit", ID: "msg_r", Room: generalID, Epoch: 1, Payload: "n", Signature: "n"})
+				raw, _ := json.Marshal(protocol.Edit{Type: "edit", ID: testutil.MsgID("r"), Room: generalID, Epoch: 1, Payload: "n", Signature: "n"})
 				s.handleEdit(alice.Client, raw)
 			}
 		case "group":
 			groupID := store.GenerateID("group_")
-			if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "window"); err != nil {
+			if err := s.store.CreateGroup(groupID, testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "window"); err != nil {
 				t.Fatalf("CreateGroup: %v", err)
 			}
-			if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{ID: "msg_g", Sender: "alice", TS: sent, Payload: "p", Signature: "s", WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")}}); err != nil {
+			if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{ID: testutil.MsgID("g"), Sender: testutil.UserID("alice"), TS: sent, Payload: "p", Signature: "s", WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")}}); err != nil {
 				t.Fatal(err)
 			}
 			attempt = func() {
-				raw, _ := json.Marshal(protocol.EditGroup{Type: "edit_group", ID: "msg_g", Group: groupID, WrappedKeys: keys, Payload: "n", Signature: "n"})
+				raw, _ := json.Marshal(protocol.EditGroup{Type: "edit_group", ID: testutil.MsgID("g"), Group: groupID, WrappedKeys: keys, Payload: "n", Signature: "n"})
 				s.handleEditGroup(alice.Client, raw)
 			}
 		case "dm":
-			dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+			dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 			if err != nil {
 				t.Fatalf("CreateOrGetDirectMessage: %v", err)
 			}
-			if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{ID: "msg_d", Sender: "alice", TS: sent, Payload: "p", Signature: "s", WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")}}); err != nil {
+			if _, err := s.store.InsertDMMessage(dm.ID, store.StoredMessage{ID: testutil.MsgID("d"), Sender: testutil.UserID("alice"), TS: sent, Payload: "p", Signature: "s", WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")}}); err != nil {
 				t.Fatal(err)
 			}
 			attempt = func() {
-				raw, _ := json.Marshal(protocol.EditDM{Type: "edit_dm", ID: "msg_d", DM: dm.ID, WrappedKeys: keys, Payload: "n", Signature: "n"})
+				raw, _ := json.Marshal(protocol.EditDM{Type: "edit_dm", ID: testutil.MsgID("d"), DM: dm.ID, WrappedKeys: keys, Payload: "n", Signature: "n"})
 				s.handleEditDM(alice.Client, raw)
 			}
 		}
@@ -1055,22 +1055,22 @@ func TestHandleEdit_TimeWindow_NotExtendedByAnEdit(t *testing.T) {
 	const sent = 2_000_000
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
-	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{ID: "msg_r", Sender: "alice", TS: sent, Epoch: 1, Payload: "p", Signature: "s"}); err != nil {
+	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{ID: testutil.MsgID("r"), Sender: testutil.UserID("alice"), TS: sent, Epoch: 1, Payload: "p", Signature: "s"}); err != nil {
 		t.Fatal(err)
 	}
-	alice := testClientFor("alice", "dev_alice_window2")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_window2")
 	s.mu.Lock()
 	s.clients[alice.DeviceID] = alice.Client
 	s.mu.Unlock()
 	attempt := func() {
-		raw, _ := json.Marshal(protocol.Edit{Type: "edit", ID: "msg_r", Room: generalID, Epoch: 1, Payload: "n", Signature: "n"})
+		raw, _ := json.Marshal(protocol.Edit{Type: "edit", ID: testutil.MsgID("r"), Room: generalID, Epoch: 1, Payload: "n", Signature: "n"})
 		s.handleEdit(alice.Client, raw)
 	}
 	pinEditClock(t, sent+14*60)
 	if code := editOutcome(t, alice, attempt); code != "" {
 		t.Fatalf("edit at minute fourteen: code = %q, want accepted", code)
 	}
-	got, err := s.store.GetRoomMessageByID(generalID, "msg_r")
+	got, err := s.store.GetRoomMessageByID(generalID, testutil.MsgID("r"))
 	if err != nil || got.EditedAt == 0 || got.TS != sent {
 		t.Fatalf("after the first edit: ts=%d edited_at=%d err=%v; want ts kept and edited_at set", got.TS, got.EditedAt, err)
 	}

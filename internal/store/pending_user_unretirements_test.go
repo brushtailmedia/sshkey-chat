@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // --- SetUserUnretired tests ---
@@ -33,25 +35,25 @@ func TestSetUserUnretired_HappyPath(t *testing.T) {
 
 	// Insert + retire a user with a long enough ID for the suffix
 	// logic to fire (len > 8).
-	if err := st.InsertUser("usr_alice12345", "ssh-ed25519 AAAA fake", "alice"); err != nil {
+	if err := st.InsertUser(testutil.UserID("alice12345"), "ssh-ed25519 AAAA fake", "alice"); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	if err := st.SetUserRetired("usr_alice12345", "key_lost"); err != nil {
+	if err := st.SetUserRetired(testutil.UserID("alice12345"), "key_lost"); err != nil {
 		t.Fatalf("retire: %v", err)
 	}
 
 	// Verify the suffix was added.
-	retired := st.GetUserByID("usr_alice12345")
+	retired := st.GetUserByID(testutil.UserID("alice12345"))
 	if retired == nil || !retired.Retired {
 		t.Fatal("user should be retired")
 	}
-	expectedSuffixed := "alice_alic" // userID[4:8] = "alic"
+	expectedSuffixed := "alice_jEyX" // first four hash characters of the fixture user ID
 	if retired.DisplayName != expectedSuffixed {
 		t.Fatalf("expected suffixed display name %q, got %q", expectedSuffixed, retired.DisplayName)
 	}
 
 	// Now unretire — the original name "alice" is free, so it is restored.
-	chosen, restoredOriginal, err := st.SetUserUnretired("usr_alice12345")
+	chosen, restoredOriginal, err := st.SetUserUnretired(testutil.UserID("alice12345"))
 	if err != nil {
 		t.Fatalf("unretire: %v", err)
 	}
@@ -62,7 +64,7 @@ func TestSetUserUnretired_HappyPath(t *testing.T) {
 		t.Errorf("restored name = %q, want alice", chosen)
 	}
 
-	unretired := st.GetUserByID("usr_alice12345")
+	unretired := st.GetUserByID(testutil.UserID("alice12345"))
 	if unretired == nil {
 		t.Fatal("user should still exist after unretire")
 	}
@@ -76,7 +78,7 @@ func TestSetUserUnretired_HappyPath(t *testing.T) {
 		t.Errorf("retired_reason should be empty, got %q", unretired.RetiredReason)
 	}
 	if unretired.DisplayName != "alice" {
-		t.Errorf("display name should be restored to %q, got %q", "alice", unretired.DisplayName)
+		t.Errorf("display name should be restored to %q, got %q", testutil.UserID("alice"), unretired.DisplayName)
 	}
 }
 
@@ -88,7 +90,7 @@ func TestSetUserUnretired_NonexistentUser(t *testing.T) {
 	}
 	defer st.Close()
 
-	_, _, err = st.SetUserUnretired("usr_ghost")
+	_, _, err = st.SetUserUnretired(testutil.UserID("ghost"))
 	if err == nil {
 		t.Fatal("expected error for nonexistent user")
 	}
@@ -102,12 +104,12 @@ func TestSetUserUnretired_NotRetiredUser(t *testing.T) {
 	}
 	defer st.Close()
 
-	if err := st.InsertUser("usr_alice12345", "ssh-ed25519 AAAA fake", "alice"); err != nil {
+	if err := st.InsertUser(testutil.UserID("alice12345"), "ssh-ed25519 AAAA fake", "alice"); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 	// alice is NOT retired — unretire should error.
 
-	_, _, err = st.SetUserUnretired("usr_alice12345")
+	_, _, err = st.SetUserUnretired(testutil.UserID("alice12345"))
 	if err == nil {
 		t.Fatal("expected error for non-retired user")
 	}
@@ -164,22 +166,22 @@ func TestSetUserUnretired_ManuallyEditedDisplayName(t *testing.T) {
 	}
 	defer st.Close()
 
-	if err := st.InsertUser("usr_alice12345", "ssh-ed25519 AAAA fake", "alice"); err != nil {
+	if err := st.InsertUser(testutil.UserID("alice12345"), "ssh-ed25519 AAAA fake", "alice"); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	if err := st.SetUserRetired("usr_alice12345", "test"); err != nil {
+	if err := st.SetUserRetired(testutil.UserID("alice12345"), "test"); err != nil {
 		t.Fatalf("retire: %v", err)
 	}
 
 	// Simulate operator manually renaming the retired user.
-	if err := st.SetUserDisplayName("usr_alice12345", "former-alice"); err != nil {
+	if err := st.SetUserDisplayName(testutil.UserID("alice12345"), "former-alice"); err != nil {
 		t.Fatalf("manual rename: %v", err)
 	}
 
-	if _, _, err := st.SetUserUnretired("usr_alice12345"); err != nil {
+	if _, _, err := st.SetUserUnretired(testutil.UserID("alice12345")); err != nil {
 		t.Fatalf("unretire: %v", err)
 	}
-	u := st.GetUserByID("usr_alice12345")
+	u := st.GetUserByID(testutil.UserID("alice12345"))
 	if u.DisplayName != "former-alice" {
 		t.Errorf("manually-edited name should be preserved, got %q", u.DisplayName)
 	}
@@ -199,32 +201,32 @@ func TestSetUserUnretired_FallbackWhenOriginalTaken(t *testing.T) {
 	defer st.Close()
 
 	// Retire alice → "alice_alic", freeing "alice".
-	if err := st.InsertUser("usr_alice12345", "ssh-ed25519 AAAA fake", "alice"); err != nil {
+	if err := st.InsertUser(testutil.UserID("alice12345"), "ssh-ed25519 AAAA fake", "alice"); err != nil {
 		t.Fatalf("insert alice: %v", err)
 	}
-	if err := st.SetUserRetired("usr_alice12345", "key_lost"); err != nil {
+	if err := st.SetUserRetired(testutil.UserID("alice12345"), "key_lost"); err != nil {
 		t.Fatalf("retire: %v", err)
 	}
 	// Another account claims the freed name.
-	if err := st.InsertUser("usr_bob67890", "ssh-ed25519 BBBB fake", "alice"); err != nil {
+	if err := st.InsertUser(testutil.UserID("bob67890"), "ssh-ed25519 BBBB fake", "alice"); err != nil {
 		t.Fatalf("insert bob: %v", err)
 	}
 
-	chosen, restoredOriginal, err := st.SetUserUnretired("usr_alice12345")
+	chosen, restoredOriginal, err := st.SetUserUnretired(testutil.UserID("alice12345"))
 	if err != nil {
 		t.Fatalf("unretire: %v", err)
 	}
 	if restoredOriginal {
 		t.Error("restoredOriginal should be false when the original name is taken")
 	}
-	if chosen == "alice" || chosen == "" {
+	if chosen == testutil.UserID("alice") || chosen == "" {
 		t.Errorf("placeholder should differ from the taken original and be non-empty, got %q", chosen)
 	}
 	// The placeholder must not collide with any other account.
-	if st.IsDisplayNameTaken(chosen, "usr_alice12345") {
+	if st.IsDisplayNameTaken(chosen, testutil.UserID("alice12345")) {
 		t.Errorf("assigned placeholder %q collides with an existing name", chosen)
 	}
-	u := st.GetUserByID("usr_alice12345")
+	u := st.GetUserByID(testutil.UserID("alice12345"))
 	if u == nil || u.Retired {
 		t.Fatal("alice should be unretired")
 	}
@@ -232,7 +234,7 @@ func TestSetUserUnretired_FallbackWhenOriginalTaken(t *testing.T) {
 		t.Errorf("stored display name %q != returned %q", u.DisplayName, chosen)
 	}
 	// bob's claim on "alice" is untouched.
-	if bob := st.GetUserByID("usr_bob67890"); bob == nil || bob.DisplayName != "alice" {
+	if bob := st.GetUserByID(testutil.UserID("bob67890")); bob == nil || bob.DisplayName != "alice" {
 		t.Errorf("bob's claimed name should be intact, got %+v", bob)
 	}
 }
@@ -252,7 +254,7 @@ func TestSetUserRetired_TruncatesLongNameToFit(t *testing.T) {
 	cases := []struct {
 		userID, key, name, label string
 	}{
-		{"usr_alice12345", "ssh-ed25519 AAAA fake", strings.Repeat("a", 30), "ascii-30-bytes"},
+		{testutil.UserID("alice12345"), "ssh-ed25519 AAAA fake", strings.Repeat(testutil.UserID("a"), 30), "ascii-30-bytes"},
 		{"usr_bobby6789x", "ssh-ed25519 BBBB fake", strings.Repeat("日", 10), "cjk-30-bytes"}, // 10 runes x 3 bytes
 	}
 	for _, tc := range cases {
@@ -310,7 +312,7 @@ func TestRecordAndConsumePendingUserUnretirement(t *testing.T) {
 	}
 	defer st.Close()
 
-	if err := st.RecordPendingUserUnretirement("usr_alice", "os:1000"); err != nil {
+	if err := st.RecordPendingUserUnretirement(testutil.UserID("alice"), "os:1000"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
@@ -322,7 +324,7 @@ func TestRecordAndConsumePendingUserUnretirement(t *testing.T) {
 		t.Fatalf("expected 1 row, got %d", len(got))
 	}
 	row := got[0]
-	if row.UserID != "usr_alice" {
+	if row.UserID != testutil.UserID("alice") {
 		t.Errorf("UserID = %q, want usr_alice", row.UserID)
 	}
 	if row.UnretiredBy != "os:1000" {
@@ -341,8 +343,8 @@ func TestConsumePendingUserUnretirements_AtomicDelete(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.RecordPendingUserUnretirement("usr_alice", "os:1000")
-	st.RecordPendingUserUnretirement("usr_bob", "os:1000")
+	st.RecordPendingUserUnretirement(testutil.UserID("alice"), "os:1000")
+	st.RecordPendingUserUnretirement(testutil.UserID("bob"), "os:1000")
 
 	first, _ := st.ConsumePendingUserUnretirements()
 	if len(first) != 2 {
@@ -363,7 +365,7 @@ func TestRecordPendingUserUnretirement_PreservesOrder(t *testing.T) {
 	}
 	defer st.Close()
 
-	users := []string{"usr_alice", "usr_bob", "usr_carol", "usr_dave"}
+	users := []string{testutil.UserID("alice"), testutil.UserID("bob"), testutil.UserID("carol"), "usr_dave"}
 	for _, u := range users {
 		if err := st.RecordPendingUserUnretirement(u, "os:1000"); err != nil {
 			t.Fatalf("record %s: %v", u, err)

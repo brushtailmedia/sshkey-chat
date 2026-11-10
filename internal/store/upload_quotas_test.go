@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func newQuotaTestStore(t *testing.T) *Store {
@@ -43,7 +45,7 @@ func TestQuotas_UsersHasQuotaExemptColumn(t *testing.T) {
 
 func TestQuotas_GetDailyUploadRow_Absent(t *testing.T) {
 	st := newQuotaTestStore(t)
-	bytes, warned, exists, err := st.GetDailyUploadRow("usr_alice", "2026-04-19")
+	bytes, warned, exists, err := st.GetDailyUploadRow(testutil.UserID("alice"), "2026-04-19")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -59,7 +61,7 @@ func TestQuotas_GetDailyUploadRow_Absent(t *testing.T) {
 
 func TestQuotas_Increment_CreatesRow(t *testing.T) {
 	st := newQuotaTestStore(t)
-	total, err := st.IncrementDailyUploadBytes("usr_alice", "2026-04-19", 1000, false)
+	total, err := st.IncrementDailyUploadBytes(testutil.UserID("alice"), "2026-04-19", 1000, false)
 	if err != nil {
 		t.Fatalf("increment: %v", err)
 	}
@@ -67,7 +69,7 @@ func TestQuotas_Increment_CreatesRow(t *testing.T) {
 		t.Errorf("first increment total = %d, want 1000", total)
 	}
 
-	bytes, warned, exists, err := st.GetDailyUploadRow("usr_alice", "2026-04-19")
+	bytes, warned, exists, err := st.GetDailyUploadRow(testutil.UserID("alice"), "2026-04-19")
 	if err != nil {
 		t.Fatalf("read-back: %v", err)
 	}
@@ -84,8 +86,8 @@ func TestQuotas_Increment_CreatesRow(t *testing.T) {
 
 func TestQuotas_Increment_AddsToExisting(t *testing.T) {
 	st := newQuotaTestStore(t)
-	_, _ = st.IncrementDailyUploadBytes("usr_alice", "2026-04-19", 1000, false)
-	total, _ := st.IncrementDailyUploadBytes("usr_alice", "2026-04-19", 500, false)
+	_, _ = st.IncrementDailyUploadBytes(testutil.UserID("alice"), "2026-04-19", 1000, false)
+	total, _ := st.IncrementDailyUploadBytes(testutil.UserID("alice"), "2026-04-19", 500, false)
 	if total != 1500 {
 		t.Errorf("after second increment total = %d, want 1500", total)
 	}
@@ -93,15 +95,15 @@ func TestQuotas_Increment_AddsToExisting(t *testing.T) {
 
 func TestQuotas_Increment_MarkWarnedSticky(t *testing.T) {
 	st := newQuotaTestStore(t)
-	_, _ = st.IncrementDailyUploadBytes("usr_alice", "2026-04-19", 1000, true)
-	_, warned, _, _ := st.GetDailyUploadRow("usr_alice", "2026-04-19")
+	_, _ = st.IncrementDailyUploadBytes(testutil.UserID("alice"), "2026-04-19", 1000, true)
+	_, warned, _, _ := st.GetDailyUploadRow(testutil.UserID("alice"), "2026-04-19")
 	if !warned {
 		t.Error("warn_notified should be true after markWarned=true")
 	}
 
 	// Subsequent increment with markWarned=false must NOT clear it (sticky).
-	_, _ = st.IncrementDailyUploadBytes("usr_alice", "2026-04-19", 500, false)
-	_, warned, _, _ = st.GetDailyUploadRow("usr_alice", "2026-04-19")
+	_, _ = st.IncrementDailyUploadBytes(testutil.UserID("alice"), "2026-04-19", 500, false)
+	_, warned, _, _ = st.GetDailyUploadRow(testutil.UserID("alice"), "2026-04-19")
 	if !warned {
 		t.Error("warn_notified should remain true after markWarned=false (sticky)")
 	}
@@ -109,7 +111,7 @@ func TestQuotas_Increment_MarkWarnedSticky(t *testing.T) {
 
 func TestQuotas_Increment_RejectsNegative(t *testing.T) {
 	st := newQuotaTestStore(t)
-	_, err := st.IncrementDailyUploadBytes("usr_alice", "2026-04-19", -100, false)
+	_, err := st.IncrementDailyUploadBytes(testutil.UserID("alice"), "2026-04-19", -100, false)
 	if err == nil {
 		t.Error("negative bytes should be rejected")
 	}
@@ -140,7 +142,7 @@ func TestQuotas_Increment_ConcurrentNoLostUpdates(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < perRoutine; i++ {
-				if _, err := st.IncrementDailyUploadBytes("usr_alice", "2026-04-19", bytesEach, false); err != nil {
+				if _, err := st.IncrementDailyUploadBytes(testutil.UserID("alice"), "2026-04-19", bytesEach, false); err != nil {
 					t.Errorf("concurrent increment: %v", err)
 					return
 				}
@@ -150,7 +152,7 @@ func TestQuotas_Increment_ConcurrentNoLostUpdates(t *testing.T) {
 	wg.Wait()
 
 	expected := int64(goroutines) * int64(perRoutine) * bytesEach
-	total, _, _, _ := st.GetDailyUploadRow("usr_alice", "2026-04-19")
+	total, _, _, _ := st.GetDailyUploadRow(testutil.UserID("alice"), "2026-04-19")
 	if total != expected {
 		t.Errorf("concurrent total = %d, want %d (lost updates)", total, expected)
 	}
@@ -160,12 +162,12 @@ func TestQuotas_Increment_ConcurrentNoLostUpdates(t *testing.T) {
 
 func TestQuotas_GetRecentUploadDays_NewestFirst(t *testing.T) {
 	st := newQuotaTestStore(t)
-	st.IncrementDailyUploadBytes("usr_alice", "2026-04-15", 100, false)
-	st.IncrementDailyUploadBytes("usr_alice", "2026-04-17", 300, true)
-	st.IncrementDailyUploadBytes("usr_alice", "2026-04-19", 500, false)
-	st.IncrementDailyUploadBytes("usr_alice", "2026-04-16", 200, false)
+	st.IncrementDailyUploadBytes(testutil.UserID("alice"), "2026-04-15", 100, false)
+	st.IncrementDailyUploadBytes(testutil.UserID("alice"), "2026-04-17", 300, true)
+	st.IncrementDailyUploadBytes(testutil.UserID("alice"), "2026-04-19", 500, false)
+	st.IncrementDailyUploadBytes(testutil.UserID("alice"), "2026-04-16", 200, false)
 
-	rows, err := st.GetRecentUploadDays("usr_alice", 3)
+	rows, err := st.GetRecentUploadDays(testutil.UserID("alice"), 3)
 	if err != nil {
 		t.Fatalf("get-recent: %v", err)
 	}
@@ -186,7 +188,7 @@ func TestQuotas_GetRecentUploadDays_NewestFirst(t *testing.T) {
 
 func TestQuotas_GetRecentUploadDays_EmptyForUnknownUser(t *testing.T) {
 	st := newQuotaTestStore(t)
-	rows, err := st.GetRecentUploadDays("usr_ghost", 7)
+	rows, err := st.GetRecentUploadDays(testutil.UserID("ghost"), 7)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -197,8 +199,8 @@ func TestQuotas_GetRecentUploadDays_EmptyForUnknownUser(t *testing.T) {
 
 func TestQuotas_GetRecentUploadDays_ZeroDays(t *testing.T) {
 	st := newQuotaTestStore(t)
-	st.IncrementDailyUploadBytes("usr_alice", "2026-04-19", 100, false)
-	rows, _ := st.GetRecentUploadDays("usr_alice", 0)
+	st.IncrementDailyUploadBytes(testutil.UserID("alice"), "2026-04-19", 100, false)
+	rows, _ := st.GetRecentUploadDays(testutil.UserID("alice"), 0)
 	if len(rows) != 0 {
 		t.Errorf("days=0 should return no rows, got %d", len(rows))
 	}
@@ -208,10 +210,10 @@ func TestQuotas_GetRecentUploadDays_ZeroDays(t *testing.T) {
 
 func TestQuotas_PruneBefore(t *testing.T) {
 	st := newQuotaTestStore(t)
-	st.IncrementDailyUploadBytes("usr_alice", "2026-01-01", 100, false)
-	st.IncrementDailyUploadBytes("usr_alice", "2026-02-01", 200, false)
-	st.IncrementDailyUploadBytes("usr_alice", "2026-03-01", 300, false)
-	st.IncrementDailyUploadBytes("usr_bob", "2026-01-01", 400, false)
+	st.IncrementDailyUploadBytes(testutil.UserID("alice"), "2026-01-01", 100, false)
+	st.IncrementDailyUploadBytes(testutil.UserID("alice"), "2026-02-01", 200, false)
+	st.IncrementDailyUploadBytes(testutil.UserID("alice"), "2026-03-01", 300, false)
+	st.IncrementDailyUploadBytes(testutil.UserID("bob"), "2026-01-01", 400, false)
 
 	n, err := st.PruneDailyUploadsBefore("2026-02-15")
 	if err != nil {
@@ -223,7 +225,7 @@ func TestQuotas_PruneBefore(t *testing.T) {
 	}
 
 	// Newer row should still exist.
-	rows, _ := st.GetRecentUploadDays("usr_alice", 30)
+	rows, _ := st.GetRecentUploadDays(testutil.UserID("alice"), 30)
 	if len(rows) != 1 || rows[0].Date != "2026-03-01" {
 		t.Errorf("after prune, alice rows: %v", rows)
 	}
@@ -245,12 +247,12 @@ func TestQuotas_PruneBefore_Empty(t *testing.T) {
 func TestQuotas_ExemptFlag_RoundTrip(t *testing.T) {
 	st := newQuotaTestStore(t)
 	// Seed user.
-	if err := st.InsertUser("usr_alice", "ssh-ed25519 AAAAfake", "Alice"); err != nil {
+	if err := st.InsertUser(testutil.UserID("alice"), "ssh-ed25519 AAAAfake", "Alice"); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
 
 	// Defaults to not-exempt.
-	exempt, err := st.IsUserQuotaExempt("usr_alice")
+	exempt, err := st.IsUserQuotaExempt(testutil.UserID("alice"))
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -259,19 +261,19 @@ func TestQuotas_ExemptFlag_RoundTrip(t *testing.T) {
 	}
 
 	// Toggle on.
-	if err := st.SetUserQuotaExempt("usr_alice", true); err != nil {
+	if err := st.SetUserQuotaExempt(testutil.UserID("alice"), true); err != nil {
 		t.Fatalf("set on: %v", err)
 	}
-	exempt, _ = st.IsUserQuotaExempt("usr_alice")
+	exempt, _ = st.IsUserQuotaExempt(testutil.UserID("alice"))
 	if !exempt {
 		t.Error("after set --on, IsUserQuotaExempt should return true")
 	}
 
 	// Toggle off.
-	if err := st.SetUserQuotaExempt("usr_alice", false); err != nil {
+	if err := st.SetUserQuotaExempt(testutil.UserID("alice"), false); err != nil {
 		t.Fatalf("set off: %v", err)
 	}
-	exempt, _ = st.IsUserQuotaExempt("usr_alice")
+	exempt, _ = st.IsUserQuotaExempt(testutil.UserID("alice"))
 	if exempt {
 		t.Error("after set --off, IsUserQuotaExempt should return false")
 	}
@@ -281,14 +283,14 @@ func TestQuotas_ExemptFlag_UnknownUser(t *testing.T) {
 	st := newQuotaTestStore(t)
 	// Setting on a missing user should error (so admin gets a clear
 	// "user not found" instead of silent no-op).
-	err := st.SetUserQuotaExempt("usr_ghost", true)
+	err := st.SetUserQuotaExempt(testutil.UserID("ghost"), true)
 	if err == nil {
 		t.Error("setting exempt on unknown user should error")
 	}
 
 	// Reading on a missing user returns (false, nil) — fail-open is
 	// fine because this gates an enforcement check, not authorization.
-	exempt, err := st.IsUserQuotaExempt("usr_ghost")
+	exempt, err := st.IsUserQuotaExempt(testutil.UserID("ghost"))
 	if err != nil {
 		t.Errorf("read on missing user should not error, got: %v", err)
 	}
@@ -301,13 +303,13 @@ func TestQuotas_ExemptFlag_UnknownUser(t *testing.T) {
 
 func TestQuotas_PerUserPerDayIsolation(t *testing.T) {
 	st := newQuotaTestStore(t)
-	st.IncrementDailyUploadBytes("usr_alice", "2026-04-19", 1000, false)
-	st.IncrementDailyUploadBytes("usr_bob", "2026-04-19", 2000, false)
-	st.IncrementDailyUploadBytes("usr_alice", "2026-04-18", 500, false)
+	st.IncrementDailyUploadBytes(testutil.UserID("alice"), "2026-04-19", 1000, false)
+	st.IncrementDailyUploadBytes(testutil.UserID("bob"), "2026-04-19", 2000, false)
+	st.IncrementDailyUploadBytes(testutil.UserID("alice"), "2026-04-18", 500, false)
 
-	a19, _, _, _ := st.GetDailyUploadRow("usr_alice", "2026-04-19")
-	b19, _, _, _ := st.GetDailyUploadRow("usr_bob", "2026-04-19")
-	a18, _, _, _ := st.GetDailyUploadRow("usr_alice", "2026-04-18")
+	a19, _, _, _ := st.GetDailyUploadRow(testutil.UserID("alice"), "2026-04-19")
+	b19, _, _, _ := st.GetDailyUploadRow(testutil.UserID("bob"), "2026-04-19")
+	a18, _, _, _ := st.GetDailyUploadRow(testutil.UserID("alice"), "2026-04-18")
 	if a19 != 1000 || b19 != 2000 || a18 != 500 {
 		t.Errorf("rows leaked across (user, date): a19=%d b19=%d a18=%d", a19, b19, a18)
 	}
@@ -322,7 +324,7 @@ func TestQuotas_SchemaInDataDB(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	defer st.Close()
-	st.IncrementDailyUploadBytes("usr_alice", "2026-04-19", 100, false)
+	st.IncrementDailyUploadBytes(testutil.UserID("alice"), "2026-04-19", 100, false)
 
 	// The data.db file should exist.
 	if _, err := filepath.Abs(filepath.Join(dir, "data", "data.db")); err != nil {

@@ -26,11 +26,13 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // malformedRaw returns a syntactically-broken JSON blob that every
@@ -41,7 +43,7 @@ func malformedRaw() json.RawMessage {
 
 func TestHandleSend_MalformedFrameFiresSignal(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_send_malformed")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_send_malformed")
 	s.handleSend(alice.Client, malformedRaw())
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_send_malformed"); got != 1 {
 		t.Errorf("SignalMalformedFrame on handleSend = %d, want 1", got)
@@ -50,7 +52,7 @@ func TestHandleSend_MalformedFrameFiresSignal(t *testing.T) {
 
 func TestHandleEdit_MalformedFrameFiresSignal(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_edit_malformed")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_edit_malformed")
 	s.handleEdit(alice.Client, malformedRaw())
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_edit_malformed"); got != 1 {
 		t.Errorf("SignalMalformedFrame on handleEdit = %d, want 1", got)
@@ -59,7 +61,7 @@ func TestHandleEdit_MalformedFrameFiresSignal(t *testing.T) {
 
 func TestHandleUploadStart_MalformedFrameFiresSignal(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_upload_malformed")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_upload_malformed")
 	s.handleUploadStart(alice.Client, malformedRaw())
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_upload_malformed"); got != 1 {
 		t.Errorf("SignalMalformedFrame on handleUploadStart = %d, want 1", got)
@@ -68,7 +70,7 @@ func TestHandleUploadStart_MalformedFrameFiresSignal(t *testing.T) {
 
 func TestHandleDownload_MalformedFrameFiresSignal(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_download_malformed")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_download_malformed")
 	s.handleDownload(alice.Client, malformedRaw())
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_download_malformed"); got != 1 {
 		t.Errorf("SignalMalformedFrame on handleDownload = %d, want 1", got)
@@ -77,7 +79,7 @@ func TestHandleDownload_MalformedFrameFiresSignal(t *testing.T) {
 
 func TestHandleEpochRotate_MalformedFrameFiresSignal(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_epoch_malformed")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_epoch_malformed")
 	s.handleEpochRotate(alice.Client, malformedRaw())
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_epoch_malformed"); got != 1 {
 		t.Errorf("SignalMalformedFrame on handleEpochRotate = %d, want 1", got)
@@ -86,7 +88,7 @@ func TestHandleEpochRotate_MalformedFrameFiresSignal(t *testing.T) {
 
 func TestHandleHistory_MalformedFrameFiresSignal(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_history_malformed")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_history_malformed")
 	s.handleHistory(alice.Client, malformedRaw())
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_history_malformed"); got != 1 {
 		t.Errorf("SignalMalformedFrame on handleHistory = %d, want 1", got)
@@ -95,7 +97,7 @@ func TestHandleHistory_MalformedFrameFiresSignal(t *testing.T) {
 
 func TestHandleRevokeDevice_MalformedFrameFiresSignal(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_revoke_malformed")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_revoke_malformed")
 	s.handleRevokeDevice(alice.Client, malformedRaw())
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_revoke_malformed"); got != 1 {
 		t.Errorf("SignalMalformedFrame on handleRevokeDevice = %d, want 1", got)
@@ -104,7 +106,7 @@ func TestHandleRevokeDevice_MalformedFrameFiresSignal(t *testing.T) {
 
 func TestHandleRetireMe_MalformedFrameFiresSignal(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_retire_malformed")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_retire_malformed")
 	s.handleRetireMe(alice.Client, malformedRaw())
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_retire_malformed"); got != 1 {
 		t.Errorf("SignalMalformedFrame on handleRetireMe = %d, want 1", got)
@@ -113,7 +115,7 @@ func TestHandleRetireMe_MalformedFrameFiresSignal(t *testing.T) {
 
 func TestHandleAddToGroup_MalformedFrameFiresSignal(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_addtogroup_malformed")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_addtogroup_malformed")
 	s.handleAddToGroup(alice.Client, malformedRaw())
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_addtogroup_malformed"); got != 1 {
 		t.Errorf("SignalMalformedFrame on handleAddToGroup = %d, want 1", got)
@@ -122,7 +124,7 @@ func TestHandleAddToGroup_MalformedFrameFiresSignal(t *testing.T) {
 
 func TestHandlePushRegister_MalformedFrameFiresSignal(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_push_malformed")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_push_malformed")
 	s.handlePushRegister(alice.Client, malformedRaw())
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_push_malformed"); got != 1 {
 		t.Errorf("SignalMalformedFrame on handlePushRegister = %d, want 1", got)
@@ -134,7 +136,7 @@ func TestHandlePushRegister_BadPlatformFiresSignal(t *testing.T) {
 	// validation (wrong platform value) is also a protocol-level
 	// misbehavior, wires to the same signal.
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_push_badplat")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_push_badplat")
 	raw := json.RawMessage(`{"type":"push_register","platform":"blackberry","device_id":"dev_x","token":"tok"}`)
 	s.handlePushRegister(alice.Client, raw)
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_push_badplat"); got != 1 {
@@ -144,7 +146,7 @@ func TestHandlePushRegister_BadPlatformFiresSignal(t *testing.T) {
 
 func TestHandlePushRegister_ShortTokenRejectedAndNotStored(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_push_short")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_push_short")
 
 	raw := json.RawMessage(`{"type":"push_register","platform":"ios","device_id":"dev_x","token":"abc"}`)
 	s.handlePushRegister(alice.Client, raw)
@@ -168,7 +170,7 @@ func TestHandlePushRegister_ShortTokenRejectedAndNotStored(t *testing.T) {
 		t.Fatalf("error message = %q, want at-least-8 hint", errMsg.Message)
 	}
 
-	tokens, err := s.store.GetActivePushTokens("alice")
+	tokens, err := s.store.GetActivePushTokens(testutil.UserID("alice"))
 	if err != nil {
 		t.Fatalf("GetActivePushTokens: %v", err)
 	}
@@ -179,7 +181,7 @@ func TestHandlePushRegister_ShortTokenRejectedAndNotStored(t *testing.T) {
 
 func TestHandlePushRegister_ValidTokenStoredTrimmed(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_push_ok")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_push_ok")
 
 	raw := json.RawMessage(`{"type":"push_register","platform":"android","device_id":"dev_x","token":"   12345678abcdef   "}`)
 	s.handlePushRegister(alice.Client, raw)
@@ -200,7 +202,7 @@ func TestHandlePushRegister_ValidTokenStoredTrimmed(t *testing.T) {
 		t.Fatalf("unexpected ack: %+v", ack)
 	}
 
-	tokens, err := s.store.GetActivePushTokens("alice")
+	tokens, err := s.store.GetActivePushTokens(testutil.UserID("alice"))
 	if err != nil {
 		t.Fatalf("GetActivePushTokens: %v", err)
 	}
@@ -217,7 +219,7 @@ func TestHandlePushRegister_ValidTokenStoredTrimmed(t *testing.T) {
 
 func TestHandlePushRegister_OversizedTokenRejected(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_push_long")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_push_long")
 
 	token := strings.Repeat("a", maxPushTokenLen+1)
 	rawBytes, err := json.Marshal(protocol.PushRegister{
@@ -251,8 +253,8 @@ func TestHandleCreateDM_SelfFiresSignal(t *testing.T) {
 	// Phase 17 Step 4c: "Cannot create a DM with yourself" is a
 	// protocol-level semantic rejection, wires to SignalMalformedFrame.
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_dm_self")
-	raw := json.RawMessage(`{"type":"create_dm","other":"alice"}`)
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_dm_self")
+	raw := json.RawMessage(fmt.Sprintf("{\"type\":\"create_dm\",\"other\":\"%s\"}", testutil.UserID("alice")))
 	s.handleCreateDM(alice.Client, raw)
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_dm_self"); got != 1 {
 		t.Errorf("SignalMalformedFrame on create_dm with self = %d, want 1", got)
@@ -270,14 +272,14 @@ func TestHandleHistory_EmptyOrAmbiguousContextRejected(t *testing.T) {
 		req       protocol.History
 	}{
 		{"empty", "dev_hist_ctx_empty", protocol.History{Type: "history"}},
-		{"room+group", "dev_hist_ctx_rg", protocol.History{Type: "history", Room: "rm_x", Group: "grp_x"}},
-		{"room+dm", "dev_hist_ctx_rd", protocol.History{Type: "history", Room: "rm_x", DM: "dm_x"}},
-		{"all three", "dev_hist_ctx_all", protocol.History{Type: "history", Room: "rm_x", Group: "grp_x", DM: "dm_x"}},
+		{"room+group", "dev_hist_ctx_rg", protocol.History{Type: "history", Room: testutil.RoomID("rm_x"), Group: testutil.GroupID("grp_x")}},
+		{"room+dm", "dev_hist_ctx_rd", protocol.History{Type: "history", Room: testutil.RoomID("rm_x"), DM: testutil.DMID("x")}},
+		{"all three", "dev_hist_ctx_all", protocol.History{Type: "history", Room: testutil.RoomID("rm_x"), Group: testutil.GroupID("grp_x"), DM: testutil.DMID("x")}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestServer(t)
-			alice := testClientFor("alice", tc.dev)
+			alice := testClientFor(testutil.UserID("alice"), tc.dev)
 			const corrID = "corr_ABCDEFGHIJKLMNOPQRSTU" // valid shape: corr_ + 21 chars
 			req := tc.req
 			req.CorrID = corrID
@@ -317,13 +319,13 @@ func TestHandleHistory_EmptyOrAmbiguousContextRejected(t *testing.T) {
 func TestHandleHistory_StoreUnavailableReturnsInternalError(t *testing.T) {
 	const corrID = "corr_ABCDEFGHIJKLMNOPQRSTU"
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_hist_internal")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_hist_internal")
 
 	origStore := s.store
 	s.store = nil                          // simulate storage unavailable
 	defer func() { s.store = origStore }() // restore before t.Cleanup closes it
 
-	raw, _ := json.Marshal(protocol.History{Type: "history", Room: "room_x", CorrID: corrID})
+	raw, _ := json.Marshal(protocol.History{Type: "history", Room: testutil.RoomID("x"), CorrID: corrID})
 	s.handleHistory(alice.Client, raw)
 
 	msgs := alice.messages()

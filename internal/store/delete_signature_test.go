@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestDeleteMessage_ConcurrentGuard locks the F6 race guard: the destructive
@@ -22,17 +24,17 @@ func TestDeleteMessage_ConcurrentGuard(t *testing.T) {
 	if room == "" {
 		t.Fatal("room seed failed")
 	}
-	if _, err := s.InsertRoomMessage(room, StoredMessage{ID: "m1", Sender: "alice", TS: 100, Payload: "p1"}); err != nil {
+	if _, err := s.InsertRoomMessage(room, StoredMessage{ID: testutil.MsgID("m1"), Sender: testutil.UserID("alice"), TS: 100, Payload: "p1"}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
 	// First delete wins.
-	if _, err := s.DeleteRoomMessageWithResult(room, "m1", "alice", "sig_alice"); err != nil {
+	if _, err := s.DeleteRoomMessageWithResult(room, testutil.MsgID("m1"), testutil.UserID("alice"), "sig_alice"); err != nil {
 		t.Fatalf("first delete: %v", err)
 	}
 
 	// Second delete of the now-tombstoned row must lose: ErrNoRows, no overwrite.
-	if _, err := s.DeleteRoomMessageWithResult(room, "m1", "mallory", "sig_mallory"); !errors.Is(err, sql.ErrNoRows) {
+	if _, err := s.DeleteRoomMessageWithResult(room, testutil.MsgID("m1"), testutil.UserID("mallory"), "sig_mallory"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("second delete err = %v, want sql.ErrNoRows", err)
 	}
 
@@ -44,14 +46,14 @@ func TestDeleteMessage_ConcurrentGuard(t *testing.T) {
 	}
 	var found bool
 	for _, m := range msgs {
-		if m.ID != "m1" {
+		if m.ID != testutil.MsgID("m1") {
 			continue
 		}
 		found = true
 		if !m.Deleted {
 			t.Error("m1 must be a tombstone")
 		}
-		if m.Sender != "alice" {
+		if m.Sender != testutil.UserID("alice") {
 			t.Errorf("first deleter overwritten: deleted_by = %q, want alice", m.Sender)
 		}
 		if m.DeleteSignature != "sig_alice" {

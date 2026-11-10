@@ -1,6 +1,10 @@
 package store
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
+)
 
 // S1 (server_order foundation, history-state-model.md step 8): the server
 // assigns a monotonic, per-conversation server_order on insert, returns the
@@ -22,11 +26,11 @@ func TestServerOrder_MonotonicPerConversationAndTombstonePreserved(t *testing.T)
 	}
 
 	// Two inserts into room A return monotonically increasing server_order.
-	o1, err := s.InsertRoomMessage(roomA, StoredMessage{ID: "m1", Sender: "alice", TS: 100, Payload: "p1"})
+	o1, err := s.InsertRoomMessage(roomA, StoredMessage{ID: testutil.MsgID("m1"), Sender: testutil.UserID("alice"), TS: 100, Payload: "p1"})
 	if err != nil {
 		t.Fatalf("insert m1: %v", err)
 	}
-	o2, err := s.InsertRoomMessage(roomA, StoredMessage{ID: "m2", Sender: "bob", TS: 101, Payload: "p2"})
+	o2, err := s.InsertRoomMessage(roomA, StoredMessage{ID: testutil.MsgID("m2"), Sender: testutil.UserID("bob"), TS: 101, Payload: "p2"})
 	if err != nil {
 		t.Fatalf("insert m2: %v", err)
 	}
@@ -43,14 +47,14 @@ func TestServerOrder_MonotonicPerConversationAndTombstonePreserved(t *testing.T)
 	for _, m := range msgs {
 		got[m.ID] = m.ServerOrder
 	}
-	if got["m1"] != o1 || got["m2"] != o2 {
-		t.Errorf("read-back server_order mismatch: m1=%d (want %d), m2=%d (want %d)", got["m1"], o1, got["m2"], o2)
+	if got[testutil.MsgID("m1")] != o1 || got[testutil.MsgID("m2")] != o2 {
+		t.Errorf("read-back server_order mismatch: m1=%d (want %d), m2=%d (want %d)", got[testutil.MsgID("m1")], o1, got[testutil.MsgID("m2")], o2)
 	}
 
 	// Per-conversation: room B has its own AUTOINCREMENT, so its first message
 	// shares the server_order value of room A's first — proof the counter is
 	// per-conversation, not global (a global counter would give roomB first=3).
-	ob1, err := s.InsertRoomMessage(roomB, StoredMessage{ID: "b1", Sender: "alice", TS: 200, Payload: "pb1"})
+	ob1, err := s.InsertRoomMessage(roomB, StoredMessage{ID: testutil.MsgID("b1"), Sender: testutil.UserID("alice"), TS: 200, Payload: "pb1"})
 	if err != nil {
 		t.Fatalf("insert b1: %v", err)
 	}
@@ -60,7 +64,7 @@ func TestServerOrder_MonotonicPerConversationAndTombstonePreserved(t *testing.T)
 
 	// Soft-delete m1; the tombstone keeps its original server_order and the
 	// delete result exposes that order for live deleted broadcasts.
-	deleted, err := s.DeleteRoomMessageWithResult(roomA, "m1", "bob", "sig_m1_test")
+	deleted, err := s.DeleteRoomMessageWithResult(roomA, testutil.MsgID("m1"), testutil.UserID("bob"), "sig_m1_test")
 	if err != nil {
 		t.Fatalf("delete m1: %v", err)
 	}
@@ -73,7 +77,7 @@ func TestServerOrder_MonotonicPerConversationAndTombstonePreserved(t *testing.T)
 	}
 	var found bool
 	for _, m := range msgs {
-		if m.ID == "m1" {
+		if m.ID == testutil.MsgID("m1") {
 			found = true
 			if !m.Deleted {
 				t.Error("m1 should be a tombstone after delete")

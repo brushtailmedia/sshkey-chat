@@ -1,6 +1,10 @@
 package server
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
+)
 
 // TestUnregisterClient_GuardsAgainstStaleTeardown locks the s.clients teardown
 // guard (docs/planning/open/device-identity-transparency.md §4.5): a
@@ -12,8 +16,8 @@ import "testing"
 func TestUnregisterClient_GuardsAgainstStaleTeardown(t *testing.T) {
 	s := newTestServer(t)
 
-	stale := testClientFor("alice", "dev_race")
-	live := testClientFor("alice", "dev_race") // same device_id — the reconnect race
+	stale := testClientFor(testutil.UserID("alice"), "dev_race")
+	live := testClientFor(testutil.UserID("alice"), "dev_race") // same device_id — the reconnect race
 
 	// Session 1 registers, then session 2 replaces the route (exactly what
 	// registration's map write does on a reconnect with the same device_id).

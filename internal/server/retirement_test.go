@@ -12,6 +12,7 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 const testKeyAlice = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJPpG4hFrxw7JOAppGdh0JrkNDNGxypfmwJxNFCWXnpG test@sshkey"
@@ -65,9 +66,9 @@ enabled = false
 
 	// Seed alice / bob / carol directly via the store API. Strip the
 	// SSH key comment for parity with cmdApprove's normalization.
-	seedTestUser(t, s, "alice", testKeyAlice, "Alice", true, []string{"general", "engineering"})
-	seedTestUser(t, s, "bob", testKeyBob, "Bob", false, []string{"general"})
-	seedTestUser(t, s, "carol", testKeyCarol, "Carol", false, []string{"general"})
+	seedTestUser(t, s, testutil.UserID("alice"), testKeyAlice, "Alice", true, []string{"general", "engineering"})
+	seedTestUser(t, s, testutil.UserID("bob"), testKeyBob, "Bob", false, []string{"general"})
+	seedTestUser(t, s, testutil.UserID("carol"), testKeyCarol, "Carol", false, []string{"general"})
 
 	return s
 }
@@ -105,22 +106,22 @@ func seedTestUser(t *testing.T, s *Server, userID, sshKey, displayName string, a
 
 func TestRetireUser_SetsFields(t *testing.T) {
 	s := newTestServer(t)
-	before := s.store.GetUserByID("bob")
+	before := s.store.GetUserByID(testutil.UserID("bob"))
 	if before == nil {
 		t.Fatal("bob should exist in users.db")
 	}
 	if before.Retired {
 		t.Fatal("bob should not be retired initially")
 	}
-	if len(s.store.GetUserRoomIDs("bob")) == 0 {
+	if len(s.store.GetUserRoomIDs(testutil.UserID("bob"))) == 0 {
 		t.Fatal("bob should have rooms initially")
 	}
 
-	if err := s.retireUser("bob", "self_compromise"); err != nil {
+	if err := s.retireUser(testutil.UserID("bob"), "self_compromise"); err != nil {
 		t.Fatalf("retireUser: %v", err)
 	}
 
-	after := s.store.GetUserByID("bob")
+	after := s.store.GetUserByID(testutil.UserID("bob"))
 	if !after.Retired {
 		t.Error("bob should be retired")
 	}
@@ -134,12 +135,12 @@ func TestRetireUser_SetsFields(t *testing.T) {
 
 func TestRetireUser_PersistsToDB(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.retireUser("bob", "admin"); err != nil {
+	if err := s.retireUser(testutil.UserID("bob"), "admin"); err != nil {
 		t.Fatalf("retire: %v", err)
 	}
 
 	// Verify state in users.db
-	bob := s.store.GetUserByID("bob")
+	bob := s.store.GetUserByID(testutil.UserID("bob"))
 	if bob == nil {
 		t.Fatal("bob should exist in users.db")
 	}
@@ -153,14 +154,14 @@ func TestRetireUser_PersistsToDB(t *testing.T) {
 		t.Error("retired_at should be set")
 	}
 	// IsUserRetired should also return true
-	if !s.store.IsUserRetired("bob") {
+	if !s.store.IsUserRetired(testutil.UserID("bob")) {
 		t.Error("IsUserRetired should return true")
 	}
 }
 
 func TestRetireUser_RejectsNonExistent(t *testing.T) {
 	s := newTestServer(t)
-	err := s.retireUser("nonexistent", "admin")
+	err := s.retireUser(testutil.UserID("nonexistent"), "admin")
 	if err == nil {
 		t.Fatal("expected error for unknown user")
 	}
@@ -168,10 +169,10 @@ func TestRetireUser_RejectsNonExistent(t *testing.T) {
 
 func TestRetireUser_RejectsAlreadyRetired(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.retireUser("bob", "admin"); err != nil {
+	if err := s.retireUser(testutil.UserID("bob"), "admin"); err != nil {
 		t.Fatalf("first retire: %v", err)
 	}
-	err := s.retireUser("bob", "self_compromise")
+	err := s.retireUser(testutil.UserID("bob"), "self_compromise")
 	if err == nil {
 		t.Fatal("expected error when retiring an already-retired user")
 	}
@@ -179,7 +180,7 @@ func TestRetireUser_RejectsAlreadyRetired(t *testing.T) {
 
 func TestFindRetiredMember_NoneRetired(t *testing.T) {
 	s := newTestServer(t)
-	got := s.findRetiredMember([]string{"alice", "bob", "carol"})
+	got := s.findRetiredMember([]string{testutil.UserID("alice"), testutil.UserID("bob"), testutil.UserID("carol")})
 	if got != "" {
 		t.Errorf("expected empty, got %q", got)
 	}
@@ -187,18 +188,18 @@ func TestFindRetiredMember_NoneRetired(t *testing.T) {
 
 func TestFindRetiredMember_FirstMatchReturned(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.retireUser("bob", "admin"); err != nil {
+	if err := s.retireUser(testutil.UserID("bob"), "admin"); err != nil {
 		t.Fatalf("retire: %v", err)
 	}
-	got := s.findRetiredMember([]string{"alice", "bob", "carol"})
-	if got != "bob" {
+	got := s.findRetiredMember([]string{testutil.UserID("alice"), testutil.UserID("bob"), testutil.UserID("carol")})
+	if got != testutil.UserID("bob") {
 		t.Errorf("got %q, want bob", got)
 	}
 }
 
 func TestFindRetiredMember_UnknownUsersIgnored(t *testing.T) {
 	s := newTestServer(t)
-	got := s.findRetiredMember([]string{"nonexistent", "alice"})
+	got := s.findRetiredMember([]string{testutil.UserID("nonexistent"), testutil.UserID("alice")})
 	if got != "" {
 		t.Errorf("unknown user shouldn't match retired, got %q", got)
 	}
@@ -209,15 +210,15 @@ func TestHandleRetirement_ClearsRooms(t *testing.T) {
 	// Bob was seeded into "general" by newTestServer. Use the actual
 	// room ID nanoid, not the display name — handleRetirement dispatches
 	// per-room via performRoomLeave which expects IDs.
-	bobRooms := s.store.GetUserRoomIDs("bob")
+	bobRooms := s.store.GetUserRoomIDs(testutil.UserID("bob"))
 	if len(bobRooms) == 0 {
 		t.Fatal("precondition: bob has rooms")
 	}
 
-	s.handleRetirement("bob", bobRooms, "admin")
+	s.handleRetirement(testutil.UserID("bob"), bobRooms, "admin")
 
 	// Room membership should be cleared in rooms.db
-	if rooms := s.store.GetUserRoomIDs("bob"); len(rooms) != 0 {
+	if rooms := s.store.GetUserRoomIDs(testutil.UserID("bob")); len(rooms) != 0 {
 		t.Errorf("bob should have no rooms after retirement, got %v", rooms)
 	}
 }
@@ -226,16 +227,16 @@ func TestHandleRetirement_RemovesFromGroups(t *testing.T) {
 	s := newTestServer(t)
 
 	// Create a group DM with alice, bob, carol
-	if err := s.store.CreateGroup("group_abc", "alice", []string{"alice", "bob", "carol"}); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("abc"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob"), testutil.UserID("carol")}); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	s.handleRetirement("bob", s.store.GetUserRoomIDs("bob"), "admin")
+	s.handleRetirement(testutil.UserID("bob"), s.store.GetUserRoomIDs(testutil.UserID("bob")), "admin")
 
 	// Group: bob should be removed
-	groupMembers, _ := s.store.GetGroupMembers("group_abc")
+	groupMembers, _ := s.store.GetGroupMembers(testutil.GroupID("abc"))
 	for _, m := range groupMembers {
-		if m == "bob" {
+		if m == testutil.UserID("bob") {
 			t.Error("bob should be removed from group_abc")
 		}
 	}
@@ -248,25 +249,25 @@ func TestHandleRetirement_SetsDMCutoff(t *testing.T) {
 	s := newTestServer(t)
 
 	// Create a 1:1 DM between alice and bob
-	dm, err := s.store.CreateOrGetDirectMessage("dm_ab", "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(testutil.DMID("ab"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
 
-	s.handleRetirement("bob", nil, "admin")
+	s.handleRetirement(testutil.UserID("bob"), nil, "admin")
 
 	// Bob's cutoff should be set (silent leave)
 	dm2, _ := s.store.GetDirectMessage(dm.ID)
 	if dm2 == nil {
 		t.Fatal("DM should still exist after retirement")
 	}
-	bobCutoff := dm2.CutoffFor("bob")
+	bobCutoff := dm2.CutoffFor(testutil.UserID("bob"))
 	if bobCutoff == 0 {
 		t.Error("bob's cutoff should be non-zero after retirement")
 	}
 
 	// Alice's cutoff should be untouched
-	aliceCutoff := dm2.CutoffFor("alice")
+	aliceCutoff := dm2.CutoffFor(testutil.UserID("alice"))
 	if aliceCutoff != 0 {
 		t.Errorf("alice's cutoff should be 0, got %d", aliceCutoff)
 	}
@@ -287,11 +288,11 @@ func TestHandleRetirement_CleansUpDormantDMWhenOtherPartyAlreadyLeft(t *testing.
 	s := newTestServer(t)
 
 	// Alice and Bob have a DM. Alice /leaves at time T1.
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
-	if err := s.store.SetDMLeftAt(dm.ID, "alice", 1000); err != nil {
+	if err := s.store.SetDMLeftAt(dm.ID, testutil.UserID("alice"), 1000); err != nil {
 		t.Fatalf("alice leave: %v", err)
 	}
 
@@ -304,7 +305,7 @@ func TestHandleRetirement_CleansUpDormantDMWhenOtherPartyAlreadyLeft(t *testing.
 	// Now bob retires. Step 5 of handleRetirement sets bob's cutoff AND
 	// calls cleanupDormantDM, which finds both parties have now left and
 	// tears down the row.
-	s.handleRetirement("bob", nil, "admin")
+	s.handleRetirement(testutil.UserID("bob"), nil, "admin")
 
 	gone, _ := s.store.GetDirectMessage(dm.ID)
 	if gone != nil {
@@ -319,12 +320,12 @@ func TestHandleRetirement_CleansUpDormantDMWhenOtherPartyAlreadyLeft(t *testing.
 func TestHandleRetirement_PreservesDMWhenOtherPartyActive(t *testing.T) {
 	s := newTestServer(t)
 
-	dm, err := s.store.CreateOrGetDirectMessage("dm_ab_keep", "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(testutil.DMID("ab_keep"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
 
-	s.handleRetirement("bob", nil, "admin")
+	s.handleRetirement(testutil.UserID("bob"), nil, "admin")
 
 	// Alice is still active in the DM, so the row must survive.
 	stillThere, _ := s.store.GetDirectMessage(dm.ID)
@@ -333,8 +334,8 @@ func TestHandleRetirement_PreservesDMWhenOtherPartyActive(t *testing.T) {
 	}
 	// And alice's left_at should still be zero — retirement only touches
 	// the retiring user's cutoff.
-	if stillThere != nil && stillThere.CutoffFor("alice") != 0 {
-		t.Errorf("alice's cutoff should be untouched, got %d", stillThere.CutoffFor("alice"))
+	if stillThere != nil && stillThere.CutoffFor(testutil.UserID("alice")) != 0 {
+		t.Errorf("alice's cutoff should be untouched, got %d", stillThere.CutoffFor(testutil.UserID("alice")))
 	}
 }
 
@@ -350,17 +351,17 @@ func TestHandleRetirement_BroadcastsUserRetiredReasonToRemainingMembers(t *testi
 	// alice is in "general" with bob and carol per the seed. Use her
 	// connected session to capture the room_event broadcast we expect
 	// when bob retires.
-	bobRooms := s.store.GetUserRoomIDs("bob")
+	bobRooms := s.store.GetUserRoomIDs(testutil.UserID("bob"))
 	if len(bobRooms) == 0 {
 		t.Fatal("precondition: bob has rooms")
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
 
-	s.handleRetirement("bob", bobRooms, "admin")
+	s.handleRetirement(testutil.UserID("bob"), bobRooms, "admin")
 
 	// alice should have received a room_event{leave, user: bob,
 	// reason: user_retired} for each room she shared with bob, plus
@@ -376,7 +377,7 @@ func TestHandleRetirement_BroadcastsUserRetiredReasonToRemainingMembers(t *testi
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			continue
 		}
-		if ev.Type == "room_event" && ev.Event == "leave" && ev.User == "bob" {
+		if ev.Type == "room_event" && ev.Event == "leave" && ev.User == testutil.UserID("bob") {
 			if ev.Reason != "user_retired" {
 				t.Errorf("room_event reason = %q, want user_retired", ev.Reason)
 			}
@@ -392,13 +393,13 @@ func TestHandleRetirement_BroadcastsUserRetiredReasonToRemainingMembers(t *testi
 func TestHandleRetirement_EpochRotationMarked(t *testing.T) {
 	s := newTestServer(t)
 	// Initialize epoch for one of bob's rooms so we have a baseline.
-	bobRooms := s.store.GetUserRoomIDs("bob")
+	bobRooms := s.store.GetUserRoomIDs(testutil.UserID("bob"))
 	if len(bobRooms) == 0 {
 		t.Fatal("precondition: bob has rooms")
 	}
 	s.epochs.getOrCreate(bobRooms[0], 1)
 
-	s.handleRetirement("bob", bobRooms, "admin")
+	s.handleRetirement(testutil.UserID("bob"), bobRooms, "admin")
 
 	// Epoch should still be accessible (retirement marks rotation, doesn't
 	// advance the epoch number — the next sender does that)

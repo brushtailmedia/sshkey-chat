@@ -15,6 +15,7 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // syntheticUserID returns the i-th user ID of production shape ("usr_" +
@@ -22,7 +23,7 @@ import (
 // threshold. Membership tables carry no foreign key to users, so no user
 // rows are needed.
 func syntheticUserID(prefix string, i int) string {
-	return fmt.Sprintf("usr_%s%0*d", prefix, 21-len(prefix), i)
+	return testutil.UserID(fmt.Sprintf("%s-%d", prefix, i))
 }
 
 func syntheticUserIDs(prefix string, n int) []string {
@@ -89,8 +90,8 @@ func TestHandleTyping_RoomOverThreshold_PolicySuppressed(t *testing.T) {
 	genID := s.store.RoomDisplayNameToID("general") // alice, bob, carol
 	fillRoom(t, s, genID, 101)
 
-	alice := testClientFor("alice", "dev_alice_typing_over")
-	bob := testClientFor("bob", "dev_bob_typing_over")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_typing_over")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_typing_over")
 	connect(s, alice, bob)
 
 	raw, _ := json.Marshal(protocol.Typing{Type: "typing", Room: genID})
@@ -117,14 +118,14 @@ func TestHandleTyping_RoomAtThreshold_Relays(t *testing.T) {
 	genID := s.store.RoomDisplayNameToID("general")
 	fillRoom(t, s, genID, 100)
 
-	alice := testClientFor("alice", "dev_alice_typing_at")
-	bob := testClientFor("bob", "dev_bob_typing_at")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_typing_at")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_typing_at")
 	connect(s, alice, bob)
 
 	raw, _ := json.Marshal(protocol.Typing{Type: "typing", Room: genID})
 	s.handleTyping(alice.Client, raw)
 
-	assertOneTypingMsg(t, bob, "alice", genID, "", "")
+	assertOneTypingMsg(t, bob, testutil.UserID("alice"), genID, "", "")
 	assertTypingTimerCount(t, s, 1)
 	if got := s.counters.Get(counters.SignalTypingPolicySuppressed, alice.DeviceID); got != 0 {
 		t.Errorf("SignalTypingPolicySuppressed = %d, want 0 at exactly the limit", got)
@@ -137,8 +138,8 @@ func TestHandleTyping_RoomKnobZero_Suppressed(t *testing.T) {
 	setRoomTypingMax(s, 0)
 	genID := s.store.RoomDisplayNameToID("general") // 3 members
 
-	alice := testClientFor("alice", "dev_alice_typing_off")
-	bob := testClientFor("bob", "dev_bob_typing_off")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_typing_off")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_typing_off")
 	connect(s, alice, bob)
 
 	raw, _ := json.Marshal(protocol.Typing{Type: "typing", Room: genID})
@@ -160,8 +161,8 @@ func TestHandleTyping_RoomPolicyIsHotReloadable(t *testing.T) {
 	t.Cleanup(func() { stopTypingTimers(s) })
 	genID := s.store.RoomDisplayNameToID("general") // 3 members
 
-	alice := testClientFor("alice", "dev_alice_typing_reload")
-	bob := testClientFor("bob", "dev_bob_typing_reload")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_typing_reload")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_typing_reload")
 	connect(s, alice, bob)
 	raw, _ := json.Marshal(protocol.Typing{Type: "typing", Room: genID})
 
@@ -172,7 +173,7 @@ func TestHandleTyping_RoomPolicyIsHotReloadable(t *testing.T) {
 	}
 	setRoomTypingMax(s, 3)
 	s.handleTyping(alice.Client, raw)
-	assertOneTypingMsg(t, bob, "alice", genID, "", "")
+	assertOneTypingMsg(t, bob, testutil.UserID("alice"), genID, "", "")
 }
 
 func TestHandleTyping_GroupAt100_Relays(t *testing.T) {
@@ -180,23 +181,23 @@ func TestHandleTyping_GroupAt100_Relays(t *testing.T) {
 	// the cap relays typing to its connected members.
 	s := newTestServer(t)
 	t.Cleanup(func() { stopTypingTimers(s) })
-	members := append([]string{"alice", "bob"}, syntheticUserIDs("grp", 98)...)
+	members := append([]string{testutil.UserID("alice"), testutil.UserID("bob")}, syntheticUserIDs("grp", 98)...)
 	groupID := store.GenerateID("group_")
-	if err := s.store.CreateGroup(groupID, "alice", members, "Big"); err != nil {
+	if err := s.store.CreateGroup(groupID, testutil.UserID("alice"), members, "Big"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 	if got, _ := s.store.GetGroupMembers(groupID); len(got) != 100 {
 		t.Fatalf("group has %d members, want 100", len(got))
 	}
 
-	alice := testClientFor("alice", "dev_alice_typing_grp100")
-	bob := testClientFor("bob", "dev_bob_typing_grp100")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_typing_grp100")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_typing_grp100")
 	connect(s, alice, bob)
 
 	raw, _ := json.Marshal(protocol.Typing{Type: "typing", Group: groupID})
 	s.handleTyping(alice.Client, raw)
 
-	assertOneTypingMsg(t, bob, "alice", "", groupID, "")
+	assertOneTypingMsg(t, bob, testutil.UserID("alice"), "", groupID, "")
 	assertTypingTimerCount(t, s, 1)
 	if got := s.counters.Get(counters.SignalTypingPolicySuppressed, alice.DeviceID); got != 0 {
 		t.Errorf("SignalTypingPolicySuppressed = %d, want 0 for a group", got)
@@ -210,26 +211,26 @@ func TestHandleTyping_KnobZero_GroupAndDMUnaffected(t *testing.T) {
 	setRoomTypingMax(s, 0)
 
 	groupID := store.GenerateID("group_")
-	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "Pair"); err != nil {
+	if err := s.store.CreateGroup(groupID, testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Pair"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create dm: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_typing_knob0")
-	bob := testClientFor("bob", "dev_bob_typing_knob0")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_typing_knob0")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_typing_knob0")
 	connect(s, alice, bob)
 
 	raw, _ := json.Marshal(protocol.Typing{Type: "typing", Group: groupID})
 	s.handleTyping(alice.Client, raw)
-	assertOneTypingMsg(t, bob, "alice", "", groupID, "")
+	assertOneTypingMsg(t, bob, testutil.UserID("alice"), "", groupID, "")
 
 	bob.buf.Reset()
 	raw, _ = json.Marshal(protocol.Typing{Type: "typing", DM: dm.ID})
 	s.handleTyping(alice.Client, raw)
-	assertOneTypingMsg(t, bob, "alice", "", "", dm.ID)
+	assertOneTypingMsg(t, bob, testutil.UserID("alice"), "", "", dm.ID)
 
 	assertTypingTimerCount(t, s, 2)
 	if got := s.counters.Get(counters.SignalTypingPolicySuppressed, alice.DeviceID); got != 0 {

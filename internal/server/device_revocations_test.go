@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // noopChannel is a minimal ssh.Channel stub for testing the kick
@@ -65,18 +66,18 @@ func TestProcessPendingDeviceRevocations_HappyPath(t *testing.T) {
 	s := newTestServer(t)
 
 	// Register a device for alice and revoke it via the CLI side.
-	if _, _, err := s.store.UpsertDevice("alice", "dev_laptop"); err != nil {
+	if _, _, err := s.store.UpsertDevice(testutil.UserID("alice"), "dev_laptop"); err != nil {
 		t.Fatalf("upsert device: %v", err)
 	}
-	if err := s.store.RevokeDevice("alice", "dev_laptop", "stolen"); err != nil {
+	if err := s.store.RevokeDevice(testutil.UserID("alice"), "dev_laptop", "stolen"); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	if err := s.store.RecordPendingDeviceRevocation("alice", "dev_laptop", "stolen", "os:1000"); err != nil {
+	if err := s.store.RecordPendingDeviceRevocation(testutil.UserID("alice"), "dev_laptop", "stolen", "os:1000"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
 	// Connect alice's laptop session so we can verify the kick fires.
-	cc, ch := testClientWithChannel("alice", "dev_laptop")
+	cc, ch := testClientWithChannel(testutil.UserID("alice"), "dev_laptop")
 	s.mu.Lock()
 	s.clients["dev_laptop"] = cc.Client
 	s.mu.Unlock()
@@ -122,7 +123,7 @@ func TestProcessPendingDeviceRevocations_HappyPath(t *testing.T) {
 func TestProcessPendingDeviceRevocations_NoActiveSessionStillSucceeds(t *testing.T) {
 	s := newTestServer(t)
 
-	if err := s.store.RecordPendingDeviceRevocation("alice", "dev_offline", "admin_action", "os:1000"); err != nil {
+	if err := s.store.RecordPendingDeviceRevocation(testutil.UserID("alice"), "dev_offline", "admin_action", "os:1000"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -143,15 +144,15 @@ func TestProcessPendingDeviceRevocations_KickIsTargeted(t *testing.T) {
 	s := newTestServer(t)
 
 	// alice has two devices, bob has one. Revoke alice's dev_a.
-	s.store.UpsertDevice("alice", "dev_a")
-	s.store.UpsertDevice("alice", "dev_b")
-	s.store.UpsertDevice("bob", "dev_b") // same device-id string, different user
-	s.store.RevokeDevice("alice", "dev_a", "test")
-	s.store.RecordPendingDeviceRevocation("alice", "dev_a", "test", "os:1000")
+	s.store.UpsertDevice(testutil.UserID("alice"), "dev_a")
+	s.store.UpsertDevice(testutil.UserID("alice"), "dev_b")
+	s.store.UpsertDevice(testutil.UserID("bob"), "dev_b") // same device-id string, different user
+	s.store.RevokeDevice(testutil.UserID("alice"), "dev_a", "test")
+	s.store.RecordPendingDeviceRevocation(testutil.UserID("alice"), "dev_a", "test", "os:1000")
 
-	aliceA, chA := testClientWithChannel("alice", "dev_a")
-	aliceB, chB := testClientWithChannel("alice", "dev_b")
-	bobB, chBobB := testClientWithChannel("bob", "dev_b")
+	aliceA, chA := testClientWithChannel(testutil.UserID("alice"), "dev_a")
+	aliceB, chB := testClientWithChannel(testutil.UserID("alice"), "dev_b")
+	bobB, chBobB := testClientWithChannel(testutil.UserID("bob"), "dev_b")
 
 	s.mu.Lock()
 	s.clients["alice_a_session"] = aliceA.Client
@@ -189,7 +190,7 @@ func TestProcessPendingDeviceRevocations_KickIsTargeted(t *testing.T) {
 func TestProcessPendingDeviceRevocations_AuditCreditsOperator(t *testing.T) {
 	s := newTestServer(t)
 
-	s.store.RecordPendingDeviceRevocation("alice", "dev_x", "stolen", "os:5678")
+	s.store.RecordPendingDeviceRevocation(testutil.UserID("alice"), "dev_x", "stolen", testutil.UserID("os:5678"))
 	s.processPendingDeviceRevocations()
 
 	auditBytes, err := readAuditLog(s)
@@ -199,9 +200,9 @@ func TestProcessPendingDeviceRevocations_AuditCreditsOperator(t *testing.T) {
 	auditContent := string(auditBytes)
 
 	for _, want := range []string{
-		"os:5678",
+		testutil.UserID("os:5678"),
 		"revoke-device",
-		"user=alice",
+		"user=" + testutil.UserID("alice"),
 		"device=dev_x",
 		"reason=stolen",
 	} {
@@ -214,9 +215,9 @@ func TestProcessPendingDeviceRevocations_AuditCreditsOperator(t *testing.T) {
 func TestProcessPendingDeviceRevocations_MultipleRowsInOneTick(t *testing.T) {
 	s := newTestServer(t)
 
-	s.store.RecordPendingDeviceRevocation("alice", "dev_a", "test", "os:1000")
-	s.store.RecordPendingDeviceRevocation("alice", "dev_b", "test", "os:1000")
-	s.store.RecordPendingDeviceRevocation("bob", "dev_x", "test", "os:1000")
+	s.store.RecordPendingDeviceRevocation(testutil.UserID("alice"), "dev_a", "test", "os:1000")
+	s.store.RecordPendingDeviceRevocation(testutil.UserID("alice"), "dev_b", "test", "os:1000")
+	s.store.RecordPendingDeviceRevocation(testutil.UserID("bob"), "dev_x", "test", "os:1000")
 
 	s.processPendingDeviceRevocations()
 

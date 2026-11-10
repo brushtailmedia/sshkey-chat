@@ -14,6 +14,8 @@ package store
 
 import (
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestRecordUserLeftRoom_HappyPath(t *testing.T) {
@@ -24,7 +26,7 @@ func TestRecordUserLeftRoom_HappyPath(t *testing.T) {
 	}
 	defer st.Close()
 
-	id, err := st.RecordUserLeftRoom("usr_alice", "rm_general", "removed", "os:1000")
+	id, err := st.RecordUserLeftRoom(testutil.UserID("alice"), testutil.RoomID("rm_general"), "removed", "os:1000")
 	if err != nil {
 		t.Fatalf("record: %v", err)
 	}
@@ -44,14 +46,14 @@ func TestGetUserLeftRoomsCatchup_ReturnsMostRecentPerRoom(t *testing.T) {
 	}
 	defer st.Close()
 
-	if _, err := st.RecordUserLeftRoom("usr_alice", "rm_a", "", "usr_alice"); err != nil {
+	if _, err := st.RecordUserLeftRoom(testutil.UserID("alice"), testutil.RoomID("rm_a"), "", testutil.UserID("alice")); err != nil {
 		t.Fatalf("first record: %v", err)
 	}
-	if _, err := st.RecordUserLeftRoom("usr_alice", "rm_a", "removed", "admin"); err != nil {
+	if _, err := st.RecordUserLeftRoom(testutil.UserID("alice"), testutil.RoomID("rm_a"), "removed", testutil.UserID("admin")); err != nil {
 		t.Fatalf("second record: %v", err)
 	}
 
-	got, err := st.GetUserLeftRoomsCatchup("usr_alice")
+	got, err := st.GetUserLeftRoomsCatchup(testutil.UserID("alice"))
 	if err != nil {
 		t.Fatalf("catchup: %v", err)
 	}
@@ -70,15 +72,15 @@ func TestDeleteUserLeftRoomRows_CleansUpOnRejoin(t *testing.T) {
 	}
 	defer st.Close()
 
-	if _, err := st.RecordUserLeftRoom("usr_alice", "rm_a", "removed", "admin"); err != nil {
+	if _, err := st.RecordUserLeftRoom(testutil.UserID("alice"), testutil.RoomID("rm_a"), "removed", testutil.UserID("admin")); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
-	if err := st.DeleteUserLeftRoomRows("usr_alice", "rm_a"); err != nil {
+	if err := st.DeleteUserLeftRoomRows(testutil.UserID("alice"), testutil.RoomID("rm_a")); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
-	got, _ := st.GetUserLeftRoomsCatchup("usr_alice")
+	got, _ := st.GetUserLeftRoomsCatchup(testutil.UserID("alice"))
 	if len(got) != 0 {
 		t.Errorf("want 0 rows after delete, got %d", len(got))
 	}
@@ -94,7 +96,7 @@ func TestPruneOldUserLeftRooms_RespectsRetention(t *testing.T) {
 	}
 	defer st.Close()
 
-	if _, err := st.RecordUserLeftRoom("usr_alice", "rm_a", "", "usr_alice"); err != nil {
+	if _, err := st.RecordUserLeftRoom(testutil.UserID("alice"), testutil.RoomID("rm_a"), "", testutil.UserID("alice")); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
@@ -119,32 +121,32 @@ func TestHasUserLeftRoom(t *testing.T) {
 	defer st.Close()
 
 	// No history → (false, nil), not an error.
-	if left, err := st.HasUserLeftRoom("usr_alice", "rm_a"); err != nil || left {
+	if left, err := st.HasUserLeftRoom(testutil.UserID("alice"), testutil.RoomID("rm_a")); err != nil || left {
 		t.Fatalf("no history want (false,nil), got (%v,%v)", left, err)
 	}
 
-	if _, err := st.RecordUserLeftRoom("usr_alice", "rm_a", "", "usr_alice"); err != nil {
+	if _, err := st.RecordUserLeftRoom(testutil.UserID("alice"), testutil.RoomID("rm_a"), "", testutil.UserID("alice")); err != nil {
 		t.Fatalf("record leave: %v", err)
 	}
 
 	// After a recorded leave → (true, nil).
-	if left, err := st.HasUserLeftRoom("usr_alice", "rm_a"); err != nil || !left {
+	if left, err := st.HasUserLeftRoom(testutil.UserID("alice"), testutil.RoomID("rm_a")); err != nil || !left {
 		t.Fatalf("after leave want (true,nil), got (%v,%v)", left, err)
 	}
 
 	// Scoped to (user, room).
-	if left, _ := st.HasUserLeftRoom("usr_bob", "rm_a"); left {
+	if left, _ := st.HasUserLeftRoom(testutil.UserID("bob"), testutil.RoomID("rm_a")); left {
 		t.Error("should be scoped to user")
 	}
-	if left, _ := st.HasUserLeftRoom("usr_alice", "rm_b"); left {
+	if left, _ := st.HasUserLeftRoom(testutil.UserID("alice"), testutil.RoomID("rm_b")); left {
 		t.Error("should be scoped to room")
 	}
 
 	// Duplicate leave rows don't change the boolean.
-	if _, err := st.RecordUserLeftRoom("usr_alice", "rm_a", "removed", "admin"); err != nil {
+	if _, err := st.RecordUserLeftRoom(testutil.UserID("alice"), testutil.RoomID("rm_a"), "removed", testutil.UserID("admin")); err != nil {
 		t.Fatalf("second leave: %v", err)
 	}
-	if left, err := st.HasUserLeftRoom("usr_alice", "rm_a"); err != nil || !left {
+	if left, err := st.HasUserLeftRoom(testutil.UserID("alice"), testutil.RoomID("rm_a")); err != nil || !left {
 		t.Fatalf("duplicate rows still (true,nil), got (%v,%v)", left, err)
 	}
 }

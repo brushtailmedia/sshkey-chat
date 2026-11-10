@@ -6,6 +6,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // S3 (history-state-model.md): handleHistory emits the history_result wire batch
@@ -65,22 +66,22 @@ func TestHandleHistory_RoomOldestFirstWireAndAdjacentTrim(t *testing.T) {
 	// first_epoch=0 so the epoch filter is skipped. joined_at defaults to now, so
 	// use far-future timestamps that survive the first_seen (m.TS < joined_at)
 	// filter — the test cares about server_order ordering, not TS semantics.
-	if err := s.store.AddRoomMember(generalID, "alice", 0); err != nil {
+	if err := s.store.AddRoomMember(generalID, testutil.UserID("alice"), 0); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
 	const baseTS = int64(4000000000) // year ~2096, always > joined_at
-	for i, id := range []string{"m1", "m2", "m3", "m4", "m5"} {
-		if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{ID: id, Sender: "alice", TS: baseTS + int64(i), Payload: "p"}); err != nil {
+	for i, id := range []string{testutil.MsgID("m1"), testutil.MsgID("m2"), testutil.MsgID("m3"), "m4", testutil.MsgID("m5")} {
+		if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{ID: id, Sender: testutil.UserID("alice"), TS: baseTS + int64(i), Payload: "p"}); err != nil {
 			t.Fatalf("insert %s: %v", id, err)
 		}
 	}
 
 	// Full page before m5: oldest-first wire [m1 m2 m3 m4], has_more=false.
-	full := testClientFor("alice", "dev_alice_hist_full")
-	raw, _ := json.Marshal(protocol.History{Type: "history", Room: generalID, Before: "m5", Limit: 10})
+	full := testClientFor(testutil.UserID("alice"), "dev_alice_hist_full")
+	raw, _ := json.Marshal(protocol.History{Type: "history", Room: generalID, Before: testutil.MsgID("m5"), Limit: 10})
 	s.handleHistory(full.Client, raw)
 	hr := lastHistoryResult(t, full)
-	if got := historyWireIDs(t, hr); !eqIDs(got, []string{"m1", "m2", "m3", "m4"}) {
+	if got := historyWireIDs(t, hr); !eqIDs(got, []string{testutil.MsgID("m1"), testutil.MsgID("m2"), testutil.MsgID("m3"), "m4"}) {
 		t.Fatalf("full wire order = %v, want [m1 m2 m3 m4] (oldest-first)", got)
 	}
 	if hr.HasMore {
@@ -91,11 +92,11 @@ func TestHandleHistory_RoomOldestFirstWireAndAdjacentTrim(t *testing.T) {
 	// has_more=true. Locks the far-end trim — with oldest-first helpers the +1
 	// lookahead is dropped from the FRONT, so the page stays adjacent to the
 	// cursor rather than collapsing to the oldest rows [m1 m2].
-	paged := testClientFor("alice", "dev_alice_hist_paged")
-	raw2, _ := json.Marshal(protocol.History{Type: "history", Room: generalID, Before: "m5", Limit: 2})
+	paged := testClientFor(testutil.UserID("alice"), "dev_alice_hist_paged")
+	raw2, _ := json.Marshal(protocol.History{Type: "history", Room: generalID, Before: testutil.MsgID("m5"), Limit: 2})
 	s.handleHistory(paged.Client, raw2)
 	hr2 := lastHistoryResult(t, paged)
-	if got := historyWireIDs(t, hr2); !eqIDs(got, []string{"m3", "m4"}) {
+	if got := historyWireIDs(t, hr2); !eqIDs(got, []string{testutil.MsgID("m3"), "m4"}) {
 		t.Fatalf("paged wire order = %v, want [m3 m4] (adjacent page, oldest-first)", got)
 	}
 	if !hr2.HasMore {
@@ -129,12 +130,12 @@ func firstHistoryError(t *testing.T, cc *captureClient) protocol.Error {
 func TestHandleHistory_InvalidCursorIsCorrelated(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
-	if err := s.store.AddRoomMember(generalID, "alice", 0); err != nil {
+	if err := s.store.AddRoomMember(generalID, testutil.UserID("alice"), 0); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
 	const baseTS = int64(4000000000)
-	for i, id := range []string{"m1", "m2"} {
-		if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{ID: id, Sender: "alice", TS: baseTS + int64(i), Payload: "p"}); err != nil {
+	for i, id := range []string{testutil.MsgID("m1"), testutil.MsgID("m2")} {
+		if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{ID: id, Sender: testutil.UserID("alice"), TS: baseTS + int64(i), Payload: "p"}); err != nil {
 			t.Fatalf("insert %s: %v", id, err)
 		}
 	}
@@ -144,11 +145,11 @@ func TestHandleHistory_InvalidCursorIsCorrelated(t *testing.T) {
 		name, before, corrID string
 	}{
 		{"empty before", "", "corr_AAAAAAAAAAAAAAAAAAAAA"},
-		{"unknown before", "msg_does_not_exist", "corr_BBBBBBBBBBBBBBBBBBBBB"},
+		{"unknown before", testutil.MsgID("does_not_exist"), "corr_BBBBBBBBBBBBBBBBBBBBB"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cc := testClientFor("alice", "dev_alice_badcursor_"+tc.name)
+			cc := testClientFor(testutil.UserID("alice"), "dev_alice_badcursor_"+tc.name)
 			raw, _ := json.Marshal(protocol.History{Type: "history", Room: generalID, Before: tc.before, Limit: 10, CorrID: tc.corrID})
 			s.handleHistory(cc.Client, raw)
 

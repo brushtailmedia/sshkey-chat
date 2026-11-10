@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestAuthenticateKey_ApproveRoundTrip locks the store↔auth key-normalization
@@ -50,7 +52,7 @@ func TestAuthenticateKey_ApproveRoundTrip(t *testing.T) {
 			// key + optional comment/whitespace). InsertUser normalizes it the
 			// same way cmdApprove does (strings.Fields → "type base64").
 			pasted := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub))) + tc.suffix
-			uid := fmt.Sprintf("usr_rt_%d", i)
+			uid := testutil.UserID(fmt.Sprintf("rt_%d", i))
 			if err := s.store.InsertUser(uid, pasted, fmt.Sprintf("RoundTrip%d", i)); err != nil {
 				t.Fatalf("InsertUser: %v", err)
 			}

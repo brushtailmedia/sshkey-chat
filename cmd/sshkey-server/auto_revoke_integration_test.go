@@ -114,7 +114,7 @@ func TestAutoRevoke_PerSignalThresholdDouble_RevokesKicksAndRestore(t *testing.T
 			e.srv.ProcessAutoRevokeForTesting()
 			e.srv.ProcessPendingDeviceRevocationsForTesting()
 
-			revoked, err := e.srv.Store().IsDeviceRevoked("usr_alice_test", deviceID)
+			revoked, err := e.srv.Store().IsDeviceRevoked(testutil.UserID("alice_test"), deviceID)
 			if err != nil {
 				t.Fatalf("IsDeviceRevoked: %v", err)
 			}
@@ -124,10 +124,10 @@ func TestAutoRevoke_PerSignalThresholdDouble_RevokesKicksAndRestore(t *testing.T
 
 			waitForClientDisconnect(t, alice, 3*time.Second)
 
-			if err := e.srv.Store().RestoreDevice("usr_alice_test", deviceID); err != nil {
+			if err := e.srv.Store().RestoreDevice(testutil.UserID("alice_test"), deviceID); err != nil {
 				t.Fatalf("restore device: %v", err)
 			}
-			revoked, err = e.srv.Store().IsDeviceRevoked("usr_alice_test", deviceID)
+			revoked, err = e.srv.Store().IsDeviceRevoked(testutil.UserID("alice_test"), deviceID)
 			if err != nil {
 				t.Fatalf("IsDeviceRevoked after restore: %v", err)
 			}
@@ -161,7 +161,7 @@ func TestAutoRevoke_PerSignalSubThreshold_NoRevocation(t *testing.T) {
 			e.srv.ProcessAutoRevokeForTesting()
 			e.srv.ProcessPendingDeviceRevocationsForTesting()
 
-			revoked, err := e.srv.Store().IsDeviceRevoked("usr_alice_test", deviceID)
+			revoked, err := e.srv.Store().IsDeviceRevoked(testutil.UserID("alice_test"), deviceID)
 			if err != nil {
 				t.Fatalf("IsDeviceRevoked: %v", err)
 			}
@@ -185,7 +185,7 @@ func TestAutoRevoke_AdminRecoveryEndToEnd(t *testing.T) {
 		cfg.Server.Server.AutoRevoke.Enabled = true
 		cfg.Server.Server.AutoRevoke.Thresholds = signalRule(counters.SignalMalformedFrame, 1)
 	})
-	if err := e.srv.Store().SetAdmin("usr_alice_test", true); err != nil {
+	if err := e.srv.Store().SetAdmin(testutil.UserID("alice_test"), true); err != nil {
 		t.Fatalf("set admin: %v", err)
 	}
 
@@ -196,7 +196,7 @@ func TestAutoRevoke_AdminRecoveryEndToEnd(t *testing.T) {
 	e.srv.ProcessAutoRevokeForTesting()
 	e.srv.ProcessPendingDeviceRevocationsForTesting()
 
-	revoked, err := e.srv.Store().IsDeviceRevoked("usr_alice_test", deviceID)
+	revoked, err := e.srv.Store().IsDeviceRevoked(testutil.UserID("alice_test"), deviceID)
 	if err != nil {
 		t.Fatalf("IsDeviceRevoked: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestAutoRevoke_AdminRecoveryEndToEnd(t *testing.T) {
 
 	waitForClientDisconnect(t, alice, 3*time.Second)
 
-	if err := e.srv.Store().RestoreDevice("usr_alice_test", deviceID); err != nil {
+	if err := e.srv.Store().RestoreDevice(testutil.UserID("alice_test"), deviceID); err != nil {
 		t.Fatalf("restore admin device: %v", err)
 	}
 
@@ -313,15 +313,15 @@ func TestAutoRevoke_LaunchGateRepresentativeFlow_NoMisbehaviorSignals(t *testing
 	}
 
 	groupID := store.GenerateID("group_")
-	if err := e.srv.Store().CreateGroup(groupID, "usr_alice_test", []string{"usr_alice_test", "usr_bob_test"}, "Launch Gate Group"); err != nil {
+	if err := e.srv.Store().CreateGroup(groupID, testutil.UserID("alice_test"), []string{testutil.UserID("alice_test"), testutil.UserID("bob_test")}, "Launch Gate Group"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 	if err := alice.enc.Encode(protocol.SendGroup{
 		Type:  "send_group",
 		Group: groupID,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": testutil.WrappedKey("wg_alice"),
-			"usr_bob_test":   testutil.WrappedKey("wg_bob"),
+			testutil.UserID("alice_test"): testutil.WrappedKey("wg_alice"),
+			testutil.UserID("bob_test"):   testutil.WrappedKey("wg_bob"),
 		},
 		Payload:   "group_payload",
 		Signature: "group_sig",
@@ -344,8 +344,8 @@ func TestAutoRevoke_LaunchGateRepresentativeFlow_NoMisbehaviorSignals(t *testing
 		ID:    groupMsg.ID,
 		Group: groupID,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": testutil.WrappedKey("wg_alice_e"),
-			"usr_bob_test":   testutil.WrappedKey("wg_bob_e"),
+			testutil.UserID("alice_test"): testutil.WrappedKey("wg_alice_e"),
+			testutil.UserID("bob_test"):   testutil.WrappedKey("wg_bob_e"),
 		},
 		Payload:   "group_payload_edit",
 		Signature: "group_sig_edit",
@@ -361,7 +361,7 @@ func TestAutoRevoke_LaunchGateRepresentativeFlow_NoMisbehaviorSignals(t *testing
 
 	if err := alice.enc.Encode(protocol.CreateDM{
 		Type:  "create_dm",
-		Other: "usr_bob_test",
+		Other: testutil.UserID("bob_test"),
 	}); err != nil {
 		t.Fatalf("create_dm: %v", err)
 	}
@@ -384,8 +384,8 @@ func TestAutoRevoke_LaunchGateRepresentativeFlow_NoMisbehaviorSignals(t *testing
 		Type: "send_dm",
 		DM:   createdDM.DM,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": testutil.WrappedKey("wdm_alice"),
-			"usr_bob_test":   testutil.WrappedKey("wdm_bob"),
+			testutil.UserID("alice_test"): testutil.WrappedKey("wdm_alice"),
+			testutil.UserID("bob_test"):   testutil.WrappedKey("wdm_bob"),
 		},
 		Payload:   "dm_payload",
 		Signature: "dm_sig",
@@ -409,8 +409,8 @@ func TestAutoRevoke_LaunchGateRepresentativeFlow_NoMisbehaviorSignals(t *testing
 		ID:   dmMsg.ID,
 		DM:   createdDM.DM,
 		WrappedKeys: map[string]string{
-			"usr_alice_test": testutil.WrappedKey("wdm_alice_e"),
-			"usr_bob_test":   testutil.WrappedKey("wdm_bob_e"),
+			testutil.UserID("alice_test"): testutil.WrappedKey("wdm_alice_e"),
+			testutil.UserID("bob_test"):   testutil.WrappedKey("wdm_bob_e"),
 		},
 		Payload:   "dm_payload_edit",
 		Signature: "dm_sig_edit",
@@ -534,7 +534,7 @@ func TestAutoRevoke_PerSignalThresholdDouble_DeviceReasonContainsSignalName(t *t
 
 			db := e.srv.Store().DataDB()
 			var reason string
-			if err := db.QueryRow(`SELECT reason FROM revoked_devices WHERE user = ? AND device_id = ?`, "usr_alice_test", deviceID).Scan(&reason); err != nil {
+			if err := db.QueryRow(`SELECT reason FROM revoked_devices WHERE user = ? AND device_id = ?`, testutil.UserID("alice_test"), deviceID).Scan(&reason); err != nil {
 				t.Fatalf("read revoked reason: %v", err)
 			}
 			if !strings.Contains(reason, "Automatic revocation:") {

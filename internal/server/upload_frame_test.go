@@ -33,6 +33,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // bufferedChannel is a minimal ssh.Channel implementation that reads
@@ -85,16 +86,16 @@ func TestFailUpload_RemovesPendingEntryAndFile(t *testing.T) {
 		t.Fatalf("write seed file: %v", err)
 	}
 	s.files.mu.Lock()
-	s.files.uploads["up_test"] = &pendingUpload{uploadID: "up_test"}
+	s.files.uploads[testutil.UploadID("test")] = &pendingUpload{uploadID: testutil.UploadID("test")}
 	s.files.mu.Unlock()
 
-	s.failUpload("up_test", filePath)
+	s.failUpload(testutil.UploadID("test"), filePath)
 
 	if _, err := os.Stat(filePath); !os.IsNotExist(err) {
 		t.Errorf("file should be removed, got err=%v", err)
 	}
 	s.files.mu.RLock()
-	_, exists := s.files.uploads["up_test"]
+	_, exists := s.files.uploads[testutil.UploadID("test")]
 	s.files.mu.RUnlock()
 	if exists {
 		t.Error("pending entry should be removed from map")
@@ -104,15 +105,15 @@ func TestFailUpload_RemovesPendingEntryAndFile(t *testing.T) {
 func TestFailUpload_Idempotent(t *testing.T) {
 	s := newTestServer(t)
 	s.files.mu.Lock()
-	s.files.uploads["up_idem"] = &pendingUpload{uploadID: "up_idem"}
+	s.files.uploads[testutil.UploadID("idem")] = &pendingUpload{uploadID: testutil.UploadID("idem")}
 	s.files.mu.Unlock()
 
 	// First call: removes the entry.
-	s.failUpload("up_idem", "")
+	s.failUpload(testutil.UploadID("idem"), "")
 	// Second call: must not panic even though entry is gone.
-	s.failUpload("up_idem", "")
+	s.failUpload(testutil.UploadID("idem"), "")
 	// Third call on a never-registered ID: also must not panic.
-	s.failUpload("up_never_registered", "")
+	s.failUpload(testutil.UploadID("never_registered"), "")
 }
 
 func TestFailUpload_MissingFileIsTolerated(t *testing.T) {
@@ -122,13 +123,13 @@ func TestFailUpload_MissingFileIsTolerated(t *testing.T) {
 	// before the file was created.
 	nonExistent := filepath.Join(t.TempDir(), "never_created")
 	s.files.mu.Lock()
-	s.files.uploads["up_missing"] = &pendingUpload{uploadID: "up_missing"}
+	s.files.uploads[testutil.UploadID("missing")] = &pendingUpload{uploadID: testutil.UploadID("missing")}
 	s.files.mu.Unlock()
 
-	s.failUpload("up_missing", nonExistent)
+	s.failUpload(testutil.UploadID("missing"), nonExistent)
 
 	s.files.mu.RLock()
-	_, exists := s.files.uploads["up_missing"]
+	_, exists := s.files.uploads[testutil.UploadID("missing")]
 	s.files.mu.RUnlock()
 	if exists {
 		t.Error("pending entry should still be removed even when file is missing")
@@ -140,13 +141,13 @@ func TestFailUpload_EmptyFilePathSkipsRemove(t *testing.T) {
 	// was never opened.
 	s := newTestServer(t)
 	s.files.mu.Lock()
-	s.files.uploads["up_empty_path"] = &pendingUpload{uploadID: "up_empty_path"}
+	s.files.uploads[testutil.UploadID("empty_path")] = &pendingUpload{uploadID: testutil.UploadID("empty_path")}
 	s.files.mu.Unlock()
 
-	s.failUpload("up_empty_path", "")
+	s.failUpload(testutil.UploadID("empty_path"), "")
 
 	s.files.mu.RLock()
-	_, exists := s.files.uploads["up_empty_path"]
+	_, exists := s.files.uploads[testutil.UploadID("empty_path")]
 	s.files.mu.RUnlock()
 	if exists {
 		t.Error("empty filePath should still drop the pending entry")
@@ -158,19 +159,19 @@ func TestHandleBinaryChannel_OversizedFrameRejected(t *testing.T) {
 
 	// Seed the originating client so the upload_error notification
 	// path can find a target via find-first-by-UserID.
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
 
 	// Seed a pending upload with a small declared size.
-	uploadID := "up_oversizedfrm_42xyz00"
+	uploadID := testutil.UploadID("oversizedfrm_42xyz00")
 	s.files.mu.Lock()
 	s.files.uploads[uploadID] = &pendingUpload{
 		uploadID: uploadID,
-		fileID:   "file_test_oversized00",
+		fileID:   testutil.FileID("test_oversized00"),
 		size:     1024, // declared 1 KB
-		user:     "alice",
+		user:     testutil.UserID("alice"),
 	}
 	s.files.mu.Unlock()
 
@@ -179,7 +180,7 @@ func TestHandleBinaryChannel_OversizedFrameRejected(t *testing.T) {
 	frame := buildUploadFrame(uploadID, 1024*1024, nil)
 	ch := newBufferedChannel(frame)
 
-	s.handleBinaryChannel("alice", ch)
+	s.handleBinaryChannel(testutil.UserID("alice"), ch)
 
 	// Channel was closed (deferred on return).
 	if ch.closed.Load() == 0 {
@@ -223,20 +224,20 @@ func TestHandleBinaryChannel_InBoundsFrameSucceeds(t *testing.T) {
 	// isn't over-tight.
 	s := newTestServer(t)
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
 
 	payload := []byte("hello world")
-	uploadID := "up_inboundfrm_42xyz000"
+	uploadID := testutil.UploadID("inboundfrm_42xyz000")
 	s.files.mu.Lock()
 	s.files.uploads[uploadID] = &pendingUpload{
 		uploadID:    uploadID,
-		fileID:      "file_inbound_frame_0000",
+		fileID:      testutil.FileID("inbound_frame_0000"),
 		size:        int64(len(payload)),
 		contentHash: contentHash(payload),
-		user:        "alice",
+		user:        testutil.UserID("alice"),
 		// no context — this test only verifies the frame path, not binding
 	}
 	s.files.mu.Unlock()
@@ -245,7 +246,7 @@ func TestHandleBinaryChannel_InBoundsFrameSucceeds(t *testing.T) {
 	frame := buildUploadFrame(uploadID, uint64(len(payload)), payload)
 	ch := newBufferedChannel(frame)
 
-	s.handleBinaryChannel("alice", ch)
+	s.handleBinaryChannel(testutil.UserID("alice"), ch)
 
 	// Oversized counter must NOT have fired.
 	if got := s.counters.Get(counters.SignalOversizedUploadFrame, ""); got != 0 {

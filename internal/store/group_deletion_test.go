@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestRecordAndGetGroupDeletion verifies the basic record/read cycle.
@@ -16,25 +18,25 @@ func TestRecordAndGetGroupDeletion(t *testing.T) {
 	}
 	defer s.Close()
 
-	if err := s.RecordGroupDeletion("alice", "group_1"); err != nil {
+	if err := s.RecordGroupDeletion(testutil.UserID("alice"), testutil.GroupID("1")); err != nil {
 		t.Fatalf("record 1: %v", err)
 	}
-	if err := s.RecordGroupDeletion("alice", "group_2"); err != nil {
+	if err := s.RecordGroupDeletion(testutil.UserID("alice"), testutil.GroupID("2")); err != nil {
 		t.Fatalf("record 2: %v", err)
 	}
 	// Different user, same group — should not appear in alice's list
-	if err := s.RecordGroupDeletion("bob", "group_3"); err != nil {
+	if err := s.RecordGroupDeletion(testutil.UserID("bob"), testutil.GroupID("3")); err != nil {
 		t.Fatalf("record 3: %v", err)
 	}
 
-	got, err := s.GetDeletedGroupsForUser("alice")
+	got, err := s.GetDeletedGroupsForUser(testutil.UserID("alice"))
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	if len(got) != 2 {
 		t.Fatalf("expected 2 deletions for alice, got %d (%v)", len(got), got)
 	}
-	want := map[string]bool{"group_1": true, "group_2": true}
+	want := map[string]bool{testutil.GroupID("1"): true, testutil.GroupID("2"): true}
 	for _, id := range got {
 		if !want[id] {
 			t.Errorf("unexpected group in alice's deletions: %q", id)
@@ -52,14 +54,14 @@ func TestRecordGroupDeletion_Idempotent(t *testing.T) {
 	}
 	defer s.Close()
 
-	if err := s.RecordGroupDeletion("alice", "group_1"); err != nil {
+	if err := s.RecordGroupDeletion(testutil.UserID("alice"), testutil.GroupID("1")); err != nil {
 		t.Fatalf("first record: %v", err)
 	}
-	if err := s.RecordGroupDeletion("alice", "group_1"); err != nil {
+	if err := s.RecordGroupDeletion(testutil.UserID("alice"), testutil.GroupID("1")); err != nil {
 		t.Errorf("second record should be no-op, got: %v", err)
 	}
 
-	got, _ := s.GetDeletedGroupsForUser("alice")
+	got, _ := s.GetDeletedGroupsForUser(testutil.UserID("alice"))
 	if len(got) != 1 {
 		t.Errorf("expected 1 row after duplicate record, got %d", len(got))
 	}
@@ -75,7 +77,7 @@ func TestGetDeletedGroupsForUser_None(t *testing.T) {
 	}
 	defer s.Close()
 
-	got, err := s.GetDeletedGroupsForUser("nobody")
+	got, err := s.GetDeletedGroupsForUser(testutil.UserID("nobody"))
 	if err != nil {
 		t.Errorf("empty case should not error: %v", err)
 	}
@@ -94,18 +96,18 @@ func TestClearGroupDeletionsForUser(t *testing.T) {
 	}
 	defer s.Close()
 
-	s.RecordGroupDeletion("alice", "group_1")
-	s.RecordGroupDeletion("alice", "group_2")
-	s.RecordGroupDeletion("bob", "group_3")
+	s.RecordGroupDeletion(testutil.UserID("alice"), testutil.GroupID("1"))
+	s.RecordGroupDeletion(testutil.UserID("alice"), testutil.GroupID("2"))
+	s.RecordGroupDeletion(testutil.UserID("bob"), testutil.GroupID("3"))
 
-	if err := s.ClearGroupDeletionsForUser("alice"); err != nil {
+	if err := s.ClearGroupDeletionsForUser(testutil.UserID("alice")); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
 
-	if got, _ := s.GetDeletedGroupsForUser("alice"); len(got) != 0 {
+	if got, _ := s.GetDeletedGroupsForUser(testutil.UserID("alice")); len(got) != 0 {
 		t.Errorf("alice should have no deletions, got %v", got)
 	}
-	if got, _ := s.GetDeletedGroupsForUser("bob"); len(got) != 1 {
+	if got, _ := s.GetDeletedGroupsForUser(testutil.UserID("bob")); len(got) != 1 {
 		t.Errorf("bob should still have 1 deletion, got %v", got)
 	}
 }
@@ -120,15 +122,15 @@ func TestClearGroupDeletion_Single(t *testing.T) {
 	}
 	defer s.Close()
 
-	s.RecordGroupDeletion("alice", "group_1")
-	s.RecordGroupDeletion("alice", "group_2")
+	s.RecordGroupDeletion(testutil.UserID("alice"), testutil.GroupID("1"))
+	s.RecordGroupDeletion(testutil.UserID("alice"), testutil.GroupID("2"))
 
-	if err := s.ClearGroupDeletion("alice", "group_1"); err != nil {
+	if err := s.ClearGroupDeletion(testutil.UserID("alice"), testutil.GroupID("1")); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
 
-	got, _ := s.GetDeletedGroupsForUser("alice")
-	if len(got) != 1 || got[0] != "group_2" {
+	got, _ := s.GetDeletedGroupsForUser(testutil.UserID("alice"))
+	if len(got) != 1 || got[0] != testutil.GroupID("2") {
 		t.Errorf("expected only group_2 to remain, got %v", got)
 	}
 }
@@ -150,9 +152,9 @@ func TestPruneOldGroupDeletions(t *testing.T) {
 
 	// Insert one stale row, one fresh row.
 	s.dataDB.Exec(`INSERT INTO deleted_groups (user_id, group_id, deleted_at) VALUES (?, ?, ?)`,
-		"alice", "stale_group", twoYearsAgo)
+		testutil.UserID("alice"), "stale_group", twoYearsAgo)
 	s.dataDB.Exec(`INSERT INTO deleted_groups (user_id, group_id, deleted_at) VALUES (?, ?, ?)`,
-		"alice", "fresh_group", yesterday)
+		testutil.UserID("alice"), testutil.GroupID("fresh_group"), yesterday)
 
 	// Prune anything older than 1 year — only the stale row should go.
 	pruned, err := s.PruneOldGroupDeletions(365 * 24 * 60 * 60)
@@ -163,8 +165,8 @@ func TestPruneOldGroupDeletions(t *testing.T) {
 		t.Errorf("expected 1 row pruned, got %d", pruned)
 	}
 
-	got, _ := s.GetDeletedGroupsForUser("alice")
-	if len(got) != 1 || got[0] != "fresh_group" {
+	got, _ := s.GetDeletedGroupsForUser(testutil.UserID("alice"))
+	if len(got) != 1 || got[0] != testutil.GroupID("fresh_group") {
 		t.Errorf("expected only fresh_group to remain, got %v", got)
 	}
 }
@@ -201,13 +203,13 @@ func TestDeleteGroupConversation(t *testing.T) {
 
 	groupID := GenerateID("group_")
 	// Create a group with two members
-	if err := s.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.CreateGroup(groupID, testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
 	// Insert a message so the per-group db file actually exists on disk
 	if _, err := s.InsertGroupMessage(groupID, StoredMessage{
-		ID: "m1", Sender: "alice", TS: 100, Payload: "hi",
+		ID: testutil.MsgID("m1"), Sender: testutil.UserID("alice"), TS: 100, Payload: "hi",
 	}); err != nil {
 		t.Fatalf("insert msg: %v", err)
 	}
@@ -258,7 +260,7 @@ func TestDeleteGroupConversation_Idempotent(t *testing.T) {
 	}
 
 	groupID := GenerateID("group_")
-	s.CreateGroup(groupID, "alice", []string{"alice"}, "")
+	s.CreateGroup(groupID, testutil.UserID("alice"), []string{testutil.UserID("alice")}, "")
 	s.DeleteGroupConversation(groupID)
 	if err := s.DeleteGroupConversation(groupID); err != nil {
 		t.Errorf("second delete should be no-op, got: %v", err)
@@ -280,19 +282,19 @@ func TestDeleteGroupConversation_PreservesDeletedGroupsRows(t *testing.T) {
 
 	groupID := GenerateID("group_")
 	// alice records a deletion against the group
-	if err := s.RecordGroupDeletion("alice", groupID); err != nil {
+	if err := s.RecordGroupDeletion(testutil.UserID("alice"), groupID); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
 	// Create the group then immediately fully clean it up
-	s.CreateGroup(groupID, "alice", []string{"alice"}, "")
+	s.CreateGroup(groupID, testutil.UserID("alice"), []string{testutil.UserID("alice")}, "")
 	if err := s.DeleteGroupConversation(groupID); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
 	// alice's deletion record must still be there — this is the catchup
 	// signal for any offline device of alice that comes online later.
-	got, _ := s.GetDeletedGroupsForUser("alice")
+	got, _ := s.GetDeletedGroupsForUser(testutil.UserID("alice"))
 	if len(got) != 1 || got[0] != groupID {
 		t.Errorf("deletion record must survive group cleanup; got %v", got)
 	}
@@ -312,20 +314,20 @@ func TestDeleteGroupConversation_OpportunisticPrune(t *testing.T) {
 	// Insert a stale (>1yr) row directly
 	twoYearsAgo := time.Now().Unix() - (2 * 365 * 24 * 60 * 60)
 	s.dataDB.Exec(`INSERT INTO deleted_groups (user_id, group_id, deleted_at) VALUES (?, ?, ?)`,
-		"alice", "stale_group", twoYearsAgo)
+		testutil.UserID("alice"), "stale_group", twoYearsAgo)
 
 	// Insert a fresh row
-	s.RecordGroupDeletion("alice", "fresh_group")
+	s.RecordGroupDeletion(testutil.UserID("alice"), testutil.GroupID("fresh_group"))
 
 	// Trigger a cleanup of an unrelated group — the prune piggybacks
 	unrelatedID := GenerateID("group_")
-	s.CreateGroup(unrelatedID, "bob", []string{"bob"}, "")
+	s.CreateGroup(unrelatedID, testutil.UserID("bob"), []string{testutil.UserID("bob")}, "")
 	if err := s.DeleteGroupConversation(unrelatedID); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
-	got, _ := s.GetDeletedGroupsForUser("alice")
-	if len(got) != 1 || got[0] != "fresh_group" {
+	got, _ := s.GetDeletedGroupsForUser(testutil.UserID("alice"))
+	if len(got) != 1 || got[0] != testutil.GroupID("fresh_group") {
 		t.Errorf("opportunistic prune did not run; got %v", got)
 	}
 }

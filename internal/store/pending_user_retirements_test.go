@@ -13,6 +13,8 @@ package store
 
 import (
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestConsumePendingUserRetirements_Empty(t *testing.T) {
@@ -40,7 +42,7 @@ func TestRecordAndConsumePendingUserRetirement(t *testing.T) {
 	}
 	defer st.Close()
 
-	if err := st.RecordPendingUserRetirement("usr_alice", "os:1000", "admin"); err != nil {
+	if err := st.RecordPendingUserRetirement(testutil.UserID("alice"), "os:1000", "admin"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
@@ -52,7 +54,7 @@ func TestRecordAndConsumePendingUserRetirement(t *testing.T) {
 		t.Fatalf("expected 1 row, got %d", len(got))
 	}
 	row := got[0]
-	if row.UserID != "usr_alice" {
+	if row.UserID != testutil.UserID("alice") {
 		t.Errorf("UserID = %q, want usr_alice", row.UserID)
 	}
 	if row.RetiredBy != "os:1000" {
@@ -77,8 +79,8 @@ func TestConsumePendingUserRetirements_AtomicDelete(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.RecordPendingUserRetirement("usr_alice", "os:1000", "admin")
-	st.RecordPendingUserRetirement("usr_bob", "os:1000", "key_lost")
+	st.RecordPendingUserRetirement(testutil.UserID("alice"), "os:1000", "admin")
+	st.RecordPendingUserRetirement(testutil.UserID("bob"), "os:1000", "key_lost")
 
 	first, _ := st.ConsumePendingUserRetirements()
 	if len(first) != 2 {
@@ -102,7 +104,7 @@ func TestRecordPendingUserRetirement_PreservesOrder(t *testing.T) {
 	}
 	defer st.Close()
 
-	users := []string{"usr_alice", "usr_bob", "usr_carol", "usr_dave"}
+	users := []string{testutil.UserID("alice"), testutil.UserID("bob"), testutil.UserID("carol"), "usr_dave"}
 	for _, u := range users {
 		if err := st.RecordPendingUserRetirement(u, "os:1000", "test"); err != nil {
 			t.Fatalf("record %s: %v", u, err)
@@ -134,7 +136,7 @@ func TestRecordPendingUserRetirement_EmptyReason(t *testing.T) {
 	}
 	defer st.Close()
 
-	if err := st.RecordPendingUserRetirement("usr_alice", "os:1000", ""); err != nil {
+	if err := st.RecordPendingUserRetirement(testutil.UserID("alice"), "os:1000", ""); err != nil {
 		t.Fatalf("record with empty reason: %v", err)
 	}
 	got, _ := st.ConsumePendingUserRetirements()

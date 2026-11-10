@@ -352,6 +352,22 @@ func (s *Server) handleUploadStart(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	// Keep the existing upload-specific error envelope and earlier upload-ID,
+	// size, hash, cardinality and storage gates. Reject syntax before context
+	// lookup, quota work or pending-upload allocation.
+	if !s.validateOptionalContexts(c, "upload_start", msg.Room, msg.Group, msg.DM, func(kind string) {
+		code, message := protocol.ErrUnknownRoom, "You are not a member of this room"
+		switch kind {
+		case "group":
+			code, message = protocol.ErrUnknownGroup, "You are not a member of this group"
+		case "dm":
+			code, message = protocol.ErrUnknownDM, "You are not a party to this DM"
+		}
+		s.respondUploadError(c, msg.CorrID, msg.UploadID, code, message, 0)
+	}) {
+		return
+	}
+
 	// Phase 17 Step 4c follow-up: each non-member branch fires
 	// SignalNonMemberContext so Phase 17b threshold analysis can
 	// discriminate one-shot legit races (kick-during-compose, stale

@@ -5,11 +5,12 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestHandleListPendingKeys_NonAdminRejected(t *testing.T) {
 	s := newTestServer(t)
-	bob := testClientFor("bob", "dev_bob_pending_nonadmin")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_pending_nonadmin")
 
 	s.handleListPendingKeys(bob.Client)
 
@@ -31,7 +32,7 @@ func TestHandleListPendingKeys_NonAdminRejected(t *testing.T) {
 
 func TestHandleListPendingKeys_AdminHappyPath(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_pending_admin")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_pending_admin")
 
 	_, err := s.store.DataDB().Exec(`
 		INSERT INTO pending_keys (fingerprint, attempts, first_seen, last_seen, remote_addr, pubkey, requested_username)

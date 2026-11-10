@@ -1,6 +1,10 @@
 package store
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
+)
 
 func TestConsumePendingAddToRooms_Empty(t *testing.T) {
 	dir := t.TempDir()
@@ -27,7 +31,7 @@ func TestRecordPendingAddToRoom_RoundTrip(t *testing.T) {
 	}
 	defer st.Close()
 
-	if err := st.RecordPendingAddToRoom("usr_bob", "rm_general", "os:1000"); err != nil {
+	if err := st.RecordPendingAddToRoom(testutil.UserID("bob"), testutil.RoomID("rm_general"), "os:1000"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
@@ -36,10 +40,10 @@ func TestRecordPendingAddToRoom_RoundTrip(t *testing.T) {
 		t.Fatalf("expected 1 row, got %d", len(got))
 	}
 	row := got[0]
-	if row.UserID != "usr_bob" {
+	if row.UserID != testutil.UserID("bob") {
 		t.Errorf("UserID = %q, want usr_bob", row.UserID)
 	}
-	if row.RoomID != "rm_general" {
+	if row.RoomID != testutil.RoomID("rm_general") {
 		t.Errorf("RoomID = %q, want rm_general", row.RoomID)
 	}
 	if row.InitiatedBy != "os:1000" {
@@ -55,8 +59,8 @@ func TestConsumePendingAddToRooms_DeletesRows(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.RecordPendingAddToRoom("usr_a", "rm_a", "os:1000")
-	st.RecordPendingAddToRoom("usr_b", "rm_b", "os:1000")
+	st.RecordPendingAddToRoom(testutil.UserID("a"), testutil.RoomID("rm_a"), "os:1000")
+	st.RecordPendingAddToRoom(testutil.UserID("b"), testutil.RoomID("rm_b"), "os:1000")
 
 	first, _ := st.ConsumePendingAddToRooms()
 	if len(first) != 2 {

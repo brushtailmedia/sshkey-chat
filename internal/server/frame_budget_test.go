@@ -23,9 +23,9 @@ import (
 // member, keyed by production-shape user IDs.
 func capGroup(t *testing.T, s *Server) (string, map[string]string) {
 	t.Helper()
-	members := append([]string{"alice"}, syntheticUserIDs("cap", s.groupMaxMembers()-1)...)
+	members := append([]string{testutil.UserID("alice")}, syntheticUserIDs("cap", s.groupMaxMembers()-1)...)
 	groupID := store.GenerateID("group_")
-	if err := s.store.CreateGroup(groupID, "alice", members, "At cap"); err != nil {
+	if err := s.store.CreateGroup(groupID, testutil.UserID("alice"), members, "At cap"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 	wk := make(map[string]string, len(members))
@@ -68,7 +68,7 @@ func TestGroupFrameBudget_Arithmetic(t *testing.T) {
 func TestHandleSendGroup_AtCap_OneByteBodyAccepted(t *testing.T) {
 	s := newTestServer(t)
 	groupID, wk := capGroup(t, s)
-	alice := testClientFor("alice", "dev_alice_fb_small")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_fb_small")
 
 	raw, _ := json.Marshal(protocol.SendGroup{Type: "send_group", Group: groupID, WrappedKeys: wk, Payload: "a", Signature: "s"})
 	s.handleSendGroup(alice.Client, raw)
@@ -84,7 +84,7 @@ func TestHandleSendGroup_AtCap_OneByteBodyAccepted(t *testing.T) {
 func TestHandleSendGroup_AtCap_FullBodyAccepted(t *testing.T) {
 	s := newTestServer(t)
 	groupID, wk := capGroup(t, s)
-	alice := testClientFor("alice", "dev_alice_fb_full")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_fb_full")
 
 	raw, _ := json.Marshal(protocol.SendGroup{Type: "send_group", Group: groupID, WrappedKeys: wk,
 		Payload: strings.Repeat("a", maxPayloadBytes), Signature: "s"})
@@ -109,7 +109,7 @@ func TestHandleSendGroup_AtCap_FullBodyAccepted(t *testing.T) {
 func TestHandleSendGroup_BodyOverLimitRejected(t *testing.T) {
 	s := newTestServer(t)
 	groupID, wk := capGroup(t, s)
-	alice := testClientFor("alice", "dev_alice_fb_over")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_fb_over")
 
 	raw, _ := json.Marshal(protocol.SendGroup{Type: "send_group", Group: groupID, WrappedKeys: wk,
 		Payload: strings.Repeat("a", maxPayloadBytes+1), Signature: "s"})
@@ -131,7 +131,7 @@ func TestHandleSendGroup_OverCapKeys_FailOnMemberCapNotFrameSize(t *testing.T) {
 	groupID, wk := capGroup(t, s)
 	extra := "usr_" + strings.Repeat("z", 21)
 	wk[extra] = testutil.WrappedKey(extra) // 101 entries
-	alice := testClientFor("alice", "dev_alice_fb_101")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_fb_101")
 
 	raw, _ := json.Marshal(protocol.SendGroup{Type: "send_group", Group: groupID, WrappedKeys: wk, Payload: "a", Signature: "s"})
 	s.handleSendGroup(alice.Client, raw)
@@ -149,7 +149,7 @@ func TestHandleSendGroup_OverCapKeys_FailOnMemberCapNotFrameSize(t *testing.T) {
 
 func TestHandleSendGroup_FrameOverBudgetRejectedBeforeParse(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_fb_budget")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_fb_budget")
 
 	// Over the whole budget: a body that would also fail the body check,
 	// but the frame check fires first and never parses it. The frame is
@@ -171,11 +171,11 @@ func TestHandleSendGroup_FrameOverBudgetRejectedBeforeParse(t *testing.T) {
 func TestHandleEditGroup_SameBudget(t *testing.T) {
 	s := newTestServer(t)
 	groupID, wk := capGroup(t, s)
-	alice := testClientFor("alice", "dev_alice_fb_edit")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_fb_edit")
 
 	// A full 16 KB body with keys for a group at the cap passes the frame
 	// and body checks; whatever happens after is not a size rejection.
-	raw, _ := json.Marshal(protocol.EditGroup{Type: "edit_group", ID: "msg_none", Group: groupID, WrappedKeys: wk,
+	raw, _ := json.Marshal(protocol.EditGroup{Type: "edit_group", ID: testutil.MsgID("none"), Group: groupID, WrappedKeys: wk,
 		Payload: strings.Repeat("a", maxPayloadBytes), Signature: "s"})
 	if len(raw) <= maxPayloadBytes {
 		t.Fatalf("test frame is %d bytes; it must exceed %d", len(raw), maxPayloadBytes)
@@ -191,8 +191,8 @@ func TestHandleEditGroup_SameBudget(t *testing.T) {
 	}
 
 	// One byte over on the body is refused.
-	bob := testClientFor("alice", "dev_alice_fb_edit_over")
-	raw, _ = json.Marshal(protocol.EditGroup{Type: "edit_group", ID: "msg_none", Group: groupID, WrappedKeys: wk,
+	bob := testClientFor(testutil.UserID("alice"), "dev_alice_fb_edit_over")
+	raw, _ = json.Marshal(protocol.EditGroup{Type: "edit_group", ID: testutil.MsgID("none"), Group: groupID, WrappedKeys: wk,
 		Payload: strings.Repeat("a", maxPayloadBytes+1), Signature: "s"})
 	s.handleEditGroup(bob.Client, raw)
 	if codes := errorCodes(bob.messages()); len(codes) != 1 || codes[0] != protocol.ErrMessageTooLarge {
@@ -205,14 +205,14 @@ func TestHandleSendAndSendDM_KeepBareFrameCheck(t *testing.T) {
 	// (an epoch key, or two entries), so their frame check is still the
 	// bare 16 KB.
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_fb_room")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_fb_room")
 	big := strings.Repeat("a", maxPayloadBytes)
 	raw := json.RawMessage(`{"type":"send","payload":"` + big + `"`)
 	s.handleSend(alice.Client, raw)
 	if codes := errorCodes(alice.messages()); len(codes) != 1 || codes[0] != protocol.ErrMessageTooLarge {
 		t.Fatalf("send over 16 KB: codes = %v, want [%s]", codes, protocol.ErrMessageTooLarge)
 	}
-	bob := testClientFor("alice", "dev_alice_fb_dm")
+	bob := testClientFor(testutil.UserID("alice"), "dev_alice_fb_dm")
 	raw = json.RawMessage(`{"type":"send_dm","payload":"` + big + `"`)
 	s.handleSendDM(bob.Client, raw)
 	if codes := errorCodes(bob.messages()); len(codes) != 1 || codes[0] != protocol.ErrMessageTooLarge {

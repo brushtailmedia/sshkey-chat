@@ -25,6 +25,7 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestHandleUploadStart_RateLimitFiresCounter(t *testing.T) {
@@ -37,7 +38,7 @@ func TestHandleUploadStart_RateLimitFiresCounter(t *testing.T) {
 	s.cfg.Unlock()
 
 	generalID := s.store.RoomDisplayNameToID("general")
-	alice := testClientFor("alice", "dev_alice_ratesig")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_ratesig")
 
 	validHash := "blake2b-256:" + strings.Repeat("a", 64)
 	makeMsg := func() []byte {
@@ -69,7 +70,7 @@ func TestHandleUploadStart_OversizedSizeFiresOversizedBody(t *testing.T) {
 	s := newTestServer(t)
 
 	generalID := s.store.RoomDisplayNameToID("general")
-	alice := testClientFor("alice", "dev_alice_sizesig")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_sizesig")
 
 	// MaxFileSize default is 100MB; declare 200MB.
 	msg := protocol.UploadStart{
@@ -105,7 +106,7 @@ func TestHandleUploadStart_MissingContentHashFiresMalformed(t *testing.T) {
 	s := newTestServer(t)
 
 	generalID := s.store.RoomDisplayNameToID("general")
-	alice := testClientFor("alice", "dev_alice_hashless")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_hashless")
 
 	msg := protocol.UploadStart{
 		Type:     "upload_start",
@@ -133,7 +134,7 @@ func TestHandleUploadStart_InvalidContextZeroFiresMalformed(t *testing.T) {
 	// Zero contexts (no room, group, or dm) — protocol violation.
 	s := newTestServer(t)
 
-	alice := testClientFor("alice", "dev_alice_ctx0")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_ctx0")
 	msg := protocol.UploadStart{
 		Type:        "upload_start",
 		UploadID:    store.GenerateID("up_"),
@@ -162,7 +163,7 @@ func TestHandleUploadStart_InvalidContextMultipleFiresMalformed(t *testing.T) {
 	s := newTestServer(t)
 
 	generalID := s.store.RoomDisplayNameToID("general")
-	alice := testClientFor("alice", "dev_alice_ctx2")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_ctx2")
 	msg := protocol.UploadStart{
 		Type:        "upload_start",
 		UploadID:    store.GenerateID("up_"),
@@ -186,7 +187,7 @@ func TestHandleUploadStart_NonMemberRoomFiresSignal(t *testing.T) {
 	engID := s.store.RoomDisplayNameToID("engineering")
 
 	// bob is NOT a member of engineering per the seed.
-	bob := testClientFor("bob", "dev_bob_nonmember_r")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_nonmember_r")
 	msg := protocol.UploadStart{
 		Type:        "upload_start",
 		UploadID:    store.GenerateID("up_"),
@@ -204,17 +205,17 @@ func TestHandleUploadStart_NonMemberRoomFiresSignal(t *testing.T) {
 
 func TestHandleUploadStart_NonMemberGroupFiresSignal(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_nm_signal", "alice", []string{"alice"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("nm_signal"), testutil.UserID("alice"), []string{testutil.UserID("alice")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	bob := testClientFor("bob", "dev_bob_nonmember_g")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_nonmember_g")
 	msg := protocol.UploadStart{
 		Type:        "upload_start",
 		UploadID:    store.GenerateID("up_"),
 		Size:        100,
 		ContentHash: "blake2b-256:" + strings.Repeat("a", 64),
-		Group:       "group_nm_signal",
+		Group:       testutil.GroupID("nm_signal"),
 	}
 	raw, _ := json.Marshal(msg)
 	s.handleUploadStart(bob.Client, raw)
@@ -226,12 +227,12 @@ func TestHandleUploadStart_NonMemberGroupFiresSignal(t *testing.T) {
 
 func TestHandleUploadStart_NonMemberDMFiresSignal(t *testing.T) {
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create dm: %v", err)
 	}
 
-	carol := testClientFor("carol", "dev_carol_nonmember_d")
+	carol := testClientFor(testutil.UserID("carol"), "dev_carol_nonmember_d")
 	msg := protocol.UploadStart{
 		Type:        "upload_start",
 		UploadID:    store.GenerateID("up_"),
@@ -256,7 +257,7 @@ func TestHandleDownload_ACLDenyFiresNotFoundSignal(t *testing.T) {
 		t.Fatalf("bind file: %v", err)
 	}
 
-	bob := testClientFor("bob", "dev_bob_acl_deny")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_acl_deny")
 	bob.Client.DownloadChannel = &noopChannel{} // satisfy no-channel check so we reach ACL
 	msg := protocol.Download{Type: "download", FileID: fileID}
 	raw, _ := json.Marshal(msg)
@@ -278,7 +279,7 @@ func TestHandleDownload_FileMissingFiresNotFoundSignal(t *testing.T) {
 		t.Fatalf("bind file: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_file_missing")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_file_missing")
 	alice.Client.DownloadChannel = &noopChannel{}
 	msg := protocol.Download{Type: "download", FileID: fileID}
 	raw, _ := json.Marshal(msg)
@@ -299,7 +300,7 @@ func TestHandleDownload_NoChannelFiresSignal(t *testing.T) {
 		t.Fatalf("bind file: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_nochannel")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_nochannel")
 	// alice.Client.DownloadChannel intentionally left nil
 	msg := protocol.Download{Type: "download", FileID: fileID}
 	raw, _ := json.Marshal(msg)
@@ -313,7 +314,7 @@ func TestHandleDownload_NoChannelFiresSignal(t *testing.T) {
 func TestHandleBinaryChannel_HashMismatchFiresCounter(t *testing.T) {
 	s := newTestServer(t)
 
-	alice := testClientFor("alice", "dev_alice_hashmisS")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_hashmisS")
 	s.mu.Lock()
 	s.clients["dev_alice_hashmisS"] = alice.Client
 	s.mu.Unlock()
@@ -328,14 +329,14 @@ func TestHandleBinaryChannel_HashMismatchFiresCounter(t *testing.T) {
 		fileID:      store.GenerateID("file_"),
 		size:        int64(len(payload)),
 		contentHash: "blake2b-256:" + strings.Repeat("f", 64), // wrong — payload hashes to something else
-		user:        "alice",
+		user:        testutil.UserID("alice"),
 	}
 	s.files.mu.Unlock()
 
 	frame := buildUploadFrame(uploadID, uint64(len(payload)), payload)
 	ch := newBufferedChannel(frame)
 
-	s.handleBinaryChannel("alice", ch)
+	s.handleBinaryChannel(testutil.UserID("alice"), ch)
 
 	// Channel 3 attribution limitation: counter fires under empty
 	// deviceID per Step 2 spec. Phase 17b sees aggregate signal at the

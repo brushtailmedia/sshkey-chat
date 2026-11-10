@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // The write mutex on DB (store-write Part 1): writes and transactions
@@ -42,7 +44,7 @@ func TestDB_WriteWaitsForAnOpenTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
-	if _, err := tx.Exec(benchInsertSQL, "msg_in_tx", "usr_a", int64(1), int64(1), "cA==", "", "c2ln", ""); err != nil {
+	if _, err := tx.Exec(benchInsertSQL, "msg_in_tx", testutil.UserID("a"), int64(1), int64(1), "cA==", "", "c2ln", ""); err != nil {
 		t.Fatalf("insert in tx: %v", err)
 	}
 
@@ -55,7 +57,7 @@ func TestDB_WriteWaitsForAnOpenTransaction(t *testing.T) {
 	done := make(chan outcome, 1)
 	go func() {
 		// This Exec blocks on the mutex (and the pool) until Commit.
-		_, err := db.Exec(benchInsertSQL, "msg_after", "usr_b", int64(2), int64(1), "cA==", "", "c2ln", "")
+		_, err := db.Exec(benchInsertSQL, "msg_after", testutil.UserID("b"), int64(2), int64(1), "cA==", "", "c2ln", "")
 		var n int
 		if err == nil {
 			err = db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&n)
@@ -94,7 +96,7 @@ func TestDB_TransactionReleasesTheMutexOnce(t *testing.T) {
 	if err := tx.Rollback(); err == nil {
 		t.Fatal("Rollback after Commit should report the done transaction")
 	}
-	if _, err := db.Exec(benchInsertSQL, "msg_1", "usr_a", int64(1), int64(1), "cA==", "", "c2ln", ""); err != nil {
+	if _, err := db.Exec(benchInsertSQL, testutil.MsgID("1"), testutil.UserID("a"), int64(1), int64(1), "cA==", "", "c2ln", ""); err != nil {
 		t.Fatalf("write after commit+rollback: %v", err)
 	}
 
@@ -105,7 +107,7 @@ func TestDB_TransactionReleasesTheMutexOnce(t *testing.T) {
 	if err := tx2.Rollback(); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
-	if _, err := db.Exec(benchInsertSQL, "msg_2", "usr_a", int64(2), int64(1), "cA==", "", "c2ln", ""); err != nil {
+	if _, err := db.Exec(benchInsertSQL, "msg_2", testutil.UserID("a"), int64(2), int64(1), "cA==", "", "c2ln", ""); err != nil {
 		t.Fatalf("write after rollback: %v", err)
 	}
 	var n int

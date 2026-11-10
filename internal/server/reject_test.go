@@ -10,6 +10,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // newRejectTestServer returns a minimally-initialized *Server suitable for
@@ -39,7 +40,7 @@ func newRejectTestServer(t *testing.T, logWriter io.Writer) *Server {
 // the same wire-level assertions these tests were written against.
 func newRejectTestClient(deviceID string, encBuf *bytes.Buffer) *Client {
 	return &Client{
-		UserID:   "usr_test",
+		UserID:   testutil.UserID("test"),
 		DeviceID: deviceID,
 		Encoder:  newSafeEncoder(protocol.NewEncoder(encBuf)),
 	}

@@ -16,8 +16,8 @@ func TestHandleSend_DuplicatePayloadCreatesDistinctIDs(t *testing.T) {
 		t.Fatal("seed failed: general room missing")
 	}
 
-	alice := testClientFor("alice", "dev_alice_send_dup")
-	bob := testClientFor("bob", "dev_bob_send_dup")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_send_dup")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_send_dup")
 	s.mu.Lock()
 	s.clients["dev_alice_send_dup"] = alice.Client
 	s.clients["dev_bob_send_dup"] = bob.Client
@@ -65,12 +65,12 @@ func TestHandleSend_DuplicatePayloadCreatesDistinctIDs(t *testing.T) {
 func TestHandleSendGroup_DuplicatePayloadCreatesDistinctIDs(t *testing.T) {
 	s := newTestServer(t)
 	groupID := store.GenerateID("group_")
-	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "dup"); err != nil {
+	if err := s.store.CreateGroup(groupID, testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "dup"); err != nil {
 		t.Fatalf("CreateGroup: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_group_dup")
-	bob := testClientFor("bob", "dev_bob_group_dup")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_group_dup")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_group_dup")
 	s.mu.Lock()
 	s.clients["dev_alice_group_dup"] = alice.Client
 	s.clients["dev_bob_group_dup"] = bob.Client
@@ -79,7 +79,7 @@ func TestHandleSendGroup_DuplicatePayloadCreatesDistinctIDs(t *testing.T) {
 	raw, _ := json.Marshal(protocol.SendGroup{
 		Type:        "send_group",
 		Group:       groupID,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("ka"), "bob": testutil.WrappedKey("kb")},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("ka"), testutil.UserID("bob"): testutil.WrappedKey("kb")},
 		Payload:     "same_group_payload",
 		Signature:   "same_group_sig",
 	})
@@ -117,13 +117,13 @@ func TestHandleSendGroup_DuplicatePayloadCreatesDistinctIDs(t *testing.T) {
 
 func TestHandleSendDM_DuplicatePayloadCreatesDistinctIDs(t *testing.T) {
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("CreateOrGetDirectMessage: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_dm_dup")
-	bob := testClientFor("bob", "dev_bob_dm_dup")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_dm_dup")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_dm_dup")
 	s.mu.Lock()
 	s.clients["dev_alice_dm_dup"] = alice.Client
 	s.clients["dev_bob_dm_dup"] = bob.Client
@@ -132,7 +132,7 @@ func TestHandleSendDM_DuplicatePayloadCreatesDistinctIDs(t *testing.T) {
 	raw, _ := json.Marshal(protocol.SendDM{
 		Type:        "send_dm",
 		DM:          dm.ID,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("ka"), "bob": testutil.WrappedKey("kb")},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("ka"), testutil.UserID("bob"): testutil.WrappedKey("kb")},
 		Payload:     "same_dm_payload",
 		Signature:   "same_dm_sig",
 	})
@@ -159,7 +159,7 @@ func TestHandleSendDM_DuplicatePayloadCreatesDistinctIDs(t *testing.T) {
 		t.Fatalf("duplicate dm send reused msg ID %q", d1.ID)
 	}
 
-	stored, err := s.store.GetDMMessagesSince(dm.ID, "alice", 0, 10)
+	stored, err := s.store.GetDMMessagesSince(dm.ID, testutil.UserID("alice"), 0, 10)
 	if err != nil {
 		t.Fatalf("GetDMMessagesSince: %v", err)
 	}

@@ -43,6 +43,10 @@ import (
 // Unknown group, non-member, and non-admin all collapse to the same
 // ErrUnknownGroup response so a probing client cannot distinguish them.
 func (s *Server) checkGroupAdminAuth(c *Client, groupID string) bool {
+	if !s.validateIDOrReject(c, "group_admin", groupID, "group_", func() { s.respondError(c, "", protocol.ErrUnknownGroup, "You are not a member of this group", 0) }) {
+		return false
+	}
+
 	if s.store == nil {
 		s.respondError(c, "", protocol.ErrUnknownGroup, "You are not a member of this group", 0)
 		return false
@@ -110,6 +114,10 @@ func (s *Server) handleAddToGroup(c *Client, raw json.RawMessage) {
 		return
 	}
 	if !s.checkGroupAdminAuth(c, msg.Group) {
+		return
+	}
+
+	if !s.validateIDOrReject(c, "add_to_group", msg.User, "usr_", func() { s.respondError(c, "", protocol.ErrUnknownUser, "No such user", 0) }) {
 		return
 	}
 
@@ -267,6 +275,10 @@ func (s *Server) handleRemoveFromGroup(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	if !s.validateIDOrReject(c, "remove_from_group", msg.User, "usr_", func() { s.respondError(c, "", protocol.ErrUnknownGroup, "You are not a member of this group", 0) }) {
+		return
+	}
+
 	// Verify target is a member. Privacy: for admin-authenticated callers,
 	// a non-member target collapses to the same ErrUnknownGroup frame.
 	isMember, _ := s.store.IsGroupMember(msg.Group, msg.User)
@@ -346,6 +358,10 @@ func (s *Server) handlePromoteGroupAdmin(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	if !s.validateIDOrReject(c, "promote_group_admin", msg.User, "usr_", func() { s.respondError(c, "", protocol.ErrUnknownGroup, "You are not a member of this group", 0) }) {
+		return
+	}
+
 	isMember, _ := s.store.IsGroupMember(msg.Group, msg.User)
 	if !isMember {
 		s.respondError(c, "", protocol.ErrUnknownGroup, "You are not a member of this group", 0)
@@ -417,6 +433,10 @@ func (s *Server) handleDemoteGroupAdmin(c *Client, raw json.RawMessage) {
 		return
 	}
 	if !s.checkGroupAdminAuth(c, msg.Group) {
+		return
+	}
+
+	if !s.validateIDOrReject(c, "demote_group_admin", msg.User, "usr_", func() { s.respondError(c, "", protocol.ErrUnknownGroup, "You are not a member of this group", 0) }) {
 		return
 	}
 

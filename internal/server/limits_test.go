@@ -11,6 +11,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/config"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestServerLimits_FollowsLiveConfigAndFallback(t *testing.T) {
@@ -111,7 +112,7 @@ func roomTypingFlag(t *testing.T, s *Server, cc *captureClient, roomID string) b
 func TestSendRoomList_TypingFlagFollowsThreshold(t *testing.T) {
 	s := newTestServer(t)
 	genID := s.store.RoomDisplayNameToID("general") // alice, bob, carol
-	alice := testClientFor("alice", "dev_alice_roomlist_typing")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_roomlist_typing")
 
 	if !roomTypingFlag(t, s, alice, genID) {
 		t.Error("3-member room: typing = false, want true")

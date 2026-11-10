@@ -8,6 +8,7 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // Typing is a membership-scoped signal: the server authorizes the
@@ -57,7 +58,7 @@ func assertOneTypingMsg(t *testing.T, cc *captureClient, wantUser, wantRoom, wan
 func TestHandleTyping_NonMemberRoom_SilentDropSignal(t *testing.T) {
 	s := newTestServer(t)
 	engID := s.store.RoomDisplayNameToID("engineering")
-	bob := testClientFor("bob", "dev_bob_typing_nm_room") // bob is NOT in engineering
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_typing_nm_room") // bob is NOT in engineering
 	raw, _ := json.Marshal(protocol.Typing{Type: "typing", Room: engID})
 	s.handleTyping(bob.Client, raw)
 	if got := s.counters.Get(counters.SignalNonMemberContext, "dev_bob_typing_nm_room"); got != 1 {
@@ -71,11 +72,11 @@ func TestHandleTyping_NonMemberRoom_SilentDropSignal(t *testing.T) {
 
 func TestHandleTyping_NonMemberGroup_SilentDropSignal(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_typing_nm", "alice", []string{"alice"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("typing_nm"), testutil.UserID("alice"), []string{testutil.UserID("alice")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	carol := testClientFor("carol", "dev_carol_typing_nm_grp") // not in group_typing_nm
-	raw, _ := json.Marshal(protocol.Typing{Type: "typing", Group: "group_typing_nm"})
+	carol := testClientFor(testutil.UserID("carol"), "dev_carol_typing_nm_grp") // not in group_typing_nm
+	raw, _ := json.Marshal(protocol.Typing{Type: "typing", Group: testutil.GroupID("typing_nm")})
 	s.handleTyping(carol.Client, raw)
 	if got := s.counters.Get(counters.SignalNonMemberContext, "dev_carol_typing_nm_grp"); got != 1 {
 		t.Errorf("SignalNonMemberContext = %d, want 1", got)
@@ -85,11 +86,11 @@ func TestHandleTyping_NonMemberGroup_SilentDropSignal(t *testing.T) {
 
 func TestHandleTyping_NonPartyDM_SilentDropSignal(t *testing.T) {
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create dm: %v", err)
 	}
-	carol := testClientFor("carol", "dev_carol_typing_nm_dm") // not a party to the DM
+	carol := testClientFor(testutil.UserID("carol"), "dev_carol_typing_nm_dm") // not a party to the DM
 	raw, _ := json.Marshal(protocol.Typing{Type: "typing", DM: dm.ID})
 	s.handleTyping(carol.Client, raw)
 	if got := s.counters.Get(counters.SignalNonMemberContext, "dev_carol_typing_nm_dm"); got != 1 {
@@ -103,10 +104,10 @@ func TestHandleTyping_NonPartyDM_SilentDropSignal(t *testing.T) {
 func TestHandleTyping_RetiredRoomMember_SilentDropSignal(t *testing.T) {
 	s := newTestServer(t)
 	genID := s.store.RoomDisplayNameToID("general")
-	if err := s.store.SetRoomRetired(genID, "alice", "test"); err != nil {
+	if err := s.store.SetRoomRetired(genID, testutil.UserID("alice"), "test"); err != nil {
 		t.Fatalf("retire room: %v", err)
 	}
-	alice := testClientFor("alice", "dev_alice_typing_retired") // member, but room retired
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_typing_retired") // member, but room retired
 	raw, _ := json.Marshal(protocol.Typing{Type: "typing", Room: genID})
 	s.handleTyping(alice.Client, raw)
 	if got := s.counters.Get(counters.SignalNonMemberContext, "dev_alice_typing_retired"); got != 1 {
@@ -119,15 +120,15 @@ func TestHandleTyping_EmptyAndAmbiguousContext_MalformedSignal(t *testing.T) {
 	s := newTestServer(t)
 	genID := s.store.RoomDisplayNameToID("general")
 
-	empty := testClientFor("alice", "dev_alice_typing_empty")
+	empty := testClientFor(testutil.UserID("alice"), "dev_alice_typing_empty")
 	raw, _ := json.Marshal(protocol.Typing{Type: "typing"}) // no context
 	s.handleTyping(empty.Client, raw)
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_typing_empty"); got != 1 {
 		t.Errorf("empty-context typing: SignalMalformedFrame = %d, want 1", got)
 	}
 
-	ambig := testClientFor("alice", "dev_alice_typing_ambig")
-	raw2, _ := json.Marshal(protocol.Typing{Type: "typing", Room: genID, DM: "dm_x"}) // two contexts
+	ambig := testClientFor(testutil.UserID("alice"), "dev_alice_typing_ambig")
+	raw2, _ := json.Marshal(protocol.Typing{Type: "typing", Room: genID, DM: testutil.DMID("x")}) // two contexts
 	s.handleTyping(ambig.Client, raw2)
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_typing_ambig"); got != 1 {
 		t.Errorf("ambiguous-context typing: SignalMalformedFrame = %d, want 1", got)
@@ -141,7 +142,7 @@ func TestHandleTyping_MemberRoom_NoDropSignal(t *testing.T) {
 	s := newTestServer(t)
 	t.Cleanup(func() { stopTypingTimers(s) })
 	genID := s.store.RoomDisplayNameToID("general")
-	alice := testClientFor("alice", "dev_alice_typing_member") // alice IS a member of general
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_typing_member") // alice IS a member of general
 	raw, _ := json.Marshal(protocol.Typing{Type: "typing", Room: genID})
 	s.handleTyping(alice.Client, raw)
 	if got := s.counters.Get(counters.SignalNonMemberContext, "dev_alice_typing_member"); got != 0 {
@@ -155,11 +156,11 @@ func TestHandleTyping_MemberRoom_NoDropSignal(t *testing.T) {
 func TestHandleTyping_DMParty_NoDropSignal(t *testing.T) {
 	s := newTestServer(t)
 	t.Cleanup(func() { stopTypingTimers(s) })
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create dm: %v", err)
 	}
-	alice := testClientFor("alice", "dev_alice_typing_dm_ok") // alice IS a party
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_typing_dm_ok") // alice IS a party
 	raw, _ := json.Marshal(protocol.Typing{Type: "typing", DM: dm.ID})
 	s.handleTyping(alice.Client, raw)
 	if got := s.counters.Get(counters.SignalNonMemberContext, "dev_alice_typing_dm_ok"); got != 0 {
@@ -171,10 +172,10 @@ func TestHandleTyping_MemberRoom_RelaysToOtherRoomSessionsOnly(t *testing.T) {
 	s := newTestServer(t)
 	t.Cleanup(func() { stopTypingTimers(s) })
 	genID := s.store.RoomDisplayNameToID("general")
-	alice := testClientFor("alice", "dev_alice_typing_room_sender")
-	bob := testClientFor("bob", "dev_bob_typing_room_recipient")
-	carol := testClientFor("carol", "dev_carol_typing_room_recipient")
-	outsider := testClientFor("mallory", "dev_mallory_typing_room_outsider")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_typing_room_sender")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_typing_room_recipient")
+	carol := testClientFor(testutil.UserID("carol"), "dev_carol_typing_room_recipient")
+	outsider := testClientFor(testutil.UserID("mallory"), "dev_mallory_typing_room_outsider")
 
 	s.mu.Lock()
 	s.clients[alice.DeviceID] = alice.Client
@@ -189,8 +190,8 @@ func TestHandleTyping_MemberRoom_RelaysToOtherRoomSessionsOnly(t *testing.T) {
 	if msgs := alice.messages(); len(msgs) != 0 {
 		t.Fatalf("sender current device received %d typing messages, want 0", len(msgs))
 	}
-	assertOneTypingMsg(t, bob, "alice", genID, "", "")
-	assertOneTypingMsg(t, carol, "alice", genID, "", "")
+	assertOneTypingMsg(t, bob, testutil.UserID("alice"), genID, "", "")
+	assertOneTypingMsg(t, carol, testutil.UserID("alice"), genID, "", "")
 	if msgs := outsider.messages(); len(msgs) != 0 {
 		t.Fatalf("non-member received %d typing messages, want 0", len(msgs))
 	}
@@ -200,12 +201,12 @@ func TestHandleTyping_MemberRoom_RelaysToOtherRoomSessionsOnly(t *testing.T) {
 func TestHandleTyping_GroupMember_RelaysToOtherGroupSessionsOnly(t *testing.T) {
 	s := newTestServer(t)
 	t.Cleanup(func() { stopTypingTimers(s) })
-	if err := s.store.CreateGroup("group_typing_relay", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("typing_relay"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	alice := testClientFor("alice", "dev_alice_typing_group_sender")
-	bob := testClientFor("bob", "dev_bob_typing_group_recipient")
-	carol := testClientFor("carol", "dev_carol_typing_group_outsider")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_typing_group_sender")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_typing_group_recipient")
+	carol := testClientFor(testutil.UserID("carol"), "dev_carol_typing_group_outsider")
 
 	s.mu.Lock()
 	s.clients[alice.DeviceID] = alice.Client
@@ -213,13 +214,13 @@ func TestHandleTyping_GroupMember_RelaysToOtherGroupSessionsOnly(t *testing.T) {
 	s.clients[carol.DeviceID] = carol.Client
 	s.mu.Unlock()
 
-	raw, _ := json.Marshal(protocol.Typing{Type: "typing", Group: "group_typing_relay"})
+	raw, _ := json.Marshal(protocol.Typing{Type: "typing", Group: testutil.GroupID("typing_relay")})
 	s.handleTyping(alice.Client, raw)
 
 	if msgs := alice.messages(); len(msgs) != 0 {
 		t.Fatalf("sender current device received %d typing messages, want 0", len(msgs))
 	}
-	assertOneTypingMsg(t, bob, "alice", "", "group_typing_relay", "")
+	assertOneTypingMsg(t, bob, testutil.UserID("alice"), "", testutil.GroupID("typing_relay"), "")
 	if msgs := carol.messages(); len(msgs) != 0 {
 		t.Fatalf("non-member received %d typing messages, want 0", len(msgs))
 	}
@@ -229,13 +230,13 @@ func TestHandleTyping_GroupMember_RelaysToOtherGroupSessionsOnly(t *testing.T) {
 func TestHandleTyping_DMParty_RelaysOnlyToOtherPartySessions(t *testing.T) {
 	s := newTestServer(t)
 	t.Cleanup(func() { stopTypingTimers(s) })
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create dm: %v", err)
 	}
-	alice := testClientFor("alice", "dev_alice_typing_dm_sender")
-	bob := testClientFor("bob", "dev_bob_typing_dm_recipient")
-	carol := testClientFor("carol", "dev_carol_typing_dm_outsider")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_typing_dm_sender")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_typing_dm_recipient")
+	carol := testClientFor(testutil.UserID("carol"), "dev_carol_typing_dm_outsider")
 
 	s.mu.Lock()
 	s.clients[alice.DeviceID] = alice.Client
@@ -249,7 +250,7 @@ func TestHandleTyping_DMParty_RelaysOnlyToOtherPartySessions(t *testing.T) {
 	if msgs := alice.messages(); len(msgs) != 0 {
 		t.Fatalf("sender current device received %d typing messages, want 0", len(msgs))
 	}
-	assertOneTypingMsg(t, bob, "alice", "", "", dm.ID)
+	assertOneTypingMsg(t, bob, testutil.UserID("alice"), "", "", dm.ID)
 	if msgs := carol.messages(); len(msgs) != 0 {
 		t.Fatalf("non-party received %d typing messages, want 0", len(msgs))
 	}

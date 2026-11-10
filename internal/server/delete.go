@@ -83,6 +83,10 @@ func (s *Server) handleDeleteRoomMessage(c *Client, msg protocol.Delete, roomID 
 		s.respondError(c, msg.CorrID, protocol.ErrRoomRetired, "This room has been archived and is read-only", 0)
 		return
 	}
+	if !s.validateIDOrReject(c, "delete", msg.ID, "msg_", func() { s.respondError(c, msg.CorrID, protocol.ErrUnknownRoom, "You are not a member of this room", 0) }) {
+		return
+	}
+
 	row, err := s.store.GetRoomMessageByID(roomID, msg.ID)
 	if err == sql.ErrNoRows || (err == nil && (row == nil || row.Deleted)) {
 		s.respondError(c, msg.CorrID, protocol.ErrUnknownRoom, "You are not a member of this room", 0)
@@ -144,6 +148,12 @@ func (s *Server) handleDeleteGroupMessage(c *Client, msg protocol.Delete, groupI
 		s.respondError(c, msg.CorrID, protocol.ErrUnknownGroup, "You are not a member of this group", 0)
 		return
 	}
+	if !s.validateIDOrReject(c, "delete", msg.ID, "msg_", func() {
+		s.respondError(c, msg.CorrID, protocol.ErrUnknownGroup, "You are not a member of this group", 0)
+	}) {
+		return
+	}
+
 	row, err := s.store.GetGroupMessageByID(groupID, msg.ID)
 	if err == sql.ErrNoRows || (err == nil && (row == nil || row.Deleted)) {
 		s.respondError(c, msg.CorrID, protocol.ErrUnknownGroup, "You are not a member of this group", 0)
@@ -194,6 +204,10 @@ func (s *Server) handleDeleteDMMessage(c *Client, msg protocol.Delete, dmID stri
 		s.respondError(c, msg.CorrID, protocol.ErrUnknownDM, "You are not a party to this DM", 0)
 		return
 	}
+	if !s.validateIDOrReject(c, "delete", msg.ID, "msg_", func() { s.respondError(c, msg.CorrID, protocol.ErrUnknownDM, "You are not a party to this DM", 0) }) {
+		return
+	}
+
 	row, err := s.store.GetDMMessageByID(dmID, msg.ID)
 	if err == sql.ErrNoRows || (err == nil && (row == nil || row.Deleted)) {
 		s.respondError(c, msg.CorrID, protocol.ErrUnknownDM, "You are not a party to this DM", 0)

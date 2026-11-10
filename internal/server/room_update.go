@@ -119,6 +119,10 @@ func (s *Server) handleRoomUpdate(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	if !s.validateIDOrReject(c, "room_update", req.Room, "room_", func() { s.respondError(c, req.CorrID, protocol.ErrUnknownRoom, "You are not a member of this room", 0) }) {
+		return
+	}
+
 	// Step 7: room-membership gate. unknown_room is deliberately
 	// indistinguishable from the missing-room outcome at step 8 —
 	// a non-member can't probe room existence.

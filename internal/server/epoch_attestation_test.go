@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestHandleEpochRotate_AttestationStoredAndForwarded covers F7 Phase A
@@ -16,9 +17,9 @@ import (
 func TestHandleEpochRotate_AttestationStoredAndForwarded(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
-	alice := testClientFor("alice", "dev_alice_f7") // the rotator
-	bob := testClientFor("bob", "dev_bob_f7")       // another online member
-	for _, u := range []string{"alice", "bob"} {
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_f7") // the rotator
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_f7")       // another online member
+	for _, u := range []string{testutil.UserID("alice"), testutil.UserID("bob")} {
 		if err := s.store.AddRoomMember(generalID, u, 0); err != nil {
 			t.Fatalf("AddRoomMember(%s): %v", u, err)
 		}
@@ -57,7 +58,7 @@ func TestHandleEpochRotate_AttestationStoredAndForwarded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetEpochAttestation: %v", err)
 	}
-	if gen != "alice" || mh != memberHash || ms != memberSig {
+	if gen != testutil.UserID("alice") || mh != memberHash || ms != memberSig {
 		t.Errorf("stored attestation = (%q,%q,%q), want (alice,%q,%q)", gen, mh, ms, memberHash, memberSig)
 	}
 
@@ -67,7 +68,7 @@ func TestHandleEpochRotate_AttestationStoredAndForwarded(t *testing.T) {
 		var ek protocol.EpochKey
 		if json.Unmarshal(m, &ek) == nil && ek.Type == "epoch_key" {
 			sawKey = true
-			if ek.Generator != "alice" || ek.MemberHash != memberHash || ek.MemberSig != memberSig {
+			if ek.Generator != testutil.UserID("alice") || ek.MemberHash != memberHash || ek.MemberSig != memberSig {
 				t.Errorf("forwarded epoch_key attestation = (%q,%q,%q), want (alice,%q,%q)",
 					ek.Generator, ek.MemberHash, ek.MemberSig, memberHash, memberSig)
 			}

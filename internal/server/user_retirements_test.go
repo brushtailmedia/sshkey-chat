@@ -18,6 +18,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestProcessPendingUserRetirements_HappyPath_ClearsRoomsAndAudits
@@ -28,20 +30,20 @@ func TestProcessPendingUserRetirements_HappyPath_ClearsRoomsAndAudits(t *testing
 	s := newTestServer(t)
 
 	// Confirm bob exists with rooms before retirement.
-	bob := s.store.GetUserByID("bob")
+	bob := s.store.GetUserByID(testutil.UserID("bob"))
 	if bob == nil {
 		t.Fatal("bob should exist")
 	}
-	bobRoomsBefore := s.store.GetUserRoomIDs("bob")
+	bobRoomsBefore := s.store.GetUserRoomIDs(testutil.UserID("bob"))
 	if len(bobRoomsBefore) == 0 {
 		t.Fatal("precondition: bob should have rooms")
 	}
 
 	// Simulate the CLI side: flip the retired flag, then enqueue.
-	if err := s.store.SetUserRetired("bob", "key_lost"); err != nil {
+	if err := s.store.SetUserRetired(testutil.UserID("bob"), "key_lost"); err != nil {
 		t.Fatalf("set retired: %v", err)
 	}
-	if err := s.store.RecordPendingUserRetirement("bob", "os:1000", "key_lost"); err != nil {
+	if err := s.store.RecordPendingUserRetirement(testutil.UserID("bob"), "os:1000", "key_lost"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -50,7 +52,7 @@ func TestProcessPendingUserRetirements_HappyPath_ClearsRoomsAndAudits(t *testing
 
 	// After processing: bob should have no rooms (handleRetirement
 	// called performRoomLeave for each one).
-	bobRoomsAfter := s.store.GetUserRoomIDs("bob")
+	bobRoomsAfter := s.store.GetUserRoomIDs(testutil.UserID("bob"))
 	if len(bobRoomsAfter) != 0 {
 		t.Errorf("expected bob to be removed from all rooms, still in: %v", bobRoomsAfter)
 	}
@@ -62,7 +64,7 @@ func TestProcessPendingUserRetirements_HappyPath_ClearsRoomsAndAudits(t *testing
 	}
 
 	// The user is still retired (we don't un-retire on processing).
-	bobAfter := s.store.GetUserByID("bob")
+	bobAfter := s.store.GetUserByID(testutil.UserID("bob"))
 	if bobAfter == nil || !bobAfter.Retired {
 		t.Error("bob should still be retired after processing")
 	}
@@ -75,7 +77,7 @@ func TestProcessPendingUserRetirements_SkipsMissingUser(t *testing.T) {
 	s := newTestServer(t)
 
 	// Enqueue a retirement for a user that doesn't exist.
-	if err := s.store.RecordPendingUserRetirement("usr_ghost", "os:1000", "admin"); err != nil {
+	if err := s.store.RecordPendingUserRetirement(testutil.UserID("ghost"), "os:1000", "admin"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -98,23 +100,23 @@ func TestProcessPendingUserRetirements_SkipsNonRetiredUser(t *testing.T) {
 	s := newTestServer(t)
 
 	// Enqueue a retirement for bob WITHOUT flipping the retired flag.
-	if err := s.store.RecordPendingUserRetirement("bob", "os:1000", "admin"); err != nil {
+	if err := s.store.RecordPendingUserRetirement(testutil.UserID("bob"), "os:1000", "admin"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	bobRoomsBefore := s.store.GetUserRoomIDs("bob")
+	bobRoomsBefore := s.store.GetUserRoomIDs(testutil.UserID("bob"))
 
 	s.processPendingUserRetirements()
 
 	// Bob should still have his rooms — handleRetirement was NOT
 	// invoked because the precondition check rejected the row.
-	bobRoomsAfter := s.store.GetUserRoomIDs("bob")
+	bobRoomsAfter := s.store.GetUserRoomIDs(testutil.UserID("bob"))
 	if len(bobRoomsAfter) != len(bobRoomsBefore) {
 		t.Errorf("processor should not have touched non-retired user's rooms, before=%d after=%d", len(bobRoomsBefore), len(bobRoomsAfter))
 	}
 
 	// Bob is still not retired.
-	bob := s.store.GetUserByID("bob")
+	bob := s.store.GetUserByID(testutil.UserID("bob"))
 	if bob == nil || bob.Retired {
 		t.Error("bob should still NOT be retired after skipped processing")
 	}
@@ -134,7 +136,7 @@ func TestProcessPendingUserRetirements_MultipleRowsInOneTick(t *testing.T) {
 	s := newTestServer(t)
 
 	// Retire bob and carol via the CLI-side flow.
-	for _, userID := range []string{"bob", "carol"} {
+	for _, userID := range []string{testutil.UserID("bob"), testutil.UserID("carol")} {
 		if err := s.store.SetUserRetired(userID, "admin"); err != nil {
 			t.Fatalf("set retired %s: %v", userID, err)
 		}
@@ -146,7 +148,7 @@ func TestProcessPendingUserRetirements_MultipleRowsInOneTick(t *testing.T) {
 	s.processPendingUserRetirements()
 
 	// Both should be removed from rooms.
-	for _, userID := range []string{"bob", "carol"} {
+	for _, userID := range []string{testutil.UserID("bob"), testutil.UserID("carol")} {
 		rooms := s.store.GetUserRoomIDs(userID)
 		if len(rooms) != 0 {
 			t.Errorf("%s should have no rooms after processing, got %v", userID, rooms)
@@ -162,10 +164,10 @@ func TestProcessPendingUserRetirements_MultipleRowsInOneTick(t *testing.T) {
 func TestProcessPendingUserRetirements_AuditEntryCreditsOperator(t *testing.T) {
 	s := newTestServer(t)
 
-	if err := s.store.SetUserRetired("bob", "admin"); err != nil {
+	if err := s.store.SetUserRetired(testutil.UserID("bob"), "admin"); err != nil {
 		t.Fatalf("set retired: %v", err)
 	}
-	if err := s.store.RecordPendingUserRetirement("bob", "os:1234", "admin"); err != nil {
+	if err := s.store.RecordPendingUserRetirement(testutil.UserID("bob"), testutil.UserID("os:1234"), "admin"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -180,13 +182,13 @@ func TestProcessPendingUserRetirements_AuditEntryCreditsOperator(t *testing.T) {
 	}
 	auditContent := string(auditBytes)
 
-	if !strings.Contains(auditContent, "os:1234") {
+	if !strings.Contains(auditContent, testutil.UserID("os:1234")) {
 		t.Errorf("audit log missing operator source 'os:1234': %q", auditContent)
 	}
 	if !strings.Contains(auditContent, "retire-user") {
 		t.Errorf("audit log missing 'retire-user' action: %q", auditContent)
 	}
-	if !strings.Contains(auditContent, "user=bob") {
+	if !strings.Contains(auditContent, "user="+testutil.UserID("bob")) {
 		t.Errorf("audit log missing 'user=bob': %q", auditContent)
 	}
 }

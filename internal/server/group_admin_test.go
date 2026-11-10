@@ -22,35 +22,36 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // --- handleAddToGroup ---
 
 func TestHandleAddToGroup_AdminCanAdd(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_add", "alice", []string{"alice"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("add"), testutil.UserID("alice"), []string{testutil.UserID("alice")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
-	bob := testClientFor("bob", "dev_bob_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.clients["dev_bob_1"] = bob.Client
 	s.mu.Unlock()
 
 	raw, _ := json.Marshal(protocol.AddToGroup{
-		Type: "add_to_group", Group: "group_add", User: "bob",
+		Type: "add_to_group", Group: testutil.GroupID("add"), User: testutil.UserID("bob"),
 	})
 	s.handleAddToGroup(alice.Client, raw)
 
 	// bob should be a member now
-	isMember, _ := s.store.IsGroupMember("group_add", "bob")
+	isMember, _ := s.store.IsGroupMember(testutil.GroupID("add"), testutil.UserID("bob"))
 	if !isMember {
 		t.Error("bob should be a member after add")
 	}
 	// bob should NOT be an admin (promote separately)
-	if isAdmin, _ := s.store.IsGroupAdmin("group_add", "bob"); isAdmin {
+	if isAdmin, _ := s.store.IsGroupAdmin(testutil.GroupID("add"), testutil.UserID("bob")); isAdmin {
 		t.Error("bob should not be admin after add; admins are promoted separately")
 	}
 
@@ -72,13 +73,13 @@ func TestHandleAddToGroup_AdminCanAdd(t *testing.T) {
 		var addedTo protocol.GroupAddedTo
 		if err := json.Unmarshal(raw, &addedTo); err == nil && addedTo.Type == "group_added_to" {
 			foundAddedTo = true
-			if addedTo.Group != "group_add" {
+			if addedTo.Group != testutil.GroupID("add") {
 				t.Errorf("group_added_to group = %q, want group_add", addedTo.Group)
 			}
-			if addedTo.AddedBy != "alice" {
+			if addedTo.AddedBy != testutil.UserID("alice") {
 				t.Errorf("added_by = %q, want alice", addedTo.AddedBy)
 			}
-			if len(addedTo.Admins) != 1 || addedTo.Admins[0] != "alice" {
+			if len(addedTo.Admins) != 1 || addedTo.Admins[0] != testutil.UserID("alice") {
 				t.Errorf("admins = %v, want [alice]", addedTo.Admins)
 			}
 		}
@@ -90,17 +91,17 @@ func TestHandleAddToGroup_AdminCanAdd(t *testing.T) {
 
 func TestHandleAddToGroup_NonAdminRejected(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_add", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("add"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_bob_1"] = bob.Client
 	s.mu.Unlock()
 
 	raw, _ := json.Marshal(protocol.AddToGroup{
-		Type: "add_to_group", Group: "group_add", User: "carol",
+		Type: "add_to_group", Group: testutil.GroupID("add"), User: testutil.UserID("carol"),
 	})
 	s.handleAddToGroup(bob.Client, raw)
 
@@ -117,7 +118,7 @@ func TestHandleAddToGroup_NonAdminRejected(t *testing.T) {
 	}
 
 	// carol should not have been added
-	isMember, _ := s.store.IsGroupMember("group_add", "carol")
+	isMember, _ := s.store.IsGroupMember(testutil.GroupID("add"), testutil.UserID("carol"))
 	if isMember {
 		t.Error("carol should not be a member after non-admin attempt")
 	}
@@ -125,21 +126,21 @@ func TestHandleAddToGroup_NonAdminRejected(t *testing.T) {
 
 func TestHandleAddToGroup_PrivacyResponsesIdentical(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_real", "alice", []string{"alice"}, "Real"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("real"), testutil.UserID("alice"), []string{testutil.UserID("alice")}, "Real"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
 	// Case 1: carol probes an unknown group
-	probe := testClientFor("carol", "dev_carol_1")
+	probe := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	rawProbe, _ := json.Marshal(protocol.AddToGroup{
-		Type: "add_to_group", Group: "group_does_not_exist", User: "dave",
+		Type: "add_to_group", Group: testutil.GroupID("does_not_exist"), User: testutil.UserID("dave"),
 	})
 	s.handleAddToGroup(probe.Client, rawProbe)
 
 	// Case 2: carol probes a real group she's not a member of
-	nonMember := testClientFor("carol", "dev_carol_1")
+	nonMember := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	rawReal, _ := json.Marshal(protocol.AddToGroup{
-		Type: "add_to_group", Group: "group_real", User: "dave",
+		Type: "add_to_group", Group: testutil.GroupID("real"), User: testutil.UserID("dave"),
 	})
 	s.handleAddToGroup(nonMember.Client, rawReal)
 
@@ -157,17 +158,17 @@ func TestHandleAddToGroup_PrivacyResponsesIdentical(t *testing.T) {
 
 func TestHandleAddToGroup_AlreadyMemberRejected(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_add", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("add"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
 
 	raw, _ := json.Marshal(protocol.AddToGroup{
-		Type: "add_to_group", Group: "group_add", User: "bob",
+		Type: "add_to_group", Group: testutil.GroupID("add"), User: testutil.UserID("bob"),
 	})
 	s.handleAddToGroup(alice.Client, raw)
 
@@ -199,17 +200,17 @@ func TestHandleAddToGroup_GroupAtCapRejected(t *testing.T) {
 	s.cfg.Unlock()
 
 	// Group is already at cap (alice + bob = 2). Adding carol should fail.
-	if err := s.store.CreateGroup("group_cap", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("cap"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
 
 	raw, _ := json.Marshal(protocol.AddToGroup{
-		Type: "add_to_group", Group: "group_cap", User: "carol",
+		Type: "add_to_group", Group: testutil.GroupID("cap"), User: testutil.UserID("carol"),
 	})
 	s.handleAddToGroup(alice.Client, raw)
 
@@ -228,7 +229,7 @@ func TestHandleAddToGroup_GroupAtCapRejected(t *testing.T) {
 	}
 
 	// Confirm carol was NOT added.
-	if isMember, _ := s.store.IsGroupMember("group_cap", "carol"); isMember {
+	if isMember, _ := s.store.IsGroupMember(testutil.GroupID("cap"), testutil.UserID("carol")); isMember {
 		t.Error("carol should NOT be a member after cap rejection")
 	}
 }
@@ -242,23 +243,23 @@ func TestHandleAddToGroup_BelowCapSucceeds(t *testing.T) {
 	s.cfg.Unlock()
 
 	// Group has 2 members; cap is 3; one seat remaining.
-	if err := s.store.CreateGroup("group_below_cap", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("below_cap"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
-	carol := testClientFor("carol", "dev_carol_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
+	carol := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.clients["dev_carol_1"] = carol.Client
 	s.mu.Unlock()
 
 	raw, _ := json.Marshal(protocol.AddToGroup{
-		Type: "add_to_group", Group: "group_below_cap", User: "carol",
+		Type: "add_to_group", Group: testutil.GroupID("below_cap"), User: testutil.UserID("carol"),
 	})
 	s.handleAddToGroup(alice.Client, raw)
 
-	if isMember, _ := s.store.IsGroupMember("group_below_cap", "carol"); !isMember {
+	if isMember, _ := s.store.IsGroupMember(testutil.GroupID("below_cap"), testutil.UserID("carol")); !isMember {
 		t.Error("carol should have been added (under cap)")
 	}
 }
@@ -273,7 +274,7 @@ func TestHandleCreateGroup_CapIsConfigurable(t *testing.T) {
 	s.cfg.Server.Groups.MaxMembers = 2
 	s.cfg.Unlock()
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
@@ -282,7 +283,7 @@ func TestHandleCreateGroup_CapIsConfigurable(t *testing.T) {
 	// allMembers = [alice, bob, carol] = 3 > cap(2).
 	raw, _ := json.Marshal(protocol.CreateGroup{
 		Type:    "create_group",
-		Members: []string{"bob", "carol"},
+		Members: []string{testutil.UserID("bob"), testutil.UserID("carol")},
 		Name:    "Too Big",
 	})
 	s.handleCreateGroup(alice.Client, raw)
@@ -316,11 +317,11 @@ func TestHandleAddToGroup_CapDefaultsTo100WhenZero(t *testing.T) {
 	s.cfg.Server.Groups.MaxMembers = 0
 	s.cfg.Unlock()
 
-	if err := s.store.CreateGroup("group_zero_cap", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("zero_cap"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
@@ -328,11 +329,11 @@ func TestHandleAddToGroup_CapDefaultsTo100WhenZero(t *testing.T) {
 	// With MaxMembers = 0 and the defensive fallback kicking in (100),
 	// adding carol to a 2-person group must succeed.
 	raw, _ := json.Marshal(protocol.AddToGroup{
-		Type: "add_to_group", Group: "group_zero_cap", User: "carol",
+		Type: "add_to_group", Group: testutil.GroupID("zero_cap"), User: testutil.UserID("carol"),
 	})
 	s.handleAddToGroup(alice.Client, raw)
 
-	if isMember, _ := s.store.IsGroupMember("group_zero_cap", "carol"); !isMember {
+	if isMember, _ := s.store.IsGroupMember(testutil.GroupID("zero_cap"), testutil.UserID("carol")); !isMember {
 		t.Error("carol should have been added — zero cap should trigger the 100 fallback, not block")
 	}
 }
@@ -341,24 +342,24 @@ func TestHandleAddToGroup_CapDefaultsTo100WhenZero(t *testing.T) {
 
 func TestHandleRemoveFromGroup_AdminCanRemove(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_kick", "alice", []string{"alice", "bob", "carol"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("kick"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob"), testutil.UserID("carol")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
-	bob := testClientFor("bob", "dev_bob_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.clients["dev_bob_1"] = bob.Client
 	s.mu.Unlock()
 
 	raw, _ := json.Marshal(protocol.RemoveFromGroup{
-		Type: "remove_from_group", Group: "group_kick", User: "bob",
+		Type: "remove_from_group", Group: testutil.GroupID("kick"), User: testutil.UserID("bob"),
 	})
 	s.handleRemoveFromGroup(alice.Client, raw)
 
 	// bob should be removed from group_members
-	isMember, _ := s.store.IsGroupMember("group_kick", "bob")
+	isMember, _ := s.store.IsGroupMember(testutil.GroupID("kick"), testutil.UserID("bob"))
 	if isMember {
 		t.Error("bob should have been removed")
 	}
@@ -373,7 +374,7 @@ func TestHandleRemoveFromGroup_AdminCanRemove(t *testing.T) {
 			if left.Reason != "removed" {
 				t.Errorf("bob's group_left reason = %q, want 'removed'", left.Reason)
 			}
-			if left.By != "alice" {
+			if left.By != testutil.UserID("alice") {
 				t.Errorf("bob's group_left by = %q, want alice", left.By)
 			}
 		}
@@ -385,19 +386,19 @@ func TestHandleRemoveFromGroup_AdminCanRemove(t *testing.T) {
 
 func TestHandleRemoveFromGroup_LastAdminRejected(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_la", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("la"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 	// bob promoted so both are admins
-	if err := s.store.SetGroupMemberAdmin("group_la", "bob", true); err != nil {
+	if err := s.store.SetGroupMemberAdmin(testutil.GroupID("la"), testutil.UserID("bob"), true); err != nil {
 		t.Fatalf("promote bob: %v", err)
 	}
 	// demote alice so only bob is admin
-	if err := s.store.SetGroupMemberAdmin("group_la", "alice", false); err != nil {
+	if err := s.store.SetGroupMemberAdmin(testutil.GroupID("la"), testutil.UserID("alice"), false); err != nil {
 		t.Fatalf("demote alice: %v", err)
 	}
 
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_bob_1"] = bob.Client
 	s.mu.Unlock()
@@ -406,7 +407,7 @@ func TestHandleRemoveFromGroup_LastAdminRejected(t *testing.T) {
 	// RemoveFromGroup's self-kick shortcut either, because the shortcut
 	// routes to handleLeaveGroup which has the same last-admin gate.
 	raw, _ := json.Marshal(protocol.RemoveFromGroup{
-		Type: "remove_from_group", Group: "group_la", User: "bob",
+		Type: "remove_from_group", Group: testutil.GroupID("la"), User: testutil.UserID("bob"),
 	})
 	s.handleRemoveFromGroup(bob.Client, raw)
 
@@ -423,19 +424,19 @@ func TestHandleRemoveFromGroup_LastAdminRejected(t *testing.T) {
 
 func TestHandleRemoveFromGroup_PrivacyResponsesIdentical(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_real", "alice", []string{"alice"}, "Real"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("real"), testutil.UserID("alice"), []string{testutil.UserID("alice")}, "Real"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	probe := testClientFor("carol", "dev_carol_1")
+	probe := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	rawProbe, _ := json.Marshal(protocol.RemoveFromGroup{
-		Type: "remove_from_group", Group: "group_does_not_exist", User: "dave",
+		Type: "remove_from_group", Group: testutil.GroupID("does_not_exist"), User: testutil.UserID("dave"),
 	})
 	s.handleRemoveFromGroup(probe.Client, rawProbe)
 
-	nonMember := testClientFor("carol", "dev_carol_1")
+	nonMember := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	rawReal, _ := json.Marshal(protocol.RemoveFromGroup{
-		Type: "remove_from_group", Group: "group_real", User: "dave",
+		Type: "remove_from_group", Group: testutil.GroupID("real"), User: testutil.UserID("dave"),
 	})
 	s.handleRemoveFromGroup(nonMember.Client, rawReal)
 
@@ -452,16 +453,16 @@ func TestHandleRemoveFromGroup_PrivacyResponsesIdentical(t *testing.T) {
 
 func TestPerformGroupLeave_RemovedReason(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_r", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("r"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 	// promote bob so alice can remove him without the last-admin gate blocking via RemoveFromGroup
-	if err := s.store.SetGroupMemberAdmin("group_r", "bob", true); err != nil {
+	if err := s.store.SetGroupMemberAdmin(testutil.GroupID("r"), testutil.UserID("bob"), true); err != nil {
 		t.Fatalf("promote bob: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
-	bob := testClientFor("bob", "dev_bob_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.clients["dev_bob_1"] = bob.Client
@@ -469,7 +470,7 @@ func TestPerformGroupLeave_RemovedReason(t *testing.T) {
 
 	// Direct call to the shared helper with reason="removed" + by="alice".
 	// Asserts that the new By field is routed through broadcast + echo.
-	s.performGroupLeave("group_r", "bob", "removed", "alice", "alice")
+	s.performGroupLeave(testutil.GroupID("r"), testutil.UserID("bob"), "removed", testutil.UserID("alice"), testutil.UserID("alice"))
 
 	// alice (remaining member) should receive group_event{leave, by: alice, reason: removed}
 	aliceMsgs := alice.messages()
@@ -481,7 +482,7 @@ func TestPerformGroupLeave_RemovedReason(t *testing.T) {
 			if ev.Reason != "removed" {
 				t.Errorf("event reason = %q, want removed", ev.Reason)
 			}
-			if ev.By != "alice" {
+			if ev.By != testutil.UserID("alice") {
 				t.Errorf("event by = %q, want alice", ev.By)
 			}
 		}
@@ -500,7 +501,7 @@ func TestPerformGroupLeave_RemovedReason(t *testing.T) {
 			if left.Reason != "removed" {
 				t.Errorf("bob's group_left reason = %q, want removed", left.Reason)
 			}
-			if left.By != "alice" {
+			if left.By != testutil.UserID("alice") {
 				t.Errorf("bob's group_left by = %q, want alice", left.By)
 			}
 		}
@@ -534,11 +535,11 @@ func TestPerformGroupLeave_RemovedReason(t *testing.T) {
 func TestHandleRemoveFromGroup_LastMemberCleanupOnKickedSoleMember(t *testing.T) {
 	s := newTestServer(t)
 	groupID := store.GenerateID("group_")
-	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(groupID, testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
@@ -547,25 +548,25 @@ func TestHandleRemoveFromGroup_LastMemberCleanupOnKickedSoleMember(t *testing.T)
 	// so the full pipeline runs: admin check + self-kick check +
 	// last-admin check + performGroupLeave.
 	raw, _ := json.Marshal(protocol.RemoveFromGroup{
-		Type: "remove_from_group", Group: groupID, User: "bob",
+		Type: "remove_from_group", Group: groupID, User: testutil.UserID("bob"),
 	})
 	s.handleRemoveFromGroup(alice.Client, raw)
 
 	// bob is no longer a member
-	isBobMember, _ := s.store.IsGroupMember(groupID, "bob")
+	isBobMember, _ := s.store.IsGroupMember(groupID, testutil.UserID("bob"))
 	if isBobMember {
 		t.Error("bob should be removed after kick")
 	}
 
 	// alice is still a member — group row should survive
-	isAliceMember, _ := s.store.IsGroupMember(groupID, "alice")
+	isAliceMember, _ := s.store.IsGroupMember(groupID, testutil.UserID("alice"))
 	if !isAliceMember {
 		t.Error("alice should still be a member")
 	}
 
 	// group_conversations row still exists (alice is still in it).
 	// Verify via GetUserGroups — the group should appear in alice's list.
-	groups, _ := s.store.GetUserGroups("alice")
+	groups, _ := s.store.GetUserGroups(testutil.UserID("alice"))
 	found := false
 	for _, g := range groups {
 		if g.ID == groupID {
@@ -581,7 +582,7 @@ func TestHandleRemoveFromGroup_LastMemberCleanupOnKickedSoleMember(t *testing.T)
 	events, _ := s.store.GetGroupEventsSince(groupID, 0)
 	var foundKickEvent bool
 	for _, e := range events {
-		if e.Event == "leave" && e.User == "bob" && e.By == "alice" && e.Reason == "removed" {
+		if e.Event == "leave" && e.User == testutil.UserID("bob") && e.By == testutil.UserID("alice") && e.Reason == "removed" {
 			foundKickEvent = true
 		}
 	}
@@ -594,22 +595,22 @@ func TestHandleRemoveFromGroup_LastMemberCleanupOnKickedSoleMember(t *testing.T)
 
 func TestHandlePromoteGroupAdmin_Success(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_p", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("p"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
 
 	raw, _ := json.Marshal(protocol.PromoteGroupAdmin{
-		Type: "promote_group_admin", Group: "group_p", User: "bob",
+		Type: "promote_group_admin", Group: testutil.GroupID("p"), User: testutil.UserID("bob"),
 	})
 	s.handlePromoteGroupAdmin(alice.Client, raw)
 
 	// bob should now be an admin
-	isAdmin, _ := s.store.IsGroupAdmin("group_p", "bob")
+	isAdmin, _ := s.store.IsGroupAdmin(testutil.GroupID("p"), testutil.UserID("bob"))
 	if !isAdmin {
 		t.Error("bob should be an admin after promote")
 	}
@@ -617,18 +618,18 @@ func TestHandlePromoteGroupAdmin_Success(t *testing.T) {
 
 func TestHandlePromoteGroupAdmin_AlreadyAdminRejected(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_p", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("p"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	s.store.SetGroupMemberAdmin("group_p", "bob", true)
+	s.store.SetGroupMemberAdmin(testutil.GroupID("p"), testutil.UserID("bob"), true)
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
 
 	raw, _ := json.Marshal(protocol.PromoteGroupAdmin{
-		Type: "promote_group_admin", Group: "group_p", User: "bob",
+		Type: "promote_group_admin", Group: testutil.GroupID("p"), User: testutil.UserID("bob"),
 	})
 	s.handlePromoteGroupAdmin(alice.Client, raw)
 
@@ -647,22 +648,22 @@ func TestHandlePromoteGroupAdmin_AlreadyAdminRejected(t *testing.T) {
 
 func TestHandleDemoteGroupAdmin_Success(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_d", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("d"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	s.store.SetGroupMemberAdmin("group_d", "bob", true) // both admins
+	s.store.SetGroupMemberAdmin(testutil.GroupID("d"), testutil.UserID("bob"), true) // both admins
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
 
 	raw, _ := json.Marshal(protocol.DemoteGroupAdmin{
-		Type: "demote_group_admin", Group: "group_d", User: "bob",
+		Type: "demote_group_admin", Group: testutil.GroupID("d"), User: testutil.UserID("bob"),
 	})
 	s.handleDemoteGroupAdmin(alice.Client, raw)
 
-	isAdmin, _ := s.store.IsGroupAdmin("group_d", "bob")
+	isAdmin, _ := s.store.IsGroupAdmin(testutil.GroupID("d"), testutil.UserID("bob"))
 	if isAdmin {
 		t.Error("bob should no longer be an admin")
 	}
@@ -670,19 +671,19 @@ func TestHandleDemoteGroupAdmin_Success(t *testing.T) {
 
 func TestHandleDemoteGroupAdmin_LastAdminRejected(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_d", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("d"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 	// alice is the only admin; bob is a regular member
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
 
 	// alice tries to demote herself — rejected
 	raw, _ := json.Marshal(protocol.DemoteGroupAdmin{
-		Type: "demote_group_admin", Group: "group_d", User: "alice",
+		Type: "demote_group_admin", Group: testutil.GroupID("d"), User: testutil.UserID("alice"),
 	})
 	s.handleDemoteGroupAdmin(alice.Client, raw)
 
@@ -711,24 +712,24 @@ func TestHandleRetirement_SoleMemberOrphanCleanupFires(t *testing.T) {
 	s := newTestServer(t)
 
 	// Seed alice as a real user so handleRetirement's user lookup succeeds.
-	if err := s.store.CreateGroup("group_solo", "alice", []string{"alice"}, "Solo"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("solo"), testutil.UserID("alice"), []string{testutil.UserID("alice")}, "Solo"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 	// Insert a message so the per-group DB file actually exists on disk.
-	s.store.InsertGroupMessage("group_solo", store.StoredMessage{
-		ID: "m1", Sender: "alice", TS: 100, Payload: "payload",
+	s.store.InsertGroupMessage(testutil.GroupID("solo"), store.StoredMessage{
+		ID: testutil.MsgID("m1"), Sender: testutil.UserID("alice"), TS: 100, Payload: "payload",
 	})
 
-	s.handleRetirement("alice", nil, "self_compromise")
+	s.handleRetirement(testutil.UserID("alice"), nil, "self_compromise")
 
 	// Assertion 1: alice is no longer a member of group_solo
-	isMember, _ := s.store.IsGroupMember("group_solo", "alice")
+	isMember, _ := s.store.IsGroupMember(testutil.GroupID("solo"), testutil.UserID("alice"))
 	if isMember {
 		t.Error("alice should no longer be a member after retirement")
 	}
 
 	// Assertion 2: group_members for group_solo is empty
-	members, _ := s.store.GetGroupMembers("group_solo")
+	members, _ := s.store.GetGroupMembers(testutil.GroupID("solo"))
 	if len(members) != 0 {
 		t.Errorf("group_members for group_solo should be empty, got %v", members)
 	}
@@ -736,9 +737,9 @@ func TestHandleRetirement_SoleMemberOrphanCleanupFires(t *testing.T) {
 	// Assertion 3: the group_conversations row is gone (via
 	// DeleteGroupConversation cascade from performGroupLeave's last-member
 	// cleanup). GetUserGroups for any user should not return group_solo.
-	groups, _ := s.store.GetUserGroups("alice")
+	groups, _ := s.store.GetUserGroups(testutil.UserID("alice"))
 	for _, g := range groups {
-		if g.ID == "group_solo" {
+		if g.ID == testutil.GroupID("solo") {
 			t.Error("group_solo row should be gone after last-member cleanup")
 		}
 	}
@@ -749,14 +750,14 @@ func TestHandleRetirement_LastAdminAutoPromotesOldestMember(t *testing.T) {
 
 	// alice (sole admin) + bob + carol (both regular members).
 	// bob joined before carol (joined_at ordering).
-	if err := s.store.CreateGroup("group_s", "alice", []string{"alice", "bob", "carol"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("s"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob"), testutil.UserID("carol")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	s.handleRetirement("alice", nil, "self_compromise")
+	s.handleRetirement(testutil.UserID("alice"), nil, "self_compromise")
 
 	// alice no longer a member
-	if isMember, _ := s.store.IsGroupMember("group_s", "alice"); isMember {
+	if isMember, _ := s.store.IsGroupMember(testutil.GroupID("s"), testutil.UserID("alice")); isMember {
 		t.Error("alice should no longer be a member")
 	}
 
@@ -765,11 +766,11 @@ func TestHandleRetirement_LastAdminAutoPromotesOldestMember(t *testing.T) {
 	// datetime('now'), ordering is by user string ascending as a
 	// secondary sort). Whichever got promoted, exactly ONE new admin
 	// should exist.
-	admins, _ := s.store.GetGroupAdminIDs("group_s")
+	admins, _ := s.store.GetGroupAdminIDs(testutil.GroupID("s"))
 	if len(admins) != 1 {
 		t.Fatalf("expected exactly 1 admin after succession, got %d: %v", len(admins), admins)
 	}
-	if admins[0] != "bob" && admins[0] != "carol" {
+	if admins[0] != testutil.UserID("bob") && admins[0] != testutil.UserID("carol") {
 		t.Errorf("successor = %q, want bob or carol", admins[0])
 	}
 }

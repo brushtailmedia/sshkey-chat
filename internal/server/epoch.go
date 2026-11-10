@@ -349,6 +349,10 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	if !s.validateIDOrReject(c, "epoch_rotate", msg.Room, "room_", func() { s.respondError(c, "", protocol.ErrEpochConflict, "Conflict detected — please try again", 0) }) {
+		return
+	}
+
 	// Validate epoch number matches pending
 	s.epochs.mu.Lock()
 	state := s.epochs.rooms[msg.Room]

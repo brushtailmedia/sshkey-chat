@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestHandleLeaveRoom_PrivacyResponsesIdentical is the byte-identity
@@ -30,12 +31,12 @@ func TestHandleLeaveRoom_PrivacyResponsesIdentical(t *testing.T) {
 	}
 
 	// Carol probes a room ID that does NOT exist
-	probe := testClientFor("carol", "dev_carol_1")
-	rawProbe, _ := json.Marshal(protocol.LeaveRoom{Type: "leave_room", Room: "room_does_not_exist"})
+	probe := testClientFor(testutil.UserID("carol"), "dev_carol_1")
+	rawProbe, _ := json.Marshal(protocol.LeaveRoom{Type: "leave_room", Room: testutil.RoomID("does_not_exist")})
 	s.handleLeaveRoom(probe.Client, rawProbe)
 
 	// Carol probes the real engineering room (alice is in it, carol is not)
-	nonMember := testClientFor("carol", "dev_carol_2")
+	nonMember := testClientFor(testutil.UserID("carol"), "dev_carol_2")
 	rawReal, _ := json.Marshal(protocol.LeaveRoom{Type: "leave_room", Room: generalID})
 	s.handleLeaveRoom(nonMember.Client, rawReal)
 
@@ -70,14 +71,14 @@ func TestHandleSend_PrivacyResponsesIdentical(t *testing.T) {
 		t.Fatal("seed should have engineering room")
 	}
 
-	probe := testClientFor("carol", "dev_carol_1")
+	probe := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	rawProbe, _ := json.Marshal(protocol.Send{
-		Type: "send", Room: "room_does_not_exist",
+		Type: "send", Room: testutil.RoomID("does_not_exist"),
 		Epoch: 1, Payload: "p", Signature: "s",
 	})
 	s.handleSend(probe.Client, rawProbe)
 
-	nonMember := testClientFor("carol", "dev_carol_2")
+	nonMember := testClientFor(testutil.UserID("carol"), "dev_carol_2")
 	rawReal, _ := json.Marshal(protocol.Send{
 		Type: "send", Room: engineeringID,
 		Epoch: 1, Payload: "p", Signature: "s",
@@ -118,7 +119,7 @@ func TestHandleLeaveRoom_PolicyGateDenial(t *testing.T) {
 
 	// Bob is in "general" via the seed
 	generalID := s.store.RoomDisplayNameToID("general")
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 
 	raw, _ := json.Marshal(protocol.LeaveRoom{Type: "leave_room", Room: generalID})
 	s.handleLeaveRoom(bob.Client, raw)
@@ -137,7 +138,7 @@ func TestHandleLeaveRoom_PolicyGateDenial(t *testing.T) {
 	}
 
 	// Bob should still be a member after denial
-	if !s.store.IsRoomMemberByID(generalID, "bob") {
+	if !s.store.IsRoomMemberByID(generalID, testutil.UserID("bob")) {
 		t.Error("bob should still be a member after policy denial")
 	}
 }
@@ -154,8 +155,8 @@ func TestHandleLeaveRoom_HappyPath(t *testing.T) {
 	s.cfg.Unlock()
 
 	generalID := s.store.RoomDisplayNameToID("general")
-	bob := testClientFor("bob", "dev_bob_1")
-	alice := testClientFor("alice", "dev_alice_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 
 	// Register both sessions so the broadcast and echo land somewhere
 	s.mu.Lock()
@@ -167,7 +168,7 @@ func TestHandleLeaveRoom_HappyPath(t *testing.T) {
 	s.handleLeaveRoom(bob.Client, raw)
 
 	// Bob should be removed from room_members
-	if s.store.IsRoomMemberByID(generalID, "bob") {
+	if s.store.IsRoomMemberByID(generalID, testutil.UserID("bob")) {
 		t.Error("bob should be removed from general after leave")
 	}
 
@@ -203,7 +204,7 @@ func TestHandleLeaveRoom_HappyPath(t *testing.T) {
 	if ev.Event != "leave" {
 		t.Errorf("broadcast event = %q, want leave", ev.Event)
 	}
-	if ev.User != "bob" {
+	if ev.User != testutil.UserID("bob") {
 		t.Errorf("broadcast user = %q, want bob", ev.User)
 	}
 	if ev.Reason != "" {
@@ -221,8 +222,8 @@ func TestPerformRoomLeave_AdminReason(t *testing.T) {
 	s := newTestServer(t)
 
 	generalID := s.store.RoomDisplayNameToID("general")
-	bob := testClientFor("bob", "dev_bob_1")
-	alice := testClientFor("alice", "dev_alice_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 
 	s.mu.Lock()
 	s.clients["dev_bob_1"] = bob.Client
@@ -232,10 +233,10 @@ func TestPerformRoomLeave_AdminReason(t *testing.T) {
 	// Call performRoomLeave directly with an "removed" reason. Bypasses
 	// the handler's policy gate — this is what the admin path would
 	// look like internally.
-	s.performRoomLeave(generalID, "bob", "removed", "test-admin")
+	s.performRoomLeave(generalID, testutil.UserID("bob"), "removed", testutil.UserID("test-admin"))
 
 	// Bob removed from members
-	if s.store.IsRoomMemberByID(generalID, "bob") {
+	if s.store.IsRoomMemberByID(generalID, testutil.UserID("bob")) {
 		t.Error("bob should be removed")
 	}
 
@@ -269,15 +270,15 @@ func TestPerformRoomLeave_RetirementReason(t *testing.T) {
 	s := newTestServer(t)
 
 	generalID := s.store.RoomDisplayNameToID("general")
-	bob := testClientFor("bob", "dev_bob_1")
-	alice := testClientFor("alice", "dev_alice_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 
 	s.mu.Lock()
 	s.clients["dev_bob_1"] = bob.Client
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
 
-	s.performRoomLeave(generalID, "bob", "user_retired", "system")
+	s.performRoomLeave(generalID, testutil.UserID("bob"), "user_retired", testutil.UserID("system"))
 
 	bobMsgs := bob.messages()
 	if len(bobMsgs) != 1 {

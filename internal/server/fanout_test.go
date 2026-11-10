@@ -12,6 +12,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // -----------------------------------------------------------------------------
@@ -154,7 +155,7 @@ func TestFanOut_OneFailingRecipient_CountsDropAndContinues(t *testing.T) {
 	sw := newSlowWriter(-1)
 	sw.setErr(errors.New("channel closed"))
 	c3 := &Client{
-		UserID:   "usr_test",
+		UserID:   testutil.UserID("test"),
 		DeviceID: "dev_bad",
 		Encoder:  newSafeEncoder(protocol.NewEncoder(sw)),
 	}
@@ -189,7 +190,7 @@ func TestFanOut_DropLogsAtDebugWithVerbAndDevice(t *testing.T) {
 	sw := newSlowWriter(-1)
 	sw.setErr(errors.New("dead channel"))
 	c := &Client{
-		UserID:   "usr_test",
+		UserID:   testutil.UserID("test"),
 		DeviceID: "dev_failing",
 		Encoder:  newSafeEncoder(protocol.NewEncoder(sw)),
 	}
@@ -314,12 +315,12 @@ func TestFanOut_SlowRecipientDoesNotBlockFastRecipients(t *testing.T) {
 	fast1 := newSlowWriter(-1)
 	fast2 := newSlowWriter(-1)
 	cFast1 := &Client{
-		UserID:   "usr_fast_1",
+		UserID:   testutil.UserID("fast_1"),
 		DeviceID: "dev_fast_1",
 		Encoder:  newSafeEncoder(protocol.NewEncoder(fast1)),
 	}
 	cFast2 := &Client{
-		UserID:   "usr_fast_2",
+		UserID:   testutil.UserID("fast_2"),
 		DeviceID: "dev_fast_2",
 		Encoder:  newSafeEncoder(protocol.NewEncoder(fast2)),
 	}
@@ -327,7 +328,7 @@ func TestFanOut_SlowRecipientDoesNotBlockFastRecipients(t *testing.T) {
 	// One slow recipient that blocks after 1 byte.
 	sw := newSlowWriter(1)
 	cSlow := &Client{
-		UserID:   "usr_slow",
+		UserID:   testutil.UserID("slow"),
 		DeviceID: "dev_slow",
 		Encoder:  newSafeEncoder(protocol.NewEncoder(sw)),
 	}

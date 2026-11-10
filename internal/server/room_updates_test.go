@@ -17,6 +17,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func countEnvelopeType(t *testing.T, msgs []json.RawMessage, want string) int {
@@ -77,7 +78,7 @@ func TestProcessPendingRoomUpdates_UpdateTopic(t *testing.T) {
 	}
 
 	// alice is a member of general (per newTestServer fixtures).
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
@@ -120,7 +121,7 @@ func TestProcessPendingRoomUpdates_RenameRoom(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
@@ -146,11 +147,11 @@ func TestProcessPendingRoomUpdates_RenameRoom(t *testing.T) {
 func TestProcessPendingRoomUpdates_SkipsMissingRoom(t *testing.T) {
 	s := newTestServer(t)
 
-	if err := s.store.RecordPendingRoomUpdate("rm_ghost", store.RoomUpdateActionUpdateTopic, "os:1000", "ignored"); err != nil {
+	if err := s.store.RecordPendingRoomUpdate(testutil.RoomID("rm_ghost"), store.RoomUpdateActionUpdateTopic, "os:1000", "ignored"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
@@ -176,7 +177,7 @@ func TestProcessPendingRoomUpdates_NarrowBroadcastMembersOnly(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	// Insert dave but DON'T add him to general.
-	if err := s.store.InsertUser("dave", "ssh-ed25519 AAAA dave-fake", "dave"); err != nil {
+	if err := s.store.InsertUser(testutil.UserID("dave"), "ssh-ed25519 AAAA dave-fake", "dave"); err != nil {
 		t.Fatalf("insert dave: %v", err)
 	}
 
@@ -184,8 +185,8 @@ func TestProcessPendingRoomUpdates_NarrowBroadcastMembersOnly(t *testing.T) {
 	s.store.RecordPendingRoomUpdate(generalID, store.RoomUpdateActionUpdateTopic, "os:1000", "members-only test")
 
 	// alice IS in general; dave is NOT.
-	alice := testClientFor("alice", "dev_alice_1")
-	dave := testClientFor("dave", "dev_dave_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
+	dave := testClientFor(testutil.UserID("dave"), "dev_dave_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.clients["dev_dave_1"] = dave.Client
@@ -246,7 +247,7 @@ func TestProcessPendingRoomUpdates_MultipleRowsInOneTick(t *testing.T) {
 	s.store.RecordPendingRoomUpdate(engID, store.RoomUpdateActionUpdateTopic, "os:1000", "eng topic")
 
 	// alice is a member of both rooms.
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()

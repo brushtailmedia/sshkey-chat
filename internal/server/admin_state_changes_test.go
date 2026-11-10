@@ -19,6 +19,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestProcessPendingAdminStateChanges_Promote verifies that a promote
@@ -27,14 +28,14 @@ func TestProcessPendingAdminStateChanges_Promote(t *testing.T) {
 	s := newTestServer(t)
 
 	// CLI side: flip admin flag, then enqueue.
-	if err := s.store.SetAdmin("bob", true); err != nil {
+	if err := s.store.SetAdmin(testutil.UserID("bob"), true); err != nil {
 		t.Fatalf("set admin: %v", err)
 	}
-	if err := s.store.RecordPendingAdminStateChange("bob", store.AdminStateChangePromote, "os:1000"); err != nil {
+	if err := s.store.RecordPendingAdminStateChange(testutil.UserID("bob"), store.AdminStateChangePromote, "os:1000"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	carol := testClientFor("carol", "dev_carol_1")
+	carol := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	s.mu.Lock()
 	s.clients["dev_carol_1"] = carol.Client
 	s.mu.Unlock()
@@ -52,7 +53,7 @@ func TestProcessPendingAdminStateChanges_Promote(t *testing.T) {
 	if p.Type != "profile" {
 		t.Errorf("type = %q, want profile", p.Type)
 	}
-	if p.User != "bob" {
+	if p.User != testutil.UserID("bob") {
 		t.Errorf("user = %q, want bob", p.User)
 	}
 	if !p.Admin {
@@ -66,14 +67,14 @@ func TestProcessPendingAdminStateChanges_Demote(t *testing.T) {
 	s := newTestServer(t)
 
 	// alice is already an admin in newTestServer. Demote her.
-	if err := s.store.SetAdmin("alice", false); err != nil {
+	if err := s.store.SetAdmin(testutil.UserID("alice"), false); err != nil {
 		t.Fatalf("set admin: %v", err)
 	}
-	if err := s.store.RecordPendingAdminStateChange("alice", store.AdminStateChangeDemote, "os:1000"); err != nil {
+	if err := s.store.RecordPendingAdminStateChange(testutil.UserID("alice"), store.AdminStateChangeDemote, "os:1000"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	carol := testClientFor("carol", "dev_carol_1")
+	carol := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	s.mu.Lock()
 	s.clients["dev_carol_1"] = carol.Client
 	s.mu.Unlock()
@@ -96,14 +97,14 @@ func TestProcessPendingAdminStateChanges_Demote(t *testing.T) {
 func TestProcessPendingAdminStateChanges_Rename(t *testing.T) {
 	s := newTestServer(t)
 
-	if err := s.store.SetUserDisplayName("bob", "robert"); err != nil {
+	if err := s.store.SetUserDisplayName(testutil.UserID("bob"), "robert"); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
-	if err := s.store.RecordPendingAdminStateChange("bob", store.AdminStateChangeRename, "os:1000"); err != nil {
+	if err := s.store.RecordPendingAdminStateChange(testutil.UserID("bob"), store.AdminStateChangeRename, "os:1000"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	carol := testClientFor("carol", "dev_carol_1")
+	carol := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	s.mu.Lock()
 	s.clients["dev_carol_1"] = carol.Client
 	s.mu.Unlock()
@@ -127,11 +128,11 @@ func TestProcessPendingAdminStateChanges_Rename(t *testing.T) {
 func TestProcessPendingAdminStateChanges_SkipsMissingUser(t *testing.T) {
 	s := newTestServer(t)
 
-	if err := s.store.RecordPendingAdminStateChange("usr_ghost", store.AdminStateChangePromote, "os:1000"); err != nil {
+	if err := s.store.RecordPendingAdminStateChange(testutil.UserID("ghost"), store.AdminStateChangePromote, "os:1000"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	carol := testClientFor("carol", "dev_carol_1")
+	carol := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	s.mu.Lock()
 	s.clients["dev_carol_1"] = carol.Client
 	s.mu.Unlock()
@@ -157,12 +158,12 @@ func TestProcessPendingAdminStateChanges_AuditCreditsByAction(t *testing.T) {
 
 	// Promote bob, demote alice, rename carol — three rows, one
 	// audit entry per row.
-	s.store.SetAdmin("bob", true)
-	s.store.RecordPendingAdminStateChange("bob", store.AdminStateChangePromote, "os:1000")
-	s.store.SetAdmin("alice", false)
-	s.store.RecordPendingAdminStateChange("alice", store.AdminStateChangeDemote, "os:1000")
-	s.store.SetUserDisplayName("carol", "carolyn")
-	s.store.RecordPendingAdminStateChange("carol", store.AdminStateChangeRename, "os:1000")
+	s.store.SetAdmin(testutil.UserID("bob"), true)
+	s.store.RecordPendingAdminStateChange(testutil.UserID("bob"), store.AdminStateChangePromote, "os:1000")
+	s.store.SetAdmin(testutil.UserID("alice"), false)
+	s.store.RecordPendingAdminStateChange(testutil.UserID("alice"), store.AdminStateChangeDemote, "os:1000")
+	s.store.SetUserDisplayName(testutil.UserID("carol"), "carolyn")
+	s.store.RecordPendingAdminStateChange(testutil.UserID("carol"), store.AdminStateChangeRename, "os:1000")
 
 	s.processPendingAdminStateChanges()
 
@@ -176,9 +177,9 @@ func TestProcessPendingAdminStateChanges_AuditCreditsByAction(t *testing.T) {
 		"promote",
 		"demote",
 		"rename-user",
-		"user=bob",
-		"user=alice",
-		"user=carol",
+		"user=" + testutil.UserID("bob"),
+		"user=" + testutil.UserID("alice"),
+		"user=" + testutil.UserID("carol"),
 	} {
 		if !strings.Contains(auditContent, want) {
 			t.Errorf("audit log missing %q, got: %q", want, auditContent)
@@ -191,13 +192,13 @@ func TestProcessPendingAdminStateChanges_AuditCreditsByAction(t *testing.T) {
 func TestProcessPendingAdminStateChanges_BroadcastsToAllClients(t *testing.T) {
 	s := newTestServer(t)
 
-	s.store.SetAdmin("bob", true)
-	s.store.RecordPendingAdminStateChange("bob", store.AdminStateChangePromote, "os:1000")
+	s.store.SetAdmin(testutil.UserID("bob"), true)
+	s.store.RecordPendingAdminStateChange(testutil.UserID("bob"), store.AdminStateChangePromote, "os:1000")
 
 	clients := []*captureClient{
-		testClientFor("alice", "dev_alice_1"),
-		testClientFor("carol", "dev_carol_1"),
-		testClientFor("dave", "dev_dave_1"),
+		testClientFor(testutil.UserID("alice"), "dev_alice_1"),
+		testClientFor(testutil.UserID("carol"), "dev_carol_1"),
+		testClientFor(testutil.UserID("dave"), "dev_dave_1"),
 	}
 	s.mu.Lock()
 	for _, c := range clients {
@@ -221,12 +222,12 @@ func TestProcessPendingAdminStateChanges_BroadcastsToAllClients(t *testing.T) {
 func TestProcessPendingAdminStateChanges_MultipleRowsInOneTick(t *testing.T) {
 	s := newTestServer(t)
 
-	s.store.SetAdmin("bob", true)
-	s.store.RecordPendingAdminStateChange("bob", store.AdminStateChangePromote, "os:1000")
-	s.store.SetUserDisplayName("carol", "carolyn")
-	s.store.RecordPendingAdminStateChange("carol", store.AdminStateChangeRename, "os:1000")
+	s.store.SetAdmin(testutil.UserID("bob"), true)
+	s.store.RecordPendingAdminStateChange(testutil.UserID("bob"), store.AdminStateChangePromote, "os:1000")
+	s.store.SetUserDisplayName(testutil.UserID("carol"), "carolyn")
+	s.store.RecordPendingAdminStateChange(testutil.UserID("carol"), store.AdminStateChangeRename, "os:1000")
 
-	dave := testClientFor("dave", "dev_dave_1")
+	dave := testClientFor(testutil.UserID("dave"), "dev_dave_1")
 	s.mu.Lock()
 	s.clients["dev_dave_1"] = dave.Client
 	s.mu.Unlock()
@@ -241,14 +242,14 @@ func TestProcessPendingAdminStateChanges_MultipleRowsInOneTick(t *testing.T) {
 	// First broadcast should be bob's profile (promote).
 	var p1 protocol.Profile
 	json.Unmarshal(msgs[0], &p1)
-	if p1.User != "bob" || !p1.Admin {
+	if p1.User != testutil.UserID("bob") || !p1.Admin {
 		t.Errorf("first broadcast wrong: %+v", p1)
 	}
 
 	// Second broadcast should be carol's profile (rename).
 	var p2 protocol.Profile
 	json.Unmarshal(msgs[1], &p2)
-	if p2.User != "carol" || p2.DisplayName != "carolyn" {
+	if p2.User != testutil.UserID("carol") || p2.DisplayName != "carolyn" {
 		t.Errorf("second broadcast wrong: %+v", p2)
 	}
 }
@@ -261,12 +262,12 @@ func TestProcessPendingAdminStateChanges_MultipleRowsInOneTick(t *testing.T) {
 func TestBroadcastUserProfile_PopulatesAllFields(t *testing.T) {
 	s := newTestServer(t)
 
-	carol := testClientFor("carol", "dev_carol_1")
+	carol := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	s.mu.Lock()
 	s.clients["dev_carol_1"] = carol.Client
 	s.mu.Unlock()
 
-	user := s.store.GetUserByID("alice")
+	user := s.store.GetUserByID(testutil.UserID("alice"))
 	if user == nil {
 		t.Fatal("alice should exist")
 	}
@@ -281,7 +282,7 @@ func TestBroadcastUserProfile_PopulatesAllFields(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 
-	if p.User != "alice" {
+	if p.User != testutil.UserID("alice") {
 		t.Errorf("User = %q", p.User)
 	}
 	if p.DisplayName == "" {

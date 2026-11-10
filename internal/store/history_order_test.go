@@ -2,6 +2,8 @@ package store
 
 import (
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // History scroll-back helpers (history-state-model.md S3 + S4): page by
@@ -49,14 +51,14 @@ func newRoomStore(t *testing.T) (*Store, string) {
 // adjacent to the cursor.
 func TestGetRoomHistoryBefore_OrderAndAdjacentPage(t *testing.T) {
 	s, room := newRoomStore(t)
-	for i, id := range []string{"m1", "m2", "m3", "m4", "m5"} {
-		if _, err := s.InsertRoomMessage(room, StoredMessage{ID: id, Sender: "alice", TS: int64(100 + i), Payload: "p"}); err != nil {
+	for i, id := range []string{testutil.MsgID("m1"), testutil.MsgID("m2"), testutil.MsgID("m3"), testutil.MsgID("m4"), testutil.MsgID("m5")} {
+		if _, err := s.InsertRoomMessage(room, StoredMessage{ID: id, Sender: testutil.UserID("alice"), TS: int64(100 + i), Payload: "p"}); err != nil {
 			t.Fatalf("insert %s: %v", id, err)
 		}
 	}
 
 	// All before m5, generous limit -> oldest-first [m1 m2 m3 m4], cursorOK.
-	msgs, hasMore, cursorOK, err := s.GetRoomHistoryBefore(room, "m5", 0, 0, 10)
+	msgs, hasMore, cursorOK, err := s.GetRoomHistoryBefore(room, testutil.MsgID("m5"), 0, 0, 10)
 	if err != nil {
 		t.Fatalf("before m5: %v", err)
 	}
@@ -66,19 +68,19 @@ func TestGetRoomHistoryBefore_OrderAndAdjacentPage(t *testing.T) {
 	if hasMore {
 		t.Error("has_more should be false (m5 has only 4 older rows)")
 	}
-	if got := idsOf(msgs); !eqStrings(got, []string{"m1", "m2", "m3", "m4"}) {
+	if got := idsOf(msgs); !eqStrings(got, []string{testutil.MsgID("m1"), testutil.MsgID("m2"), testutil.MsgID("m3"), testutil.MsgID("m4")}) {
 		t.Fatalf("before m5 = %v, want [m1 m2 m3 m4] (oldest-first)", got)
 	}
 
 	// Limited page: the rows adjacent to the cursor, oldest-first [m3 m4], has_more.
-	msgs, hasMore, cursorOK, err = s.GetRoomHistoryBefore(room, "m5", 0, 0, 2)
+	msgs, hasMore, cursorOK, err = s.GetRoomHistoryBefore(room, testutil.MsgID("m5"), 0, 0, 2)
 	if err != nil || !cursorOK {
 		t.Fatalf("before m5 limit2: err=%v cursorOK=%v", err, cursorOK)
 	}
 	if !hasMore {
 		t.Error("has_more should be true (m1/m2 remain below the page)")
 	}
-	if got := idsOf(msgs); !eqStrings(got, []string{"m3", "m4"}) {
+	if got := idsOf(msgs); !eqStrings(got, []string{testutil.MsgID("m3"), testutil.MsgID("m4")}) {
 		t.Fatalf("before m5 limit2 = %v, want [m3 m4] (adjacent page)", got)
 	}
 }
@@ -88,9 +90,9 @@ func TestGetRoomHistoryBefore_OrderAndAdjacentPage(t *testing.T) {
 func TestGetRoomHistoryBefore_InvalidCursor(t *testing.T) {
 	s, room := newRoomStore(t)
 	// m1 is pre-join (ts 50 < firstSeen 150); m2/m3 are visible.
-	s.InsertRoomMessage(room, StoredMessage{ID: "m1", Sender: "a", TS: 50, Payload: "p"})
-	s.InsertRoomMessage(room, StoredMessage{ID: "m2", Sender: "a", TS: 200, Payload: "p"})
-	s.InsertRoomMessage(room, StoredMessage{ID: "m3", Sender: "a", TS: 300, Payload: "p"})
+	s.InsertRoomMessage(room, StoredMessage{ID: testutil.MsgID("m1"), Sender: testutil.UserID("a"), TS: 50, Payload: "p"})
+	s.InsertRoomMessage(room, StoredMessage{ID: testutil.MsgID("m2"), Sender: testutil.UserID("a"), TS: 200, Payload: "p"})
+	s.InsertRoomMessage(room, StoredMessage{ID: testutil.MsgID("m3"), Sender: testutil.UserID("a"), TS: 300, Payload: "p"})
 
 	cases := []struct {
 		name, before string
@@ -98,7 +100,7 @@ func TestGetRoomHistoryBefore_InvalidCursor(t *testing.T) {
 	}{
 		{"empty cursor", "", 0},
 		{"unknown cursor", "does_not_exist", 0},
-		{"cursor outside visibility window", "m1", 150}, // m1 is pre-join
+		{"cursor outside visibility window", testutil.MsgID("m1"), 150}, // m1 is pre-join
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -124,33 +126,33 @@ func TestGetRoomHistoryBefore_InvalidCursor(t *testing.T) {
 func TestGetRoomHistoryBefore_VisibilityAndHasMore(t *testing.T) {
 	s, room := newRoomStore(t)
 	// server_order 1..5 in insert order; ts chosen so m2 is pre-join (invisible).
-	s.InsertRoomMessage(room, StoredMessage{ID: "m1", Sender: "a", TS: 200, Payload: "p"}) // visible
-	s.InsertRoomMessage(room, StoredMessage{ID: "m2", Sender: "a", TS: 50, Payload: "p"})  // invisible (backfilled-old)
-	s.InsertRoomMessage(room, StoredMessage{ID: "m3", Sender: "a", TS: 250, Payload: "p"}) // visible
-	s.InsertRoomMessage(room, StoredMessage{ID: "m4", Sender: "a", TS: 300, Payload: "p"}) // visible
-	s.InsertRoomMessage(room, StoredMessage{ID: "m5", Sender: "a", TS: 400, Payload: "p"}) // visible (cursor)
+	s.InsertRoomMessage(room, StoredMessage{ID: testutil.MsgID("m1"), Sender: testutil.UserID("a"), TS: 200, Payload: "p"}) // visible
+	s.InsertRoomMessage(room, StoredMessage{ID: testutil.MsgID("m2"), Sender: testutil.UserID("a"), TS: 50, Payload: "p"})  // invisible (backfilled-old)
+	s.InsertRoomMessage(room, StoredMessage{ID: testutil.MsgID("m3"), Sender: testutil.UserID("a"), TS: 250, Payload: "p"}) // visible
+	s.InsertRoomMessage(room, StoredMessage{ID: testutil.MsgID("m4"), Sender: testutil.UserID("a"), TS: 300, Payload: "p"}) // visible
+	s.InsertRoomMessage(room, StoredMessage{ID: testutil.MsgID("m5"), Sender: testutil.UserID("a"), TS: 400, Payload: "p"}) // visible (cursor)
 	const firstSeen = int64(150)
 
 	// limit=2 before m5: the two newest *visible* rows below m5 are m4, m3, and a
 	// third visible row (m1) remains below -> has_more=true. The old post-filter
 	// would have fetched [m4,m3,m2], dropped m2, and falsely reported has_more=false.
-	msgs, hasMore, cursorOK, err := s.GetRoomHistoryBefore(room, "m5", firstSeen, 0, 2)
+	msgs, hasMore, cursorOK, err := s.GetRoomHistoryBefore(room, testutil.MsgID("m5"), firstSeen, 0, 2)
 	if err != nil || !cursorOK {
 		t.Fatalf("before m5: err=%v cursorOK=%v", err, cursorOK)
 	}
 	if !hasMore {
 		t.Error("has_more should be true (visible m1 remains below) — invisible rows must not consume the lookahead")
 	}
-	if got := idsOf(msgs); !eqStrings(got, []string{"m3", "m4"}) {
+	if got := idsOf(msgs); !eqStrings(got, []string{testutil.MsgID("m3"), testutil.MsgID("m4")}) {
 		t.Fatalf("page = %v, want [m3 m4] (visible, adjacent, oldest-first)", got)
 	}
 
 	// Generous limit: all visible rows below m5, with m2 excluded entirely.
-	msgs, hasMore, _, _ = s.GetRoomHistoryBefore(room, "m5", firstSeen, 0, 10)
+	msgs, hasMore, _, _ = s.GetRoomHistoryBefore(room, testutil.MsgID("m5"), firstSeen, 0, 10)
 	if hasMore {
 		t.Error("has_more should be false on the full visible page")
 	}
-	if got := idsOf(msgs); !eqStrings(got, []string{"m1", "m3", "m4"}) {
+	if got := idsOf(msgs); !eqStrings(got, []string{testutil.MsgID("m1"), testutil.MsgID("m3"), testutil.MsgID("m4")}) {
 		t.Fatalf("full visible page = %v, want [m1 m3 m4] (m2 pre-join excluded)", got)
 	}
 }
@@ -161,25 +163,25 @@ func TestGetRoomHistoryBefore_VisibilityAndHasMore(t *testing.T) {
 // gate; this tightens that.)
 func TestGetRoomHistoryBefore_TombstoneObeysEpochGate(t *testing.T) {
 	s, room := newRoomStore(t)
-	s.InsertRoomMessage(room, StoredMessage{ID: "m1", Sender: "a", TS: 100, Epoch: 1, Payload: "p"})
-	s.InsertRoomMessage(room, StoredMessage{ID: "m2", Sender: "a", TS: 200, Epoch: 1, Payload: "p"})
-	s.InsertRoomMessage(room, StoredMessage{ID: "m3", Sender: "a", TS: 300, Epoch: 2, Payload: "p"}) // cursor
-	if _, err := s.DeleteRoomMessage(room, "m1", "a"); err != nil {
+	s.InsertRoomMessage(room, StoredMessage{ID: testutil.MsgID("m1"), Sender: testutil.UserID("a"), TS: 100, Epoch: 1, Payload: "p"})
+	s.InsertRoomMessage(room, StoredMessage{ID: testutil.MsgID("m2"), Sender: testutil.UserID("a"), TS: 200, Epoch: 1, Payload: "p"})
+	s.InsertRoomMessage(room, StoredMessage{ID: testutil.MsgID("m3"), Sender: testutil.UserID("a"), TS: 300, Epoch: 2, Payload: "p"}) // cursor
+	if _, err := s.DeleteRoomMessage(room, testutil.MsgID("m1"), testutil.UserID("a")); err != nil {
 		t.Fatalf("delete m1: %v", err)
 	}
 
 	// Positive control: with no epoch restriction, the m1 tombstone is visible.
-	msgs, _, cursorOK, err := s.GetRoomHistoryBefore(room, "m3", 0, 0, 10)
+	msgs, _, cursorOK, err := s.GetRoomHistoryBefore(room, testutil.MsgID("m3"), 0, 0, 10)
 	if err != nil || !cursorOK {
 		t.Fatalf("no-gate: err=%v cursorOK=%v", err, cursorOK)
 	}
-	if got := idsOf(msgs); !eqStrings(got, []string{"m1", "m2"}) {
+	if got := idsOf(msgs); !eqStrings(got, []string{testutil.MsgID("m1"), testutil.MsgID("m2")}) {
 		t.Fatalf("no-gate page = %v, want [m1 m2] (tombstone m1 included)", got)
 	}
 
 	// With firstEpoch=2, the epoch-1 rows — including the m1 tombstone — are gated
 	// out. The tombstone must not appear.
-	msgs, _, cursorOK, err = s.GetRoomHistoryBefore(room, "m3", 0, 2, 10)
+	msgs, _, cursorOK, err = s.GetRoomHistoryBefore(room, testutil.MsgID("m3"), 0, 2, 10)
 	if err != nil || !cursorOK {
 		t.Fatalf("gated: err=%v cursorOK=%v", err, cursorOK)
 	}

@@ -1,13 +1,17 @@
 package store
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
+)
 
 // Phase 22 C.5: per-DM DB cache benchmarks.
 func BenchmarkDMDB_CacheHit(b *testing.B) {
 	s, cleanup := makeBenchmarkStore(b)
 	defer cleanup()
 
-	dm, err := s.CreateOrGetDirectMessage(GenerateID("dm_"), "usr_a", "usr_b")
+	dm, err := s.CreateOrGetDirectMessage(GenerateID("dm_"), testutil.UserID("a"), testutil.UserID("b"))
 	if err != nil {
 		b.Fatalf("CreateOrGetDirectMessage: %v", err)
 	}
@@ -32,7 +36,7 @@ func BenchmarkDMDB_CacheMiss(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		id := GenerateID("dm_")
-		dm, err := s.CreateOrGetDirectMessage(id, "usr_a", "usr_b")
+		dm, err := s.CreateOrGetDirectMessage(id, testutil.UserID("a"), testutil.UserID("b"))
 		if err != nil {
 			b.Fatalf("CreateOrGetDirectMessage: %v", err)
 		}

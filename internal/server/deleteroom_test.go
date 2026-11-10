@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // Phase 12 Chunk 3 — tests for handleDeleteRoom and the retired-room
@@ -51,7 +52,7 @@ func TestHandleDeleteRoom_ActiveRoom_HappyPath(t *testing.T) {
 	}
 
 	// Register bob's session so the echo lands somewhere
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_bob_1"] = bob.Client
 	s.mu.Unlock()
@@ -60,7 +61,7 @@ func TestHandleDeleteRoom_ActiveRoom_HappyPath(t *testing.T) {
 	s.handleDeleteRoom(bob.Client, raw)
 
 	// Bob should be removed from room_members
-	if s.store.IsRoomMemberByID(generalID, "bob") {
+	if s.store.IsRoomMemberByID(generalID, testutil.UserID("bob")) {
 		t.Error("bob should be removed from general after delete")
 	}
 
@@ -97,12 +98,12 @@ func TestHandleDeleteRoom_ActiveRoom_HappyPath(t *testing.T) {
 
 	// v3: delete now writes the user_left_rooms history row (via the reused
 	// leave path); the old hand-rolled inline leave did not.
-	if left, _ := s.store.HasUserLeftRoom("bob", generalID); !left {
+	if left, _ := s.store.HasUserLeftRoom(testutil.UserID("bob"), generalID); !left {
 		t.Error("delete should record user_left_rooms (reuses performRoomLeave)")
 	}
 
 	// The deleted_rooms sidecar should have a row for this user+room
-	ids, err := s.store.GetDeletedRoomsForUser("bob")
+	ids, err := s.store.GetDeletedRoomsForUser(testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("GetDeletedRoomsForUser: %v", err)
 	}
@@ -121,7 +122,7 @@ func TestHandleDeleteRoom_RetiredRoom_HappyPath(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 	retireRoomForTest(t, s, generalID)
 
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_bob_1"] = bob.Client
 	s.mu.Unlock()
@@ -130,7 +131,7 @@ func TestHandleDeleteRoom_RetiredRoom_HappyPath(t *testing.T) {
 	s.handleDeleteRoom(bob.Client, raw)
 
 	// Bob should be removed from room_members
-	if s.store.IsRoomMemberByID(generalID, "bob") {
+	if s.store.IsRoomMemberByID(generalID, testutil.UserID("bob")) {
 		t.Error("bob should be removed from general after delete")
 	}
 
@@ -154,7 +155,7 @@ func TestHandleDeleteRoom_RetiredRoom_HappyPath(t *testing.T) {
 	}
 
 	// Sidecar must be populated
-	ids, _ := s.store.GetDeletedRoomsForUser("bob")
+	ids, _ := s.store.GetDeletedRoomsForUser(testutil.UserID("bob"))
 	if len(ids) != 1 {
 		t.Errorf("expected 1 sidecar row, got %d", len(ids))
 	}
@@ -172,7 +173,7 @@ func TestHandleDeleteRoom_ActiveRoomPolicyDenied(t *testing.T) {
 	// Default: allow_self_leave_rooms = false
 
 	generalID := s.store.RoomDisplayNameToID("general")
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 
 	raw, _ := json.Marshal(protocol.DeleteRoom{Type: "delete_room", Room: generalID})
 	s.handleDeleteRoom(bob.Client, raw)
@@ -188,12 +189,12 @@ func TestHandleDeleteRoom_ActiveRoomPolicyDenied(t *testing.T) {
 	}
 
 	// Bob should still be a member
-	if !s.store.IsRoomMemberByID(generalID, "bob") {
+	if !s.store.IsRoomMemberByID(generalID, testutil.UserID("bob")) {
 		t.Error("bob should still be a member after policy denial")
 	}
 
 	// Sidecar must NOT be populated
-	ids, _ := s.store.GetDeletedRoomsForUser("bob")
+	ids, _ := s.store.GetDeletedRoomsForUser(testutil.UserID("bob"))
 	if len(ids) != 0 {
 		t.Errorf("sidecar should be empty after denial, got %v", ids)
 	}
@@ -208,7 +209,7 @@ func TestHandleDeleteRoom_RetiredRoomPolicyDenied(t *testing.T) {
 	retireRoomForTest(t, s, generalID)
 	disableRetiredRoomLeave(t, s)
 
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	raw, _ := json.Marshal(protocol.DeleteRoom{Type: "delete_room", Room: generalID})
 	s.handleDeleteRoom(bob.Client, raw)
 
@@ -235,13 +236,13 @@ func TestHandleDeleteRoom_PrivacyResponsesIdentical(t *testing.T) {
 	s := newTestServer(t)
 	engineeringID := s.store.RoomDisplayNameToID("engineering")
 
-	probeUnknown := testClientFor("carol", "dev_carol_1")
+	probeUnknown := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	rawUnknown, _ := json.Marshal(protocol.DeleteRoom{
-		Type: "delete_room", Room: "room_does_not_exist",
+		Type: "delete_room", Room: testutil.RoomID("does_not_exist"),
 	})
 	s.handleDeleteRoom(probeUnknown.Client, rawUnknown)
 
-	probeNonMember := testClientFor("carol", "dev_carol_2")
+	probeNonMember := testClientFor(testutil.UserID("carol"), "dev_carol_2")
 	rawNonMember, _ := json.Marshal(protocol.DeleteRoom{
 		Type: "delete_room", Room: engineeringID,
 	})
@@ -281,11 +282,11 @@ func TestHandleDeleteRoom_LastMemberCleanupCascade(t *testing.T) {
 	// engineering has only alice per the test-server seeding in newTestServer
 	engineeringID := s.store.RoomDisplayNameToID("engineering")
 	members := s.store.GetRoomMemberIDsByRoomID(engineeringID)
-	if len(members) != 1 || members[0] != "alice" {
+	if len(members) != 1 || members[0] != testutil.UserID("alice") {
 		t.Fatalf("expected engineering to have only alice, got %v", members)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
@@ -303,7 +304,7 @@ func TestHandleDeleteRoom_LastMemberCleanupCascade(t *testing.T) {
 
 	// The deleted_rooms sidecar row MUST survive the cleanup cascade
 	// (regression test for the ordering constraint)
-	ids, _ := s.store.GetDeletedRoomsForUser("alice")
+	ids, _ := s.store.GetDeletedRoomsForUser(testutil.UserID("alice"))
 	found := false
 	for _, id := range ids {
 		if id == engineeringID {
@@ -341,7 +342,7 @@ func TestHandleLeaveRoom_RetiredRoomUsesRetiredFlag(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 	retireRoomForTest(t, s, generalID)
 
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_bob_1"] = bob.Client
 	s.mu.Unlock()
@@ -350,7 +351,7 @@ func TestHandleLeaveRoom_RetiredRoomUsesRetiredFlag(t *testing.T) {
 	s.handleLeaveRoom(bob.Client, raw)
 
 	// Bob should be removed (retired-rooms flag allowed the leave)
-	if s.store.IsRoomMemberByID(generalID, "bob") {
+	if s.store.IsRoomMemberByID(generalID, testutil.UserID("bob")) {
 		t.Error("bob should have been removed — retired room gate uses allow_self_leave_retired_rooms")
 	}
 
@@ -379,7 +380,7 @@ func TestHandleLeaveRoom_RetiredRoomPolicyDenied(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 	retireRoomForTest(t, s, generalID)
 
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	raw, _ := json.Marshal(protocol.LeaveRoom{Type: "leave_room", Room: generalID})
 	s.handleLeaveRoom(bob.Client, raw)
 
@@ -394,7 +395,7 @@ func TestHandleLeaveRoom_RetiredRoomPolicyDenied(t *testing.T) {
 	}
 
 	// Bob should still be a member
-	if !s.store.IsRoomMemberByID(generalID, "bob") {
+	if !s.store.IsRoomMemberByID(generalID, testutil.UserID("bob")) {
 		t.Error("bob should still be a member after retired-room denial")
 	}
 }
@@ -413,15 +414,15 @@ func TestProcessPendingRoomRetirements_HappyPath(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	// Simulate the CLI: SetRoomRetired first, then enqueue.
-	if err := s.store.SetRoomRetired(generalID, "alice", "test-cleanup"); err != nil {
+	if err := s.store.SetRoomRetired(generalID, testutil.UserID("alice"), "test-cleanup"); err != nil {
 		t.Fatalf("SetRoomRetired: %v", err)
 	}
-	if err := s.store.RecordPendingRoomRetirement(generalID, "alice", "test-cleanup"); err != nil {
+	if err := s.store.RecordPendingRoomRetirement(generalID, testutil.UserID("alice"), "test-cleanup"); err != nil {
 		t.Fatalf("RecordPendingRoomRetirement: %v", err)
 	}
 
 	// Register a connected member (bob is a member of general per the seed)
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_bob_1"] = bob.Client
 	s.mu.Unlock()
@@ -444,7 +445,7 @@ func TestProcessPendingRoomRetirements_HappyPath(t *testing.T) {
 	if evt.Room != generalID {
 		t.Errorf("event room = %q, want %q", evt.Room, generalID)
 	}
-	if evt.RetiredBy != "alice" {
+	if evt.RetiredBy != testutil.UserID("alice") {
 		t.Errorf("event retired_by = %q, want alice", evt.RetiredBy)
 	}
 	if evt.Reason != "test-cleanup" {
@@ -477,7 +478,7 @@ func TestProcessPendingRoomRetirements_EmptyQueue(t *testing.T) {
 func TestProcessPendingRoomRetirements_MissingRoom(t *testing.T) {
 	s := newTestServer(t)
 
-	if err := s.store.RecordPendingRoomRetirement("room_ghost", "alice", ""); err != nil {
+	if err := s.store.RecordPendingRoomRetirement(testutil.RoomID("ghost"), testutil.UserID("alice"), ""); err != nil {
 		t.Fatalf("RecordPendingRoomRetirement: %v", err)
 	}
 
@@ -500,16 +501,16 @@ func TestProcessPendingRoomRetirements_OnlyBroadcastsToMembers(t *testing.T) {
 	engineeringID := s.store.RoomDisplayNameToID("engineering")
 
 	// Only alice is a member of engineering per the seed
-	if err := s.store.SetRoomRetired(engineeringID, "alice", ""); err != nil {
+	if err := s.store.SetRoomRetired(engineeringID, testutil.UserID("alice"), ""); err != nil {
 		t.Fatalf("SetRoomRetired: %v", err)
 	}
-	if err := s.store.RecordPendingRoomRetirement(engineeringID, "alice", ""); err != nil {
+	if err := s.store.RecordPendingRoomRetirement(engineeringID, testutil.UserID("alice"), ""); err != nil {
 		t.Fatalf("RecordPendingRoomRetirement: %v", err)
 	}
 
 	// Register alice (member) and bob (non-member)
-	alice := testClientFor("alice", "dev_alice_1")
-	bob := testClientFor("bob", "dev_bob_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.clients["dev_bob_1"] = bob.Client

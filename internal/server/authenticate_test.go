@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 type fakeConnMetadata struct {
@@ -42,12 +44,12 @@ func TestAuthenticateKey_RetiredUserRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authenticateKey baseline: %v", err)
 	}
-	if perms == nil || perms.Extensions["username"] != "bob" {
+	if perms == nil || perms.Extensions["username"] != testutil.UserID("bob") {
 		t.Fatalf("expected username=bob permissions, got %+v", perms)
 	}
 
 	// Policy gate: retired users are rejected at auth callback.
-	if err := s.store.SetUserRetired("bob", "test_policy"); err != nil {
+	if err := s.store.SetUserRetired(testutil.UserID("bob"), "test_policy"); err != nil {
 		t.Fatalf("SetUserRetired: %v", err)
 	}
 
@@ -80,10 +82,10 @@ func TestAuthenticateKey_CapturesRequestedUsername(t *testing.T) {
 
 	// A clean SSH username is captured as the hint.
 	good := freshUnknownPub(t)
-	if _, err := s.authenticateKey(mkConn("alice", "127.0.0.1"), good); err == nil {
+	if _, err := s.authenticateKey(mkConn(testutil.UserID("alice"), "127.0.0.1"), good); err == nil {
 		t.Fatal("unknown key should be rejected by authenticateKey")
 	}
-	if got := pendingHintFor(t, s, ssh.FingerprintSHA256(good)); got != "alice" {
+	if got := pendingHintFor(t, s, ssh.FingerprintSHA256(good)); got != testutil.UserID("alice") {
 		t.Errorf("requested_username = %q, want alice", got)
 	}
 

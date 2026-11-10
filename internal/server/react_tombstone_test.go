@@ -30,26 +30,26 @@ func TestHandleReact_RejectsTombstonedRoomMessage(t *testing.T) {
 
 	// Alice sends a message.
 	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
-		ID: "msg_react_rt", Sender: "alice", TS: 100, Epoch: 1, Payload: "p", Signature: "s",
+		ID: testutil.MsgID("react_rt"), Sender: testutil.UserID("alice"), TS: 100, Epoch: 1, Payload: "p", Signature: "s",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 	// Alice deletes it. The inline reaction clear runs as part of
 	// deleteMessage; after this the row has deleted=1 and there are
 	// no reactions referencing it.
-	if _, err := s.store.DeleteRoomMessage(generalID, "msg_react_rt", "alice"); err != nil {
+	if _, err := s.store.DeleteRoomMessage(generalID, testutil.MsgID("react_rt"), testutil.UserID("alice")); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
 	// Bob races in and sends a react for the now-tombstoned message.
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_bob_1"] = bob.Client
 	s.mu.Unlock()
 
 	raw, _ := json.Marshal(protocol.React{
 		Type:    "react",
-		ID:      "msg_react_rt",
+		ID:      testutil.MsgID("react_rt"),
 		Room:    generalID,
 		Epoch:   1,
 		Payload: "encrypted_emoji",
@@ -62,7 +62,7 @@ func TestHandleReact_RejectsTombstonedRoomMessage(t *testing.T) {
 		t.Fatalf("RoomDB: %v", err)
 	}
 	var count int
-	err = db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, "msg_react_rt").Scan(&count)
+	err = db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, testutil.MsgID("react_rt")).Scan(&count)
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}
@@ -83,35 +83,35 @@ func TestHandleReact_RejectsTombstonedRoomMessage(t *testing.T) {
 func TestHandleReact_RejectsTombstonedGroupMessage(t *testing.T) {
 	s := newTestServer(t)
 	groupID := store.GenerateID("group_")
-	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(groupID, testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
 	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
-		ID:          "msg_grt",
-		Sender:      "alice",
+		ID:          testutil.MsgID("grt"),
+		Sender:      testutil.UserID("alice"),
 		TS:          100,
 		Payload:     "p",
 		Signature:   "s",
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	if _, err := s.store.DeleteGroupMessage(groupID, "msg_grt", "alice"); err != nil {
+	if _, err := s.store.DeleteGroupMessage(groupID, testutil.MsgID("grt"), testutil.UserID("alice")); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_bob_1"] = bob.Client
 	s.mu.Unlock()
 
 	raw, _ := json.Marshal(protocol.React{
 		Type:        "react",
-		ID:          "msg_grt",
+		ID:          testutil.MsgID("grt"),
 		Group:       groupID,
 		Payload:     "enc",
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 	})
 	s.handleReact(bob.Client, raw)
 
@@ -120,7 +120,7 @@ func TestHandleReact_RejectsTombstonedGroupMessage(t *testing.T) {
 		t.Fatalf("GroupDB: %v", err)
 	}
 	var count int
-	db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, "msg_grt").Scan(&count)
+	db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, testutil.MsgID("grt")).Scan(&count)
 	if count != 0 {
 		t.Errorf("expected 0 reaction rows, got %d", count)
 	}
@@ -132,37 +132,37 @@ func TestHandleReact_RejectsTombstonedGroupMessage(t *testing.T) {
 // TestHandleReact_RejectsTombstonedDMMessage — 1:1 DM variant.
 func TestHandleReact_RejectsTombstonedDMMessage(t *testing.T) {
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
 	dmID := dm.ID
 
 	if _, err := s.store.InsertDMMessage(dmID, store.StoredMessage{
-		ID:          "msg_drt",
-		Sender:      "alice",
+		ID:          testutil.MsgID("drt"),
+		Sender:      testutil.UserID("alice"),
 		TS:          100,
 		Payload:     "p",
 		Signature:   "s",
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	if _, err := s.store.DeleteDMMessage(dmID, "msg_drt", "alice"); err != nil {
+	if _, err := s.store.DeleteDMMessage(dmID, testutil.MsgID("drt"), testutil.UserID("alice")); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_bob_1"] = bob.Client
 	s.mu.Unlock()
 
 	raw, _ := json.Marshal(protocol.React{
 		Type:        "react",
-		ID:          "msg_drt",
+		ID:          testutil.MsgID("drt"),
 		DM:          dmID,
 		Payload:     "enc",
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 	})
 	s.handleReact(bob.Client, raw)
 
@@ -171,7 +171,7 @@ func TestHandleReact_RejectsTombstonedDMMessage(t *testing.T) {
 		t.Fatalf("DMDB: %v", err)
 	}
 	var count int
-	db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, "msg_drt").Scan(&count)
+	db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, testutil.MsgID("drt")).Scan(&count)
 	if count != 0 {
 		t.Errorf("expected 0 reaction rows, got %d", count)
 	}
@@ -188,14 +188,14 @@ func TestHandleReact_RejectsUnknownMessage(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_bob_1"] = bob.Client
 	s.mu.Unlock()
 
 	raw, _ := json.Marshal(protocol.React{
 		Type:    "react",
-		ID:      "msg_does_not_exist",
+		ID:      testutil.MsgID("does_not_exist"),
 		Room:    generalID,
 		Epoch:   1,
 		Payload: "enc",
@@ -208,7 +208,7 @@ func TestHandleReact_RejectsUnknownMessage(t *testing.T) {
 		t.Fatalf("RoomDB: %v", err)
 	}
 	var count int
-	db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, "msg_does_not_exist").Scan(&count)
+	db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, testutil.MsgID("does_not_exist")).Scan(&count)
 	if count != 0 {
 		t.Errorf("expected 0 reaction rows for unknown message, got %d", count)
 	}
@@ -225,19 +225,19 @@ func TestHandleReact_HappyPath_StillWorks(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	if _, err := s.store.InsertRoomMessage(generalID, store.StoredMessage{
-		ID: "msg_live", Sender: "alice", TS: 100, Epoch: 1, Payload: "p", Signature: "s",
+		ID: testutil.MsgID("live"), Sender: testutil.UserID("alice"), TS: 100, Epoch: 1, Payload: "p", Signature: "s",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_bob_1"] = bob.Client
 	s.mu.Unlock()
 
 	raw, _ := json.Marshal(protocol.React{
 		Type:    "react",
-		ID:      "msg_live",
+		ID:      testutil.MsgID("live"),
 		Room:    generalID,
 		Epoch:   1,
 		Payload: "enc",
@@ -249,7 +249,7 @@ func TestHandleReact_HappyPath_StillWorks(t *testing.T) {
 		t.Fatalf("RoomDB: %v", err)
 	}
 	var count int
-	db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, "msg_live").Scan(&count)
+	db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, testutil.MsgID("live")).Scan(&count)
 	if count != 1 {
 		t.Errorf("expected 1 reaction row on happy path, got %d", count)
 	}
@@ -266,7 +266,7 @@ func TestHandleReact_HappyPath_StillWorks(t *testing.T) {
 	if reaction.Type != "reaction" {
 		t.Errorf("broadcast type = %q, want reaction", reaction.Type)
 	}
-	if reaction.ID != "msg_live" {
+	if reaction.ID != testutil.MsgID("live") {
 		t.Errorf("broadcast ID = %q, want msg_live", reaction.ID)
 	}
 }

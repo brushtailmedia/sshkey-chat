@@ -14,7 +14,7 @@ import (
 
 func TestHandleSend_RoomFieldIntegerRejectedAsMalformed(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_send_int_room")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_send_int_room")
 
 	raw := json.RawMessage(`{"type":"send","room":12345,"epoch":1,"payload":"p","signature":"s"}`)
 	s.handleSend(alice.Client, raw)
@@ -40,10 +40,10 @@ func TestHandleSend_RoomFieldNullCollapsesToUnknownRoom(t *testing.T) {
 	s := newTestServer(t)
 
 	// Baseline unknown-room response.
-	baseline := testClientFor("alice", "dev_alice_send_null_room_base")
+	baseline := testClientFor(testutil.UserID("alice"), "dev_alice_send_null_room_base")
 	rawBaseline, _ := json.Marshal(protocol.Send{
 		Type:      "send",
-		Room:      "room_does_not_exist",
+		Room:      testutil.RoomID("does_not_exist"),
 		Epoch:     1,
 		Payload:   "p",
 		Signature: "s",
@@ -55,7 +55,7 @@ func TestHandleSend_RoomFieldNullCollapsesToUnknownRoom(t *testing.T) {
 	}
 
 	// Adversarial null input: json null for string field.
-	probe := testClientFor("alice", "dev_alice_send_null_room")
+	probe := testClientFor(testutil.UserID("alice"), "dev_alice_send_null_room")
 	raw := json.RawMessage(`{"type":"send","room":null,"epoch":1,"payload":"p","signature":"s"}`)
 	s.handleSend(probe.Client, raw)
 
@@ -74,11 +74,11 @@ func TestHandleSend_RoomFieldNullCollapsesToUnknownRoom(t *testing.T) {
 func TestHandleSendGroup_WrappedKeysNonMemberKeyNamesRejected(t *testing.T) {
 	s := newTestServer(t)
 	groupID := store.GenerateID("group_")
-	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "wc"); err != nil {
+	if err := s.store.CreateGroup(groupID, testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "wc"); err != nil {
 		t.Fatalf("CreateGroup: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_sendgroup_badkeys")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_sendgroup_badkeys")
 	raw := json.RawMessage(`{
 		"type":"send_group",
 		"group":"` + groupID + `",
@@ -106,13 +106,13 @@ func TestHandleSendDM_WrappedKeysInvalidBase64ValuesStillAccepted(t *testing.T) 
 	// send_dm validates wrapped_keys key set, but not per-value base64 shape.
 	// Crypto layer catches malformed wrapped values at receive/decrypt time.
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("CreateOrGetDirectMessage: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_senddm_badval")
-	bob := testClientFor("bob", "dev_bob_senddm_badval")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_senddm_badval")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_senddm_badval")
 	s.mu.Lock()
 	s.clients["dev_alice_senddm_badval"] = alice.Client
 	s.clients["dev_bob_senddm_badval"] = bob.Client
@@ -121,7 +121,7 @@ func TestHandleSendDM_WrappedKeysInvalidBase64ValuesStillAccepted(t *testing.T) 
 	raw := json.RawMessage(`{
 		"type":"send_dm",
 		"dm":"` + dm.ID + `",
-		"wrapped_keys":{"alice":"` + strings.Repeat("not-base64!@#", 10) + `","bob":"` + strings.Repeat("also_not_base64", 8) + `"},
+		"wrapped_keys":{"` + testutil.UserID("alice") + `":"` + strings.Repeat("not-base64!@#", 10) + `","` + testutil.UserID("bob") + `":"` + strings.Repeat("also_not_base64", 8) + `"},
 		"payload":"p",
 		"signature":"s"
 	}`)

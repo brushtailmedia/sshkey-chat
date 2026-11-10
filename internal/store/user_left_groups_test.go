@@ -5,6 +5,8 @@ package store
 
 import (
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestRecordUserLeftGroup_HappyPath(t *testing.T) {
@@ -15,7 +17,7 @@ func TestRecordUserLeftGroup_HappyPath(t *testing.T) {
 	}
 	defer st.Close()
 
-	id, err := st.RecordUserLeftGroup("usr_alice", "grp_lunch", "removed", "usr_admin")
+	id, err := st.RecordUserLeftGroup(testutil.UserID("alice"), testutil.GroupID("grp_lunch"), "removed", testutil.UserID("admin"))
 	if err != nil {
 		t.Fatalf("record: %v", err)
 	}
@@ -35,14 +37,14 @@ func TestGetUserLeftGroupsCatchup_ReturnsMostRecentPerGroup(t *testing.T) {
 	}
 	defer st.Close()
 
-	if _, err := st.RecordUserLeftGroup("usr_alice", "grp_a", "", "usr_alice"); err != nil {
+	if _, err := st.RecordUserLeftGroup(testutil.UserID("alice"), testutil.GroupID("grp_a"), "", testutil.UserID("alice")); err != nil {
 		t.Fatalf("first record: %v", err)
 	}
-	if _, err := st.RecordUserLeftGroup("usr_alice", "grp_a", "removed", "usr_admin"); err != nil {
+	if _, err := st.RecordUserLeftGroup(testutil.UserID("alice"), testutil.GroupID("grp_a"), "removed", testutil.UserID("admin")); err != nil {
 		t.Fatalf("second record: %v", err)
 	}
 
-	got, err := st.GetUserLeftGroupsCatchup("usr_alice")
+	got, err := st.GetUserLeftGroupsCatchup(testutil.UserID("alice"))
 	if err != nil {
 		t.Fatalf("catchup: %v", err)
 	}
@@ -66,23 +68,23 @@ func TestGetUserLeftGroupsCatchup_ExcludesRejoinedMembers(t *testing.T) {
 	// query's group_members JOIN has something to match against.
 	if _, err := st.dataDB.Exec(
 		`INSERT INTO group_conversations (id, name) VALUES (?, ?)`,
-		"grp_a", "lunch",
+		testutil.GroupID("grp_a"), "lunch",
 	); err != nil {
 		t.Fatalf("seed group: %v", err)
 	}
 	if _, err := st.dataDB.Exec(
 		`INSERT INTO group_members (group_id, user) VALUES (?, ?)`,
-		"grp_a", "usr_alice",
+		testutil.GroupID("grp_a"), testutil.UserID("alice"),
 	); err != nil {
 		t.Fatalf("seed member: %v", err)
 	}
 
 	// Stale leave row (simulates cleanup race — should be hidden by filter).
-	if _, err := st.RecordUserLeftGroup("usr_alice", "grp_a", "removed", "usr_admin"); err != nil {
+	if _, err := st.RecordUserLeftGroup(testutil.UserID("alice"), testutil.GroupID("grp_a"), "removed", testutil.UserID("admin")); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
-	got, _ := st.GetUserLeftGroupsCatchup("usr_alice")
+	got, _ := st.GetUserLeftGroupsCatchup(testutil.UserID("alice"))
 	if len(got) != 0 {
 		t.Errorf("want 0 rows (user currently a member), got %d", len(got))
 	}
@@ -97,15 +99,15 @@ func TestDeleteUserLeftGroupRows_CleansUpOnRejoin(t *testing.T) {
 	}
 	defer st.Close()
 
-	if _, err := st.RecordUserLeftGroup("usr_alice", "grp_a", "removed", "usr_admin"); err != nil {
+	if _, err := st.RecordUserLeftGroup(testutil.UserID("alice"), testutil.GroupID("grp_a"), "removed", testutil.UserID("admin")); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
-	if err := st.DeleteUserLeftGroupRows("usr_alice", "grp_a"); err != nil {
+	if err := st.DeleteUserLeftGroupRows(testutil.UserID("alice"), testutil.GroupID("grp_a")); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
-	got, _ := st.GetUserLeftGroupsCatchup("usr_alice")
+	got, _ := st.GetUserLeftGroupsCatchup(testutil.UserID("alice"))
 	if len(got) != 0 {
 		t.Errorf("want 0 rows after delete, got %d", len(got))
 	}
@@ -119,7 +121,7 @@ func TestPruneOldUserLeftGroups_RespectsRetention(t *testing.T) {
 	}
 	defer st.Close()
 
-	if _, err := st.RecordUserLeftGroup("usr_alice", "grp_a", "", "usr_alice"); err != nil {
+	if _, err := st.RecordUserLeftGroup(testutil.UserID("alice"), testutil.GroupID("grp_a"), "", testutil.UserID("alice")); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 

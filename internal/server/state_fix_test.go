@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestStateFixAllowed_FirstCallPermits(t *testing.T) {
@@ -85,7 +86,7 @@ func TestPushEpochKeyFix_NoCurrentEpochNoOp(t *testing.T) {
 	// No rotation has happened; current epoch is 0. pushEpochKeyFix
 	// should short-circuit without encoding anything.
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_fix")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_fix")
 	generalID := s.store.RoomDisplayNameToID("general")
 	// Throttle permits this call (first time).
 	s.pushEpochKeyFix(alice.Client, "send", generalID)
@@ -97,13 +98,13 @@ func TestPushEpochKeyFix_NoCurrentEpochNoOp(t *testing.T) {
 
 func TestPushEpochKeyFix_SendsEpochKey(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_fix_send")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_fix_send")
 	generalID := s.store.RoomDisplayNameToID("general")
-	if err := s.store.AddRoomMember(generalID, "alice", 0); err != nil {
+	if err := s.store.AddRoomMember(generalID, testutil.UserID("alice"), 0); err != nil {
 		t.Fatalf("AddRoomMember: %v", err)
 	}
 	// Seed an epoch key so the push has something to send.
-	if err := s.store.StoreEpochKey(generalID, 5, "alice", "wrapped_key_for_alice"); err != nil {
+	if err := s.store.StoreEpochKey(generalID, 5, testutil.UserID("alice"), "wrapped_key_for_alice"); err != nil {
 		t.Fatalf("StoreEpochKey: %v", err)
 	}
 	s.epochs.getOrCreate(generalID, 5)
@@ -134,12 +135,12 @@ func TestPushEpochKeyFix_SendsEpochKey(t *testing.T) {
 
 func TestPushEpochKeyFix_ThrottledAfterFirst(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_fix_throttle")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_fix_throttle")
 	generalID := s.store.RoomDisplayNameToID("general")
-	if err := s.store.AddRoomMember(generalID, "alice", 0); err != nil {
+	if err := s.store.AddRoomMember(generalID, testutil.UserID("alice"), 0); err != nil {
 		t.Fatalf("AddRoomMember: %v", err)
 	}
-	if err := s.store.StoreEpochKey(generalID, 5, "alice", "wk"); err != nil {
+	if err := s.store.StoreEpochKey(generalID, 5, testutil.UserID("alice"), "wk"); err != nil {
 		t.Fatalf("StoreEpochKey: %v", err)
 	}
 	s.epochs.getOrCreate(generalID, 5)

@@ -3,6 +3,8 @@ package store
 import (
 	"strings"
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // seedTestRoom inserts a room directly into rooms.db with a given ID
@@ -43,9 +45,9 @@ func TestIsRoomRetired_FalseForActive(t *testing.T) {
 	}
 	defer s.Close()
 
-	seedTestRoom(t, s, "room_active", "general", "General chat")
+	seedTestRoom(t, s, testutil.RoomID("active"), "general", "General chat")
 
-	if s.IsRoomRetired("room_active") {
+	if s.IsRoomRetired(testutil.RoomID("active")) {
 		t.Error("active room should not be reported as retired")
 	}
 }
@@ -60,13 +62,13 @@ func TestIsRoomRetired_TrueAfterSetRoomRetired(t *testing.T) {
 	}
 	defer s.Close()
 
-	seedTestRoom(t, s, "room_toretire", "engineering", "Eng chat")
+	seedTestRoom(t, s, testutil.RoomID("toretire"), "engineering", "Eng chat")
 
-	if err := s.SetRoomRetired("room_toretire", "usr_admin", "team disbanded"); err != nil {
+	if err := s.SetRoomRetired(testutil.RoomID("toretire"), testutil.UserID("admin"), "team disbanded"); err != nil {
 		t.Fatalf("SetRoomRetired: %v", err)
 	}
 
-	if !s.IsRoomRetired("room_toretire") {
+	if !s.IsRoomRetired(testutil.RoomID("toretire")) {
 		t.Error("room should be reported as retired after SetRoomRetired")
 	}
 }
@@ -81,7 +83,7 @@ func TestIsRoomRetired_FalseForMissing(t *testing.T) {
 	}
 	defer s.Close()
 
-	if s.IsRoomRetired("room_nonexistent") {
+	if s.IsRoomRetired(testutil.RoomID("nonexistent")) {
 		t.Error("missing room should not be reported as retired")
 	}
 }
@@ -97,13 +99,13 @@ func TestSetRoomRetired_SuffixesDisplayName(t *testing.T) {
 	}
 	defer s.Close()
 
-	seedTestRoom(t, s, "room_suffix", "engineering", "Eng chat")
+	seedTestRoom(t, s, testutil.RoomID("suffix"), "engineering", "Eng chat")
 
-	if err := s.SetRoomRetired("room_suffix", "usr_admin", ""); err != nil {
+	if err := s.SetRoomRetired(testutil.RoomID("suffix"), testutil.UserID("admin"), ""); err != nil {
 		t.Fatalf("SetRoomRetired: %v", err)
 	}
 
-	room, err := s.GetRoomByID("room_suffix")
+	room, err := s.GetRoomByID(testutil.RoomID("suffix"))
 	if err != nil {
 		t.Fatalf("GetRoomByID: %v", err)
 	}
@@ -132,16 +134,16 @@ func TestSetRoomRetired_FreesOriginalName(t *testing.T) {
 	}
 	defer s.Close()
 
-	seedTestRoom(t, s, "room_old", "engineering", "Eng chat")
+	seedTestRoom(t, s, testutil.RoomID("old"), "engineering", "Eng chat")
 
-	if err := s.SetRoomRetired("room_old", "usr_admin", ""); err != nil {
+	if err := s.SetRoomRetired(testutil.RoomID("old"), testutil.UserID("admin"), ""); err != nil {
 		t.Fatalf("SetRoomRetired: %v", err)
 	}
 
 	// Now insert a new room with the SAME original display name.
 	// Should succeed because the retired room's display name has
 	// been suffixed.
-	seedTestRoom(t, s, "room_new", "engineering", "Eng chat v2")
+	seedTestRoom(t, s, testutil.RoomID("new"), "engineering", "Eng chat v2")
 
 	// Both rooms should coexist; lookup by display name should hit
 	// the new one (active) not the suffixed retired one.
@@ -152,7 +154,7 @@ func TestSetRoomRetired_FreesOriginalName(t *testing.T) {
 	if r == nil {
 		t.Fatal("new room should be findable by display name")
 	}
-	if r.ID != "room_new" {
+	if r.ID != testutil.RoomID("new") {
 		t.Errorf("display name lookup should return new room, got %q", r.ID)
 	}
 }
@@ -167,20 +169,20 @@ func TestSetRoomRetired_SetsRetiredAtAndBy(t *testing.T) {
 	}
 	defer s.Close()
 
-	seedTestRoom(t, s, "room_meta", "metaroom", "")
+	seedTestRoom(t, s, testutil.RoomID("meta"), "metaroom", "")
 
-	if err := s.SetRoomRetired("room_meta", "usr_alice", "cleanup"); err != nil {
+	if err := s.SetRoomRetired(testutil.RoomID("meta"), testutil.UserID("alice"), "cleanup"); err != nil {
 		t.Fatalf("SetRoomRetired: %v", err)
 	}
 
-	room, _ := s.GetRoomByID("room_meta")
+	room, _ := s.GetRoomByID(testutil.RoomID("meta"))
 	if room == nil {
 		t.Fatal("room should exist")
 	}
 	if !room.Retired {
 		t.Error("room.Retired should be true")
 	}
-	if room.RetiredBy != "usr_alice" {
+	if room.RetiredBy != testutil.UserID("alice") {
 		t.Errorf("RetiredBy = %q, want usr_alice", room.RetiredBy)
 	}
 	if room.RetiredAt == "" {
@@ -199,13 +201,13 @@ func TestSetRoomRetired_RejectsAlreadyRetired(t *testing.T) {
 	}
 	defer s.Close()
 
-	seedTestRoom(t, s, "room_twice", "twice", "")
+	seedTestRoom(t, s, testutil.RoomID("twice"), "twice", "")
 
-	if err := s.SetRoomRetired("room_twice", "usr_admin", ""); err != nil {
+	if err := s.SetRoomRetired(testutil.RoomID("twice"), testutil.UserID("admin"), ""); err != nil {
 		t.Fatalf("first SetRoomRetired: %v", err)
 	}
 
-	err = s.SetRoomRetired("room_twice", "usr_admin", "")
+	err = s.SetRoomRetired(testutil.RoomID("twice"), testutil.UserID("admin"), "")
 	if err == nil {
 		t.Fatal("second SetRoomRetired should return an error")
 	}
@@ -224,7 +226,7 @@ func TestSetRoomRetired_RejectsMissingRoom(t *testing.T) {
 	}
 	defer s.Close()
 
-	err = s.SetRoomRetired("room_nonexistent", "usr_admin", "")
+	err = s.SetRoomRetired(testutil.RoomID("nonexistent"), testutil.UserID("admin"), "")
 	if err == nil {
 		t.Fatal("SetRoomRetired on missing room should return an error")
 	}
@@ -243,23 +245,23 @@ func TestGetRetiredRoomsForUser_ReturnsOnlyRetired(t *testing.T) {
 	}
 	defer s.Close()
 
-	seedTestRoom(t, s, "room_active", "active", "")
-	seedTestRoom(t, s, "room_retired", "retired", "")
-	seedRoomMember(t, s, "room_active", "usr_alice")
-	seedRoomMember(t, s, "room_retired", "usr_alice")
+	seedTestRoom(t, s, testutil.RoomID("active"), "active", "")
+	seedTestRoom(t, s, testutil.RoomID("retired"), "retired", "")
+	seedRoomMember(t, s, testutil.RoomID("active"), testutil.UserID("alice"))
+	seedRoomMember(t, s, testutil.RoomID("retired"), testutil.UserID("alice"))
 
-	if err := s.SetRoomRetired("room_retired", "usr_admin", ""); err != nil {
+	if err := s.SetRoomRetired(testutil.RoomID("retired"), testutil.UserID("admin"), ""); err != nil {
 		t.Fatalf("SetRoomRetired: %v", err)
 	}
 
-	rooms, err := s.GetRetiredRoomsForUser("usr_alice")
+	rooms, err := s.GetRetiredRoomsForUser(testutil.UserID("alice"))
 	if err != nil {
 		t.Fatalf("GetRetiredRoomsForUser: %v", err)
 	}
 	if len(rooms) != 1 {
 		t.Fatalf("expected 1 retired room, got %d", len(rooms))
 	}
-	if rooms[0].ID != "room_retired" {
+	if rooms[0].ID != testutil.RoomID("retired") {
 		t.Errorf("expected room_retired, got %q", rooms[0].ID)
 	}
 }
@@ -275,22 +277,22 @@ func TestGetRetiredRoomsForUser_FiltersByMembership(t *testing.T) {
 	}
 	defer s.Close()
 
-	seedTestRoom(t, s, "room_left_then_retired", "leftthenretired", "")
-	seedRoomMember(t, s, "room_left_then_retired", "usr_alice")
+	seedTestRoom(t, s, testutil.RoomID("left_then_retired"), "leftthenretired", "")
+	seedRoomMember(t, s, testutil.RoomID("left_then_retired"), testutil.UserID("alice"))
 
 	// Alice leaves the room (removes her membership row)
-	if err := s.RemoveRoomMember("room_left_then_retired", "usr_alice"); err != nil {
+	if err := s.RemoveRoomMember(testutil.RoomID("left_then_retired"), testutil.UserID("alice")); err != nil {
 		t.Fatalf("RemoveRoomMember: %v", err)
 	}
 
 	// Admin later retires the room
-	if err := s.SetRoomRetired("room_left_then_retired", "usr_admin", ""); err != nil {
+	if err := s.SetRoomRetired(testutil.RoomID("left_then_retired"), testutil.UserID("admin"), ""); err != nil {
 		t.Fatalf("SetRoomRetired: %v", err)
 	}
 
 	// Alice should NOT see this retired room in her catchup list
 	// because she left before retirement
-	rooms, err := s.GetRetiredRoomsForUser("usr_alice")
+	rooms, err := s.GetRetiredRoomsForUser(testutil.UserID("alice"))
 	if err != nil {
 		t.Fatalf("GetRetiredRoomsForUser: %v", err)
 	}
@@ -310,10 +312,10 @@ func TestGetRetiredRoomsForUser_EmptyForNoRetirements(t *testing.T) {
 	}
 	defer s.Close()
 
-	seedTestRoom(t, s, "room_active", "active", "")
-	seedRoomMember(t, s, "room_active", "usr_alice")
+	seedTestRoom(t, s, testutil.RoomID("active"), "active", "")
+	seedRoomMember(t, s, testutil.RoomID("active"), testutil.UserID("alice"))
 
-	rooms, err := s.GetRetiredRoomsForUser("usr_alice")
+	rooms, err := s.GetRetiredRoomsForUser(testutil.UserID("alice"))
 	if err != nil {
 		t.Fatalf("GetRetiredRoomsForUser: %v", err)
 	}
@@ -333,14 +335,14 @@ func TestGetRetiredRoomsForUser_ReturnsSuffixedName(t *testing.T) {
 	}
 	defer s.Close()
 
-	seedTestRoom(t, s, "room_x", "originalname", "")
-	seedRoomMember(t, s, "room_x", "usr_alice")
+	seedTestRoom(t, s, testutil.RoomID("x"), "originalname", "")
+	seedRoomMember(t, s, testutil.RoomID("x"), testutil.UserID("alice"))
 
-	if err := s.SetRoomRetired("room_x", "usr_admin", ""); err != nil {
+	if err := s.SetRoomRetired(testutil.RoomID("x"), testutil.UserID("admin"), ""); err != nil {
 		t.Fatalf("SetRoomRetired: %v", err)
 	}
 
-	rooms, err := s.GetRetiredRoomsForUser("usr_alice")
+	rooms, err := s.GetRetiredRoomsForUser(testutil.UserID("alice"))
 	if err != nil {
 		t.Fatalf("GetRetiredRoomsForUser: %v", err)
 	}

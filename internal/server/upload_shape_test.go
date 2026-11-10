@@ -25,6 +25,7 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // validHash returns a content_hash that passes the strict format check.
@@ -38,10 +39,10 @@ func TestHandleUploadStart_InvalidUploadID_ShortStub(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	alice := testClientFor("alice", "dev_alice_shape1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_shape1")
 	msg := protocol.UploadStart{
 		Type:        "upload_start",
-		UploadID:    "up_x", // too short — fails length check
+		UploadID:    "up_x", // malformed: short upload ID must reject
 		Size:        100,
 		ContentHash: validHash(),
 		Room:        generalID,
@@ -74,11 +75,11 @@ func TestHandleUploadStart_InvalidUploadID_WrongPrefix(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	alice := testClientFor("alice", "dev_alice_shape2")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_shape2")
 	// Use a `room_` prefix to prove the prefix check rejects cross-type.
 	msg := protocol.UploadStart{
 		Type:        "upload_start",
-		UploadID:    "room_" + strings.Repeat("a", 21), // wrong prefix but right length
+		UploadID:    "room_" + strings.Repeat("a", 21), // malformed: wrong upload prefix despite the correct suffix length
 		Size:        100,
 		ContentHash: validHash(),
 		Room:        generalID,
@@ -100,7 +101,7 @@ func TestHandleUploadStart_InvalidContentHash_UppercaseHex(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	alice := testClientFor("alice", "dev_alice_hash1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_hash1")
 	msg := protocol.UploadStart{
 		Type:        "upload_start",
 		UploadID:    store.GenerateID("up_"),
@@ -126,7 +127,7 @@ func TestHandleUploadStart_InvalidContentHash_WrongAlgoPrefix(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	alice := testClientFor("alice", "dev_alice_hash2")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_hash2")
 	msg := protocol.UploadStart{
 		Type:        "upload_start",
 		UploadID:    store.GenerateID("up_"),
@@ -149,7 +150,7 @@ func TestHandleUploadStart_InvalidContentHash_ShortBody(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	alice := testClientFor("alice", "dev_alice_hash3")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_hash3")
 	msg := protocol.UploadStart{
 		Type:        "upload_start",
 		UploadID:    store.GenerateID("up_"),
@@ -173,7 +174,7 @@ func TestHandleUploadStart_ValidContentHashAccepted(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	alice := testClientFor("alice", "dev_alice_hash_happy")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_hash_happy")
 	msg := protocol.UploadStart{
 		Type:        "upload_start",
 		UploadID:    store.GenerateID("up_"),
@@ -203,11 +204,11 @@ func TestHandleUploadStart_ValidContentHashAccepted(t *testing.T) {
 func TestHandleSetProfile_InvalidAvatarID_Rejected(t *testing.T) {
 	s := newTestServer(t)
 
-	alice := testClientFor("alice", "dev_alice_avatar1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_avatar1")
 	msg := protocol.SetProfile{
 		Type:        "set_profile",
 		DisplayName: "Alice Replacement",
-		AvatarID:    "file_x", // too short — fails length check
+		AvatarID:    "file_x", // malformed: short avatar ID must reject
 	}
 	raw, _ := json.Marshal(msg)
 	s.handleSetProfile(alice.Client, raw)
@@ -232,7 +233,7 @@ func TestHandleSetProfile_EmptyAvatarIDAccepted(t *testing.T) {
 	// precondition on the shape check.
 	s := newTestServer(t)
 
-	alice := testClientFor("alice", "dev_alice_avatar_empty")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_avatar_empty")
 	msg := protocol.SetProfile{
 		Type:        "set_profile",
 		DisplayName: "Alice No Avatar",
@@ -251,7 +252,7 @@ func TestHandleSetProfile_ValidAvatarIDAccepted(t *testing.T) {
 	// Happy path — a properly-shaped file_ nanoid passes validation.
 	s := newTestServer(t)
 
-	alice := testClientFor("alice", "dev_alice_avatar_ok")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_avatar_ok")
 	msg := protocol.SetProfile{
 		Type:        "set_profile",
 		DisplayName: "Alice With Avatar",

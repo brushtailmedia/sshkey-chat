@@ -124,7 +124,7 @@ references back to this audit doc + `audit_v0.2.0.md#F16` + the
 Phase 22 drift-guard item. The style doc is the canonical reference
 for future SQL review in the store package.
 
-## Summary
+## Original audit summary
 
 - **2 matches** for SQL-shaped `fmt.Sprintf` in the entire repository.
 - **Both safe by construction.** No user-controllable input flows into
@@ -135,3 +135,13 @@ for future SQL review in the store package.
 Status: the server's SQL layer is parameterised correctly. This audit
 documents that state and recommends a drift-guard so a regression
 would be caught mechanically.
+
+### S3 rejection snapshot helper
+
+`internal/server/id_validation_test.go` adds one narrowly allowlisted SQL-shaped
+`fmt.Sprintf`: `SELECT * FROM "%s"`. The table name comes exclusively from
+`sqlite_schema` in read-only test databases, and embedded double quotes are
+escaped as SQL identifier quotes. Values and request IDs are never interpolated.
+The helper compares logical rows before and after a rejected request; it is not
+used by production code. The original two production/test findings above remain
+unchanged; the repository now has three SQL-shaped format call sites in total.

@@ -93,6 +93,10 @@ func (s *Server) handleEdit(c *Client, raw json.RawMessage) {
 		return
 	}
 
+	if !s.validateIDOrReject(c, "edit", msg.Room, "room_", func() { s.sendUnknownRoom(c) }) {
+		return
+	}
+
 	// Step 1: membership. Non-members get the byte-identical "unknown"
 	// response so a probing client cannot use edit to enumerate room
 	// existence. Same pattern as handleSend.
@@ -118,6 +122,10 @@ func (s *Server) handleEdit(c *Client, raw json.RawMessage) {
 
 	// Step 4-6: fetch row, author check, deleted check. All three failure
 	// modes collapse into the same byte-identical "unknown" response.
+	if !s.validateIDOrReject(c, "edit", msg.ID, "msg_", func() { s.sendUnknownRoom(c) }) {
+		return
+	}
+
 	row, err := s.store.GetRoomMessageByID(msg.Room, msg.ID)
 	if err == sql.ErrNoRows || (err == nil && row != nil && (row.Sender != c.UserID || row.Deleted)) {
 		s.sendUnknownRoom(c)
@@ -226,6 +234,10 @@ func (s *Server) handleEditGroup(c *Client, raw json.RawMessage) {
 	}
 
 	// Step 1: membership.
+	if !s.validateIDOrReject(c, "edit_group", msg.Group, "group_", func() { s.sendUnknownGroup(c) }) {
+		return
+	}
+
 	isMember, err := s.store.IsGroupMember(msg.Group, c.UserID)
 	if err != nil || !isMember {
 		s.sendUnknownGroup(c)
@@ -240,6 +252,10 @@ func (s *Server) handleEditGroup(c *Client, raw json.RawMessage) {
 	}
 
 	// Step 4-6: fetch + author + deleted.
+	if !s.validateIDOrReject(c, "edit_group", msg.ID, "msg_", func() { s.sendUnknownGroup(c) }) {
+		return
+	}
+
 	row, err := s.store.GetGroupMessageByID(msg.Group, msg.ID)
 	if err == sql.ErrNoRows || (err == nil && row != nil && (row.Sender != c.UserID || row.Deleted)) {
 		s.sendUnknownGroup(c)
@@ -349,6 +365,10 @@ func (s *Server) handleEditDM(c *Client, raw json.RawMessage) {
 
 	// Step 1: caller is a party to the DM. Byte-identical privacy
 	// response on unknown-or-non-member, matching handleSendDM's pattern.
+	if !s.validateIDOrReject(c, "edit_dm", msg.DM, "dm_", func() { s.sendUnknownDM(c) }) {
+		return
+	}
+
 	dm, err := s.store.GetDirectMessage(msg.DM)
 	if err != nil || dm == nil || (dm.UserA != c.UserID && dm.UserB != c.UserID) {
 		s.sendUnknownDM(c)
@@ -372,6 +392,10 @@ func (s *Server) handleEditDM(c *Client, raw json.RawMessage) {
 	}
 
 	// Step 4-6.
+	if !s.validateIDOrReject(c, "edit_dm", msg.ID, "msg_", func() { s.sendUnknownDM(c) }) {
+		return
+	}
+
 	row, err := s.store.GetDMMessageByID(msg.DM, msg.ID)
 	if err == sql.ErrNoRows || (err == nil && row != nil && (row.Sender != c.UserID || row.Deleted)) {
 		s.sendUnknownDM(c)

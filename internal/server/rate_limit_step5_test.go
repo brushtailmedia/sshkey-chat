@@ -16,11 +16,13 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // --- Rate-limit wire tests ---
@@ -33,8 +35,8 @@ func TestHandleUnreact_RateLimitFiresCounter(t *testing.T) {
 	s.cfg.Server.RateLimits.ReactionsPerMinute = 1 // burst clamped to 5
 	s.cfg.Unlock()
 
-	alice := testClientFor("alice", "dev_alice_unreact_rl")
-	raw := json.RawMessage(`{"type":"unreact","reaction_id":"react_xxx"}`)
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_unreact_rl")
+	raw := json.RawMessage(fmt.Sprintf("{\"type\":\"unreact\",\"reaction_id\":\"%s\"}", testutil.ReactionID("xxx")))
 	for i := 0; i < 6; i++ {
 		s.handleUnreact(alice.Client, raw)
 	}
@@ -50,7 +52,7 @@ func TestHandleRoomMembers_RateLimitFiresCounter(t *testing.T) {
 	s.cfg.Server.RateLimits.RoomMembersPerMinute = 1
 	s.cfg.Unlock()
 
-	alice := testClientFor("alice", "dev_alice_rm_rl")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_rm_rl")
 	generalID := s.store.RoomDisplayNameToID("general")
 	raw, _ := json.Marshal(protocol.RoomMembers{Type: "room_members", Room: generalID})
 	for i := 0; i < 6; i++ {
@@ -68,8 +70,8 @@ func TestHandleDownload_RateLimitFiresCounter(t *testing.T) {
 	s.cfg.Server.RateLimits.DownloadRequestsPerMinute = 1
 	s.cfg.Unlock()
 
-	alice := testClientFor("alice", "dev_alice_download_rl")
-	raw := json.RawMessage(`{"type":"download","file_id":"file_abc"}`)
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_download_rl")
+	raw := json.RawMessage(fmt.Sprintf("{\"type\":\"download\",\"file_id\":\"%s\"}", testutil.FileID("abc")))
 	for i := 0; i < 6; i++ {
 		s.handleDownload(alice.Client, raw)
 	}
@@ -85,7 +87,7 @@ func TestHandleListDevices_RateLimitFiresCounter(t *testing.T) {
 	s.cfg.Server.RateLimits.DeviceListPerMinute = 1
 	s.cfg.Unlock()
 
-	alice := testClientFor("alice", "dev_alice_devlist_rl")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_devlist_rl")
 	for i := 0; i < 6; i++ {
 		s.handleListDevices(alice.Client, nil)
 	}
@@ -105,11 +107,11 @@ func TestHandleDownload_PathTraversalGuardUsesRejectAndLog(t *testing.T) {
 	// SignalInvalidNanoID. Verifies the cleanup didn't regress the
 	// counter.
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_pathguard")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_pathguard")
 
 	// Malformed file_id — not even nanoid-shape. Triggers the
 	// path-traversal guard.
-	raw := json.RawMessage(`{"type":"download","file_id":"../../etc/passwd"}`)
+	raw := json.RawMessage(`{"type":"download","file_id":"../../etc/passwd"}`) // malformed: path traversal must reject
 	s.handleDownload(alice.Client, raw)
 
 	if got := s.counters.Get(counters.SignalInvalidNanoID, "dev_alice_pathguard"); got != 1 {
@@ -136,7 +138,7 @@ func TestHandleRoomMembers_MalformedParseFiresMalformedFrame(t *testing.T) {
 	// SignalMalformedFrame while preserving the byte-identical wire
 	// response.
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_rm_malformed")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_rm_malformed")
 	s.handleRoomMembers(alice.Client, json.RawMessage(`{"broken json`))
 
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_rm_malformed"); got != 1 {
@@ -156,7 +158,7 @@ func TestHandleRoomMembers_EmptyRoomFiresMalformedFrame(t *testing.T) {
 	// The parse path also rejects when req.Room is empty — still a
 	// protocol violation (well-formed JSON, missing required field).
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_rm_emptyroom")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_rm_emptyroom")
 	raw, _ := json.Marshal(protocol.RoomMembers{Type: "room_members" /* Room omitted */})
 	s.handleRoomMembers(alice.Client, raw)
 
@@ -173,10 +175,10 @@ func TestHandleRoomMembers_EmptyRoomFiresMalformedFrame(t *testing.T) {
 // Implicit in the drain-and-reject tests but worth an explicit smoke.
 func TestHandleReact_UnderBurstStaysAllowed(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_underburst")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_underburst")
 
 	// Default ReactionsPerMinute = 30; one call is well under burst.
-	raw, _ := json.Marshal(protocol.React{Type: "react", ID: "msg_xxx", Payload: "hi"})
+	raw, _ := json.Marshal(protocol.React{Type: "react", ID: testutil.MsgID("xxx"), Payload: "hi"})
 	s.handleReact(alice.Client, raw)
 
 	if got := s.counters.Get(counters.SignalRateLimited, "dev_alice_underburst"); got != 0 {
@@ -208,10 +210,10 @@ func TestHandleUnreact_SharesBucketWithReact(t *testing.T) {
 	s.cfg.Server.RateLimits.ReactionsPerMinute = 1 // burst clamped to 5
 	s.cfg.Unlock()
 
-	alice := testClientFor("alice", "dev_alice_sharedbucket")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_sharedbucket")
 
 	// Step 1: drain the entire 5-token burst using react ONLY.
-	reactRaw, _ := json.Marshal(protocol.React{Type: "react", ID: "msg_xxx", Payload: "hi"})
+	reactRaw, _ := json.Marshal(protocol.React{Type: "react", ID: testutil.MsgID("xxx"), Payload: "hi"})
 	for i := 0; i < 5; i++ {
 		s.handleReact(alice.Client, reactRaw)
 	}
@@ -221,7 +223,7 @@ func TestHandleUnreact_SharesBucketWithReact(t *testing.T) {
 	// if the unreact call uses the SAME "react:" bucket that we just
 	// drained.
 	initialCount := s.counters.Get(counters.SignalRateLimited, "dev_alice_sharedbucket")
-	unreactRaw := json.RawMessage(`{"type":"unreact","reaction_id":"react_xxx"}`)
+	unreactRaw := json.RawMessage(fmt.Sprintf("{\"type\":\"unreact\",\"reaction_id\":\"%s\"}", testutil.ReactionID("xxx")))
 	s.handleUnreact(alice.Client, unreactRaw)
 	afterCount := s.counters.Get(counters.SignalRateLimited, "dev_alice_sharedbucket")
 
@@ -242,8 +244,8 @@ func TestHandleTyping_SilentDropFiresCounterOnly(t *testing.T) {
 	s.cfg.Server.RateLimits.TypingPerSecond = 1 // burst of 5
 	s.cfg.Unlock()
 
-	alice := testClientFor("alice", "dev_alice_typing_silent")
-	raw, _ := json.Marshal(protocol.Typing{Type: "typing", Room: "room_xxx"})
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_typing_silent")
+	raw, _ := json.Marshal(protocol.Typing{Type: "typing", Room: testutil.RoomID("xxx")})
 	for i := 0; i < 10; i++ {
 		s.handleTyping(alice.Client, raw)
 	}
@@ -291,9 +293,9 @@ func TestRateLimitsSection_Step5DefaultsSet(t *testing.T) {
 
 	// Drain 5 tokens via react + unreact mixed. 6th should be limited
 	// regardless of which verb.
-	c := testClientFor("alice", "dev_alice_shared_bucket")
-	reactRaw, _ := json.Marshal(protocol.React{Type: "react", ID: "msg_xxx", Payload: "👍"})
-	unreactRaw, _ := json.Marshal(protocol.Unreact{Type: "unreact", ReactionID: "react_xxx"})
+	c := testClientFor(testutil.UserID("alice"), "dev_alice_shared_bucket")
+	reactRaw, _ := json.Marshal(protocol.React{Type: "react", ID: testutil.MsgID("xxx"), Payload: "👍"})
+	unreactRaw, _ := json.Marshal(protocol.Unreact{Type: "unreact", ReactionID: testutil.ReactionID("xxx")})
 	s.handleReact(c.Client, reactRaw)
 	s.handleUnreact(c.Client, unreactRaw)
 	s.handleReact(c.Client, reactRaw)
@@ -327,7 +329,7 @@ func TestHandleHistory_RateLimitEchoesCorrID(t *testing.T) {
 	s.cfg.Server.RateLimits.HistoryPerMinute = 1 // burst clamped to 5
 	s.cfg.Unlock()
 
-	alice := testClientFor("alice", "dev_alice_hist_rl")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_hist_rl")
 	generalID := s.store.RoomDisplayNameToID("general")
 	raw, _ := json.Marshal(protocol.History{Type: "history", Room: generalID, CorrID: corrID})
 	for i := 0; i < 6; i++ {

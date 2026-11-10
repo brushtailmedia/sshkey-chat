@@ -9,6 +9,7 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // validUploadHash is a well-formed blake2b-256:<hex64> content hash that
@@ -34,7 +35,7 @@ var validUploadHash = "blake2b-256:" + strings.Repeat("a", 64)
 // room. Used by every test in this file to set up the retired state.
 func retireRoomForTest(t *testing.T, s *Server, roomID string) {
 	t.Helper()
-	if err := s.store.SetRoomRetired(roomID, "alice", "test"); err != nil {
+	if err := s.store.SetRoomRetired(roomID, testutil.UserID("alice"), "test"); err != nil {
 		t.Fatalf("SetRoomRetired(%q): %v", roomID, err)
 	}
 	if !s.store.IsRoomRetired(roomID) {
@@ -58,7 +59,7 @@ func TestHandleSend_RejectsRetiredRoom(t *testing.T) {
 	}
 	retireRoomForTest(t, s, generalID)
 
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	raw, _ := json.Marshal(protocol.Send{
 		Type: "send", Room: generalID,
 		Epoch: 1, Payload: "p", Signature: "s",
@@ -95,14 +96,14 @@ func TestHandleSend_RetiredRoomPreservesPrivacy(t *testing.T) {
 	retireRoomForTest(t, s, engineeringID)
 
 	// carol is NOT a member of engineering
-	probeUnknown := testClientFor("carol", "dev_carol_1")
+	probeUnknown := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	rawUnknown, _ := json.Marshal(protocol.Send{
-		Type: "send", Room: "room_does_not_exist",
+		Type: "send", Room: testutil.RoomID("does_not_exist"),
 		Epoch: 1, Payload: "p", Signature: "s",
 	})
 	s.handleSend(probeUnknown.Client, rawUnknown)
 
-	probeRetired := testClientFor("carol", "dev_carol_2")
+	probeRetired := testClientFor(testutil.UserID("carol"), "dev_carol_2")
 	rawRetired, _ := json.Marshal(protocol.Send{
 		Type: "send", Room: engineeringID,
 		Epoch: 1, Payload: "p", Signature: "s",
@@ -132,9 +133,9 @@ func TestHandleReact_RejectsRetiredRoom(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 	retireRoomForTest(t, s, generalID)
 
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	raw, _ := json.Marshal(protocol.React{
-		Type: "react", Room: generalID, ID: "msg_target",
+		Type: "react", Room: generalID, ID: testutil.MsgID("target"),
 		Epoch: 1, Payload: "p", Signature: "s",
 	})
 	s.handleReact(bob.Client, raw)
@@ -158,16 +159,16 @@ func TestHandleReact_RetiredRoomPreservesPrivacy(t *testing.T) {
 	engineeringID := s.store.RoomDisplayNameToID("engineering")
 	retireRoomForTest(t, s, engineeringID)
 
-	probeUnknown := testClientFor("carol", "dev_carol_1")
+	probeUnknown := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	rawUnknown, _ := json.Marshal(protocol.React{
-		Type: "react", Room: "room_does_not_exist", ID: "msg_target",
+		Type: "react", Room: testutil.RoomID("does_not_exist"), ID: testutil.MsgID("target"),
 		Epoch: 1, Payload: "p", Signature: "s",
 	})
 	s.handleReact(probeUnknown.Client, rawUnknown)
 
-	probeRetired := testClientFor("carol", "dev_carol_2")
+	probeRetired := testClientFor(testutil.UserID("carol"), "dev_carol_2")
 	rawRetired, _ := json.Marshal(protocol.React{
-		Type: "react", Room: engineeringID, ID: "msg_target",
+		Type: "react", Room: engineeringID, ID: testutil.MsgID("target"),
 		Epoch: 1, Payload: "p", Signature: "s",
 	})
 	s.handleReact(probeRetired.Client, rawRetired)
@@ -195,9 +196,9 @@ func TestHandlePin_RejectsRetiredRoom(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 	retireRoomForTest(t, s, generalID)
 
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	raw, _ := json.Marshal(protocol.Pin{
-		Type: "pin", Room: generalID, ID: "msg_target",
+		Type: "pin", Room: generalID, ID: testutil.MsgID("target"),
 	})
 	s.handlePin(bob.Client, raw)
 
@@ -218,15 +219,15 @@ func TestHandlePin_RetiredRoomPreservesPrivacy(t *testing.T) {
 	engineeringID := s.store.RoomDisplayNameToID("engineering")
 	retireRoomForTest(t, s, engineeringID)
 
-	probeUnknown := testClientFor("carol", "dev_carol_1")
+	probeUnknown := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	rawUnknown, _ := json.Marshal(protocol.Pin{
-		Type: "pin", Room: "room_does_not_exist", ID: "msg_target",
+		Type: "pin", Room: testutil.RoomID("does_not_exist"), ID: testutil.MsgID("target"),
 	})
 	s.handlePin(probeUnknown.Client, rawUnknown)
 
-	probeRetired := testClientFor("carol", "dev_carol_2")
+	probeRetired := testClientFor(testutil.UserID("carol"), "dev_carol_2")
 	rawRetired, _ := json.Marshal(protocol.Pin{
-		Type: "pin", Room: engineeringID, ID: "msg_target",
+		Type: "pin", Room: engineeringID, ID: testutil.MsgID("target"),
 	})
 	s.handlePin(probeRetired.Client, rawRetired)
 
@@ -253,9 +254,9 @@ func TestHandleUnpin_RejectsRetiredRoom(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 	retireRoomForTest(t, s, generalID)
 
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	raw, _ := json.Marshal(protocol.Unpin{
-		Type: "unpin", Room: generalID, ID: "msg_target",
+		Type: "unpin", Room: generalID, ID: testutil.MsgID("target"),
 	})
 	s.handleUnpin(bob.Client, raw)
 
@@ -276,15 +277,15 @@ func TestHandleUnpin_RetiredRoomPreservesPrivacy(t *testing.T) {
 	engineeringID := s.store.RoomDisplayNameToID("engineering")
 	retireRoomForTest(t, s, engineeringID)
 
-	probeUnknown := testClientFor("carol", "dev_carol_1")
+	probeUnknown := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	rawUnknown, _ := json.Marshal(protocol.Unpin{
-		Type: "unpin", Room: "room_does_not_exist", ID: "msg_target",
+		Type: "unpin", Room: testutil.RoomID("does_not_exist"), ID: testutil.MsgID("target"),
 	})
 	s.handleUnpin(probeUnknown.Client, rawUnknown)
 
-	probeRetired := testClientFor("carol", "dev_carol_2")
+	probeRetired := testClientFor(testutil.UserID("carol"), "dev_carol_2")
 	rawRetired, _ := json.Marshal(protocol.Unpin{
-		Type: "unpin", Room: engineeringID, ID: "msg_target",
+		Type: "unpin", Room: engineeringID, ID: testutil.MsgID("target"),
 	})
 	s.handleUnpin(probeRetired.Client, rawRetired)
 
@@ -324,7 +325,7 @@ func TestHandleUploadStart_RejectsRetiredRoom(t *testing.T) {
 
 	// bob is a member of general; membership rows survive retirement, so he
 	// passes IsRoomMemberByID and reaches the new retired gate.
-	bob := testClientFor("bob", "dev_bob_upl_retired")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_upl_retired")
 	raw, _ := json.Marshal(protocol.UploadStart{
 		Type:        "upload_start",
 		UploadID:    store.GenerateID("up_"),
@@ -363,7 +364,7 @@ func TestHandleUploadStart_RetiredRoomAllocatesNoUpload(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 	retireRoomForTest(t, s, generalID)
 
-	bob := testClientFor("bob", "dev_bob_upl_noalloc")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_upl_noalloc")
 	uploadID := store.GenerateID("up_")
 	raw, _ := json.Marshal(protocol.UploadStart{
 		Type:        "upload_start",
@@ -414,10 +415,10 @@ func TestHandleUploadStart_RetiredRoomPreservesPrivacy(t *testing.T) {
 	}
 
 	// carol is not a member of engineering (nor of a missing room).
-	probeUnknown := testClientFor("carol", "dev_carol_upl_1")
-	s.handleUploadStart(probeUnknown.Client, mk("room_does_not_exist"))
+	probeUnknown := testClientFor(testutil.UserID("carol"), "dev_carol_upl_1")
+	s.handleUploadStart(probeUnknown.Client, mk(testutil.RoomID("does_not_exist")))
 
-	probeRetired := testClientFor("carol", "dev_carol_upl_2")
+	probeRetired := testClientFor(testutil.UserID("carol"), "dev_carol_upl_2")
 	s.handleUploadStart(probeRetired.Client, mk(engineeringID))
 
 	unknownMsgs := probeUnknown.messages()
@@ -445,7 +446,7 @@ func TestHandleUploadStart_ActiveRoomStillReady(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general") // not retired
 
-	bob := testClientFor("bob", "dev_bob_upl_active")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_upl_active")
 	uploadID := store.GenerateID("up_")
 	raw, _ := json.Marshal(protocol.UploadStart{
 		Type:        "upload_start",

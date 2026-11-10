@@ -77,7 +77,7 @@ func TestHandleSend_FileIDsOverCapRejected(t *testing.T) {
 
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	alice := testClientFor("alice", "dev_alice_fidscap1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_fidscap1")
 	msg := protocol.Send{
 		Type:    "send",
 		Room:    generalID,
@@ -105,12 +105,12 @@ func TestHandleSend_FileIDsInvalidShapeRejected(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	alice := testClientFor("alice", "dev_alice_fidshape")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_fidshape")
 	msg := protocol.Send{
 		Type:    "send",
 		Room:    generalID,
 		Payload: "hi",
-		FileIDs: []string{"file_too_short"}, // fails length check
+		FileIDs: []string{"file_too_short"}, // malformed: short file ID must fail the suffix length check
 	}
 	raw, _ := json.Marshal(msg)
 	s.handleSend(alice.Client, raw)
@@ -141,7 +141,7 @@ func TestHandleSend_FileIDsAtCapAccepted(t *testing.T) {
 
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	alice := testClientFor("alice", "dev_alice_fidsat")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_fidsat")
 	msg := protocol.Send{
 		Type:    "send",
 		Room:    generalID,
@@ -163,11 +163,11 @@ func TestHandleSendGroup_WrappedKeysOverCapRejected(t *testing.T) {
 	s.cfg.Server.Groups.MaxMembers = 3
 	s.cfg.Unlock()
 
-	alice := testClientFor("alice", "dev_alice_wkcap1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_wkcap1")
 	msg := protocol.SendGroup{
 		Type:        "send_group",
-		Group:       "group_doesnt_matter_", // membership check would fail anyway; cap is checked first
-		WrappedKeys: genWrappedKeys(4),      // one over cap
+		Group:       testutil.GroupID("doesnt_matter_"), // membership check would fail anyway; cap is checked first
+		WrappedKeys: genWrappedKeys(4),                  // one over cap
 		Payload:     "hi",
 	}
 	raw, _ := json.Marshal(msg)
@@ -190,7 +190,7 @@ func TestHandleEditGroup_WrappedKeysOverCapRejected(t *testing.T) {
 	s.cfg.Server.Groups.MaxMembers = 2
 	s.cfg.Unlock()
 
-	alice := testClientFor("alice", "dev_alice_edit_wkcap")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_edit_wkcap")
 	msg := protocol.EditGroup{
 		Type:        "edit_group",
 		ID:          store.GenerateID("msg_"),
@@ -218,7 +218,7 @@ func TestHandleEpochRotate_WrappedKeysOverCapRejected(t *testing.T) {
 	s.cfg.Server.Groups.MaxMembers = 2
 	s.cfg.Unlock()
 
-	alice := testClientFor("alice", "dev_alice_epoch_wkcap")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_epoch_wkcap")
 	msg := protocol.EpochRotate{
 		Type:        "epoch_rotate",
 		Room:        store.GenerateID("room_"),
@@ -243,12 +243,12 @@ func TestHandleSendDM_WrappedKeysOverCapObservability(t *testing.T) {
 	s.cfg.Server.Groups.MaxMembers = 3
 	s.cfg.Unlock()
 
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create dm: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_dm_wkcap")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_dm_wkcap")
 	msg := protocol.SendDM{
 		Type:        "send_dm",
 		DM:          dm.ID,
@@ -269,7 +269,7 @@ func TestHandleEditDM_WrappedKeysOverCapObservability(t *testing.T) {
 	s.cfg.Server.Groups.MaxMembers = 3
 	s.cfg.Unlock()
 
-	alice := testClientFor("alice", "dev_alice_dm_edit_wkcap")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_dm_edit_wkcap")
 	msg := protocol.EditDM{
 		Type:        "edit_dm",
 		ID:          store.GenerateID("msg_"),
@@ -291,7 +291,7 @@ func TestHandleReact_WrappedKeysOverCapRejected(t *testing.T) {
 	s.cfg.Server.Groups.MaxMembers = 2
 	s.cfg.Unlock()
 
-	alice := testClientFor("alice", "dev_alice_react_wkcap")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_react_wkcap")
 	msg := protocol.React{
 		Type:        "react",
 		ID:          store.GenerateID("msg_"),
@@ -316,7 +316,7 @@ func TestCheckWrappedKeysCap_ZeroConfigFallback(t *testing.T) {
 	s.cfg.Server.Groups.MaxMembers = 0
 	s.cfg.Unlock()
 
-	alice := testClientFor("alice", "dev_alice_zero_cap")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_zero_cap")
 	if !s.checkWrappedKeysCap(alice.Client, genWrappedKeys(3), "test") {
 		t.Error("checkWrappedKeysCap with max_members=0 (fallback 100) should accept 3 entries")
 	}
@@ -335,7 +335,7 @@ func TestCheckFileIDsCapAndShape_ConfigKnobTakesEffect(t *testing.T) {
 	s.cfg.Server.Files.MaxFileIDsPerMessage = 50
 	s.cfg.Unlock()
 
-	alice := testClientFor("alice", "dev_alice_knob")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_knob")
 
 	// 40 file_ids — under the bumped ceiling. Must accept.
 	if !s.checkFileIDsCapAndShape(alice.Client, genFileIDs(40), "test") {
@@ -357,7 +357,7 @@ func TestCheckFileIDsCapAndShape_ZeroConfigFallback(t *testing.T) {
 	s.cfg.Server.Files.MaxFileIDsPerMessage = 0
 	s.cfg.Unlock()
 
-	alice := testClientFor("alice", "dev_alice_knob_zero")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_knob_zero")
 	if !s.checkFileIDsCapAndShape(alice.Client, genFileIDs(15), "test") {
 		t.Error("15 file_ids should accept under fallback cap (20)")
 	}
@@ -370,7 +370,7 @@ func TestCheckFileIDsCapAndShape_EmptyAccepted(t *testing.T) {
 	// Empty / nil slice must be accepted without touching the ValidateNanoID
 	// loop — no counter increments, no encoder writes.
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_empty_fids")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_empty_fids")
 
 	if !s.checkFileIDsCapAndShape(alice.Client, nil, "test") {
 		t.Error("nil file_ids should accept")

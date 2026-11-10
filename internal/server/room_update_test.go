@@ -19,6 +19,7 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func roomUpdateCountType(t *testing.T, msgs []json.RawMessage, typ string) int {
@@ -92,7 +93,7 @@ func TestHandleRoomUpdate_HappyPath(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
@@ -165,7 +166,7 @@ func TestHandleRoomUpdate_HappyPath(t *testing.T) {
 	if !strings.Contains(auditContent, "update-topic") {
 		t.Errorf("audit log missing 'update-topic', got: %q", auditContent)
 	}
-	if !strings.Contains(auditContent, "alice") {
+	if !strings.Contains(auditContent, testutil.UserID("alice")) {
 		t.Errorf("audit log missing 'alice' (changed_by), got: %q", auditContent)
 	}
 	if !strings.Contains(auditContent, "room="+generalID) {
@@ -179,7 +180,7 @@ func TestHandleRoomUpdate_HappyPath(t *testing.T) {
 	}
 	foundTopic := false
 	for _, e := range events {
-		if e.Event == "topic" && e.By == "alice" && e.Name == "fresh from session" {
+		if e.Event == "topic" && e.By == testutil.UserID("alice") && e.Name == "fresh from session" {
 			foundTopic = true
 		}
 	}
@@ -199,20 +200,20 @@ func TestHandleRoomUpdate_NonAdminMemberForbidden(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	// Confirm bob is non-admin per fixture.
-	if s.store.IsAdmin("bob") {
+	if s.store.IsAdmin(testutil.UserID("bob")) {
 		t.Fatal("fixture mismatch: bob should be a non-admin")
 	}
 
 	// Make bob a group admin elsewhere — wrong gate must not be
 	// the one fielding this request.
-	if err := s.store.CreateGroup("g_bob_admin", "bob", []string{"bob"}, "Bob's group"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("g_bob_admin"), testutil.UserID("bob"), []string{testutil.UserID("bob")}, "Bob's group"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	if isAdmin, err := s.store.IsGroupAdmin("g_bob_admin", "bob"); err != nil || !isAdmin {
+	if isAdmin, err := s.store.IsGroupAdmin(testutil.GroupID("g_bob_admin"), testutil.UserID("bob")); err != nil || !isAdmin {
 		t.Fatalf("fixture mismatch: bob should be a group admin of g_bob_admin (isAdmin=%v err=%v)", isAdmin, err)
 	}
 
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.handleRoomUpdate(bob.Client, roomUpdateRaw(t, generalID, "attempted by bob", ""))
 
 	msgs := bob.messages()
@@ -251,18 +252,18 @@ func TestHandleRoomUpdate_AdminNonMemberUnknownRoom(t *testing.T) {
 	engID := s.store.RoomDisplayNameToID("engineering")
 
 	// Make bob a server admin.
-	if err := s.store.SetAdmin("bob", true); err != nil {
+	if err := s.store.SetAdmin(testutil.UserID("bob"), true); err != nil {
 		t.Fatalf("set bob admin: %v", err)
 	}
-	if !s.store.IsAdmin("bob") {
+	if !s.store.IsAdmin(testutil.UserID("bob")) {
 		t.Fatal("fixture: bob should be a server admin after SetAdmin")
 	}
 	// Sanity: bob is NOT a member of engineering.
-	if s.store.IsRoomMemberByID(engID, "bob") {
+	if s.store.IsRoomMemberByID(engID, testutil.UserID("bob")) {
 		t.Fatal("fixture: bob should not be in engineering per newTestServer")
 	}
 
-	bob := testClientFor("bob", "dev_bob_admin_outsider")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_admin_outsider")
 	s.handleRoomUpdate(bob.Client, roomUpdateRaw(t, engID, "attempted by outsider admin", ""))
 
 	msgs := bob.messages()
@@ -286,8 +287,8 @@ func TestHandleRoomUpdate_AdminNonMemberUnknownRoom(t *testing.T) {
 func TestHandleRoomUpdate_AdminUnknownRoomID(t *testing.T) {
 	s := newTestServer(t)
 
-	alice := testClientFor("alice", "dev_alice_1")
-	s.handleRoomUpdate(alice.Client, roomUpdateRaw(t, "rm_does_not_exist", "ghost", ""))
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
+	s.handleRoomUpdate(alice.Client, roomUpdateRaw(t, testutil.RoomID("rm_does_not_exist"), "ghost", ""))
 
 	msgs := alice.messages()
 	if len(msgs) != 1 {
@@ -306,11 +307,11 @@ func TestHandleRoomUpdate_RetiredRoom(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	// Retire general.
-	if err := s.store.SetRoomRetired(generalID, "alice", "test-retirement"); err != nil {
+	if err := s.store.SetRoomRetired(generalID, testutil.UserID("alice"), "test-retirement"); err != nil {
 		t.Fatalf("retire room: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.handleRoomUpdate(alice.Client, roomUpdateRaw(t, generalID, "attempted on retired room", ""))
 
 	msgs := alice.messages()
@@ -345,8 +346,8 @@ func TestHandleRoomUpdate_IdempotencySameValue(t *testing.T) {
 	// of the timestamp.
 	preEvents, _ := s.store.GetRoomEventsSince(generalID, 0)
 
-	alice := testClientFor("alice", "dev_alice_1")
-	bob := testClientFor("bob", "dev_bob_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.clients["dev_bob_1"] = bob.Client
@@ -394,7 +395,7 @@ func TestHandleRoomUpdate_IdempotencySameValue(t *testing.T) {
 func TestHandleRoomUpdate_MalformedJSON(t *testing.T) {
 	s := newTestServer(t)
 
-	alice := testClientFor("alice", "dev_alice_malformed")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_malformed")
 	s.handleRoomUpdate(alice.Client, malformedRaw())
 
 	// Counter incremented.
@@ -426,7 +427,7 @@ func TestHandleRoomUpdate_ClearTopic(t *testing.T) {
 		t.Fatalf("seed topic: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.mu.Lock()
 	s.clients["dev_alice_1"] = alice.Client
 	s.mu.Unlock()
@@ -465,7 +466,7 @@ func TestHandleRoomUpdate_MalformedCorrID(t *testing.T) {
 	badCorrID := strings.Repeat("x", 200)
 	raw := json.RawMessage(`{"type":"room_update","room":"` + generalID + `","topic":"x","corr_id":"` + badCorrID + `"}`)
 
-	alice := testClientFor("alice", "dev_alice_badcorr")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_badcorr")
 	s.handleRoomUpdate(alice.Client, raw)
 
 	// Counter fires.
@@ -493,7 +494,7 @@ func TestHandleRoomUpdate_TypedErrorEchoesCorrID(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	corrID := "corr_aaaaaaaaaaaaaaaaaaaaa" // "corr_" + 21 a's
-	bob := testClientFor("bob", "dev_bob_corrid")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_corrid")
 	s.handleRoomUpdate(bob.Client, roomUpdateRaw(t, generalID, "denied", corrID))
 
 	msgs := bob.messages()
@@ -529,7 +530,7 @@ func TestHandleRoomUpdate_RateLimitUserScopedAndCorrIDEcho(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 	engID := s.store.RoomDisplayNameToID("engineering")
 
-	alice := testClientFor("alice", "dev_alice_rl")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_rl")
 	s.mu.Lock()
 	s.clients["dev_alice_rl"] = alice.Client
 	s.mu.Unlock()
@@ -587,13 +588,13 @@ func TestHandleRoomUpdate_RateLimitUserScopedAndCorrIDEcho(t *testing.T) {
 	// Probe 2: alice via handleAddToGroup (different bucket-key
 	// prefix → group_admin, separate from room_admin_action). The
 	// group_admin:alice:<group> bucket is fresh.
-	if err := s.store.CreateGroup("g_rl_probe", "alice", []string{"alice"}, "rl probe"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("g_rl_probe"), testutil.UserID("alice"), []string{testutil.UserID("alice")}, "rl probe"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 	addRaw, _ := json.Marshal(protocol.AddToGroup{
 		Type:  "add_to_group",
-		Group: "g_rl_probe",
-		User:  "bob",
+		Group: testutil.GroupID("g_rl_probe"),
+		User:  testutil.UserID("bob"),
 	})
 	s.handleAddToGroup(alice.Client, addRaw)
 	// We don't assert on add_to_group's response shape — only that
@@ -619,7 +620,7 @@ func TestHandleRoomUpdate_SharedHelperParity(t *testing.T) {
 	s := newTestServer(t)
 	generalID := s.store.RoomDisplayNameToID("general")
 
-	alice := testClientFor("alice", "dev_alice_parity")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_parity")
 	s.mu.Lock()
 	s.clients["dev_alice_parity"] = alice.Client
 	s.mu.Unlock()
@@ -646,7 +647,7 @@ func TestHandleRoomUpdate_SharedHelperParity(t *testing.T) {
 	if err := s.store.SetRoomTopic(generalID, "shared-helper-test"); err != nil {
 		t.Fatalf("path2 set topic: %v", err)
 	}
-	if err := s.store.RecordPendingRoomUpdate(generalID, store.RoomUpdateActionUpdateTopic, "alice", "shared-helper-test"); err != nil {
+	if err := s.store.RecordPendingRoomUpdate(generalID, store.RoomUpdateActionUpdateTopic, testutil.UserID("alice"), "shared-helper-test"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	s.processPendingRoomUpdates()

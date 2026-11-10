@@ -7,11 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/brushtailmedia/sshkey-chat/internal/actionauth"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
 	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
-	"golang.org/x/crypto/ssh"
 )
 
 // seedKeyedUser seeds a user with a freshly-generated Ed25519 keypair (so tests
@@ -146,17 +147,17 @@ func roomReactionExists(t *testing.T, s *Server, roomID, reactionID string) bool
 func TestHandleDelete_RoomSignedAccept(t *testing.T) {
 	s := newTestServer(t)
 	general := s.store.RoomDisplayNameToID("general")
-	priv := seedKeyedUser(t, s, "dave", "Dave", false, []string{"general"})
-	seedRoomMsg(t, s, general, "m_ok", "dave")
-	dave := testClientFor("dave", "dev_dave")
+	priv := seedKeyedUser(t, s, testutil.UserID("dave"), "Dave", false, []string{"general"})
+	seedRoomMsg(t, s, general, testutil.MsgID("m_ok"), testutil.UserID("dave"))
+	dave := testClientFor(testutil.UserID("dave"), "dev_dave")
 	registerClient(s, dave)
 
-	sendDelete(s, dave, signedDelete("room", general, "m_ok", priv))
+	sendDelete(s, dave, signedDelete("room", general, testutil.MsgID("m_ok"), priv))
 
-	if !roomMsgDeleted(t, s, general, "m_ok") {
+	if !roomMsgDeleted(t, s, general, testutil.MsgID("m_ok")) {
 		t.Error("valid signed delete should tombstone the message")
 	}
-	if !hasDeletedBroadcast(dave, "m_ok") {
+	if !hasDeletedBroadcast(dave, testutil.MsgID("m_ok")) {
 		t.Error("expected a deleted broadcast")
 	}
 }
@@ -164,15 +165,15 @@ func TestHandleDelete_RoomSignedAccept(t *testing.T) {
 func TestHandleDelete_RejectsMissingSignature(t *testing.T) {
 	s := newTestServer(t)
 	general := s.store.RoomDisplayNameToID("general")
-	seedKeyedUser(t, s, "dave", "Dave", false, []string{"general"})
-	seedRoomMsg(t, s, general, "m_nosig", "dave")
-	dave := testClientFor("dave", "dev_dave")
+	seedKeyedUser(t, s, testutil.UserID("dave"), "Dave", false, []string{"general"})
+	seedRoomMsg(t, s, general, testutil.MsgID("m_nosig"), testutil.UserID("dave"))
+	dave := testClientFor(testutil.UserID("dave"), "dev_dave")
 	registerClient(s, dave)
 
 	// Context present, signature absent.
-	sendDelete(s, dave, protocol.Delete{Type: "delete", ID: "m_nosig", Room: general})
+	sendDelete(s, dave, protocol.Delete{Type: "delete", ID: testutil.MsgID("m_nosig"), Room: general})
 
-	if roomMsgDeleted(t, s, general, "m_nosig") {
+	if roomMsgDeleted(t, s, general, testutil.MsgID("m_nosig")) {
 		t.Error("delete with no signature must not tombstone")
 	}
 	if code := firstErrorCode(dave); code != "invalid_message" {
@@ -183,16 +184,16 @@ func TestHandleDelete_RejectsMissingSignature(t *testing.T) {
 func TestHandleDelete_RejectsZeroContext(t *testing.T) {
 	s := newTestServer(t)
 	general := s.store.RoomDisplayNameToID("general")
-	priv := seedKeyedUser(t, s, "dave", "Dave", false, []string{"general"})
-	seedRoomMsg(t, s, general, "m_ctx", "dave")
-	dave := testClientFor("dave", "dev_dave")
+	priv := seedKeyedUser(t, s, testutil.UserID("dave"), "Dave", false, []string{"general"})
+	seedRoomMsg(t, s, general, testutil.MsgID("m_ctx"), testutil.UserID("dave"))
+	dave := testClientFor(testutil.UserID("dave"), "dev_dave")
 	registerClient(s, dave)
 
-	d := signedDelete("room", general, "m_ctx", priv)
+	d := signedDelete("room", general, testutil.MsgID("m_ctx"), priv)
 	d.Room = "" // strip the only context
 	sendDelete(s, dave, d)
 
-	if roomMsgDeleted(t, s, general, "m_ctx") {
+	if roomMsgDeleted(t, s, general, testutil.MsgID("m_ctx")) {
 		t.Error("zero-context delete must not tombstone")
 	}
 	if code := firstErrorCode(dave); code != "invalid_context" {
@@ -203,18 +204,18 @@ func TestHandleDelete_RejectsZeroContext(t *testing.T) {
 func TestHandleDelete_RejectsInvalidSignature(t *testing.T) {
 	s := newTestServer(t)
 	general := s.store.RoomDisplayNameToID("general")
-	priv := seedKeyedUser(t, s, "dave", "Dave", false, []string{"general"})
-	seedRoomMsg(t, s, general, "m_badsig", "dave")
-	dave := testClientFor("dave", "dev_dave")
+	priv := seedKeyedUser(t, s, testutil.UserID("dave"), "Dave", false, []string{"general"})
+	seedRoomMsg(t, s, general, testutil.MsgID("m_badsig"), testutil.UserID("dave"))
+	dave := testClientFor(testutil.UserID("dave"), "dev_dave")
 	registerClient(s, dave)
 
 	// Valid SHAPE but signed over a different msgID — the server-verify
 	// data-integrity gate must catch the mismatch.
-	d := signedDelete("room", general, "some_other_msg", priv)
-	d.ID = "m_badsig"
+	d := signedDelete("room", general, testutil.MsgID("some_other_msg"), priv)
+	d.ID = testutil.MsgID("m_badsig")
 	sendDelete(s, dave, d)
 
-	if roomMsgDeleted(t, s, general, "m_badsig") {
+	if roomMsgDeleted(t, s, general, testutil.MsgID("m_badsig")) {
 		t.Error("cryptographically-invalid signature must not tombstone (data-integrity gate)")
 	}
 }
@@ -222,18 +223,18 @@ func TestHandleDelete_RejectsInvalidSignature(t *testing.T) {
 func TestHandleDelete_NonAuthorCollapsesToUnknown(t *testing.T) {
 	s := newTestServer(t)
 	general := s.store.RoomDisplayNameToID("general")
-	seedKeyedUser(t, s, "dave", "Dave", false, []string{"general"})
-	evePriv := seedKeyedUser(t, s, "eve", "Eve", false, []string{"general"})
-	seedRoomMsg(t, s, general, "m_daves", "dave")
-	eve := testClientFor("eve", "dev_eve")
+	seedKeyedUser(t, s, testutil.UserID("dave"), "Dave", false, []string{"general"})
+	evePriv := seedKeyedUser(t, s, testutil.UserID("eve"), "Eve", false, []string{"general"})
+	seedRoomMsg(t, s, general, testutil.MsgID("m_daves"), testutil.UserID("dave"))
+	eve := testClientFor(testutil.UserID("eve"), "dev_eve")
 	registerClient(s, eve)
 
 	// Eve is a member but not the author and not an admin: a validly-signed
 	// delete of Dave's message must collapse to the room's unknown response
 	// (NOT ErrNotAuthorized) and must not tombstone.
-	sendDelete(s, eve, signedDelete("room", general, "m_daves", evePriv))
+	sendDelete(s, eve, signedDelete("room", general, testutil.MsgID("m_daves"), evePriv))
 
-	if roomMsgDeleted(t, s, general, "m_daves") {
+	if roomMsgDeleted(t, s, general, testutil.MsgID("m_daves")) {
 		t.Error("non-author delete must not tombstone")
 	}
 	if code := firstErrorCode(eve); code != protocol.ErrUnknownRoom {
@@ -244,20 +245,20 @@ func TestHandleDelete_NonAuthorCollapsesToUnknown(t *testing.T) {
 func TestHandleDelete_RoomAdminDeletesOther(t *testing.T) {
 	s := newTestServer(t)
 	general := s.store.RoomDisplayNameToID("general")
-	seedKeyedUser(t, s, "dave", "Dave", false, []string{"general"})
-	modPriv := seedKeyedUser(t, s, "mod", "Mod", true, []string{"general"})
-	seedRoomMsg(t, s, general, "m_modtarget", "dave")
-	mod := testClientFor("mod", "dev_mod")
+	seedKeyedUser(t, s, testutil.UserID("dave"), "Dave", false, []string{"general"})
+	modPriv := seedKeyedUser(t, s, testutil.UserID("mod"), "Mod", true, []string{"general"})
+	seedRoomMsg(t, s, general, testutil.MsgID("m_modtarget"), testutil.UserID("dave"))
+	mod := testClientFor(testutil.UserID("mod"), "dev_mod")
 	registerClient(s, mod)
 
 	// Admin deletes another user's room message (own-or-admin authz), signed by
 	// the admin (the session user the server verifies against).
-	sendDelete(s, mod, signedDelete("room", general, "m_modtarget", modPriv))
+	sendDelete(s, mod, signedDelete("room", general, testutil.MsgID("m_modtarget"), modPriv))
 
-	if !roomMsgDeleted(t, s, general, "m_modtarget") {
+	if !roomMsgDeleted(t, s, general, testutil.MsgID("m_modtarget")) {
 		t.Error("room admin should be able to delete another user's message")
 	}
-	if !hasDeletedBroadcast(mod, "m_modtarget") {
+	if !hasDeletedBroadcast(mod, testutil.MsgID("m_modtarget")) {
 		t.Error("expected a deleted broadcast for the admin delete")
 	}
 }
@@ -265,15 +266,15 @@ func TestHandleDelete_RoomAdminDeletesOther(t *testing.T) {
 func TestHandleUnreact_ContextBoundValidSignatureDeletes(t *testing.T) {
 	s := newTestServer(t)
 	general := s.store.RoomDisplayNameToID("general")
-	priv := seedKeyedUser(t, s, "dave", "Dave", false, []string{"general"})
-	seedRoomMsg(t, s, general, "m_react_ok", "dave")
-	seedRoomReaction(t, s, general, "m_react_ok", "react_ok", "dave")
-	dave := testClientFor("dave", "dev_dave_unreact_ok")
+	priv := seedKeyedUser(t, s, testutil.UserID("dave"), "Dave", false, []string{"general"})
+	seedRoomMsg(t, s, general, testutil.MsgID("m_react_ok"), testutil.UserID("dave"))
+	seedRoomReaction(t, s, general, testutil.MsgID("m_react_ok"), testutil.ReactionID("ok"), testutil.UserID("dave"))
+	dave := testClientFor(testutil.UserID("dave"), "dev_dave_unreact_ok")
 	registerClient(s, dave)
 
-	sendUnreact(s, dave, signedUnreact("room", general, "react_ok", priv))
+	sendUnreact(s, dave, signedUnreact("room", general, testutil.ReactionID("ok"), priv))
 
-	if roomReactionExists(t, s, general, "react_ok") {
+	if roomReactionExists(t, s, general, testutil.ReactionID("ok")) {
 		t.Error("valid signed unreact should delete the reaction")
 	}
 }
@@ -281,18 +282,18 @@ func TestHandleUnreact_ContextBoundValidSignatureDeletes(t *testing.T) {
 func TestHandleUnreact_RejectsInvalidSignatureBeforeDelete(t *testing.T) {
 	s := newTestServer(t)
 	general := s.store.RoomDisplayNameToID("general")
-	priv := seedKeyedUser(t, s, "dave", "Dave", false, []string{"general"})
-	seedRoomMsg(t, s, general, "m_react_bad_sig", "dave")
-	seedRoomReaction(t, s, general, "m_react_bad_sig", "react_bad_sig", "dave")
-	dave := testClientFor("dave", "dev_dave_unreact_bad_sig")
+	priv := seedKeyedUser(t, s, testutil.UserID("dave"), "Dave", false, []string{"general"})
+	seedRoomMsg(t, s, general, testutil.MsgID("m_react_bad_sig"), testutil.UserID("dave"))
+	seedRoomReaction(t, s, general, testutil.MsgID("m_react_bad_sig"), testutil.ReactionID("bad_sig"), testutil.UserID("dave"))
+	dave := testClientFor(testutil.UserID("dave"), "dev_dave_unreact_bad_sig")
 	registerClient(s, dave)
 
 	// Valid length/base64, but signed for a different reaction_id.
-	req := signedUnreact("room", general, "some_other_react", priv)
-	req.ReactionID = "react_bad_sig"
+	req := signedUnreact("room", general, testutil.ReactionID("some_other_react"), priv)
+	req.ReactionID = testutil.ReactionID("bad_sig")
 	sendUnreact(s, dave, req)
 
-	if !roomReactionExists(t, s, general, "react_bad_sig") {
+	if !roomReactionExists(t, s, general, testutil.ReactionID("bad_sig")) {
 		t.Error("cryptographically-invalid unreact must not delete the reaction")
 	}
 	if code := firstErrorCode(dave); code != "invalid_message" {
@@ -303,20 +304,20 @@ func TestHandleUnreact_RejectsInvalidSignatureBeforeDelete(t *testing.T) {
 func TestHandleUnreact_RejectsWrongContextBeforeDelete(t *testing.T) {
 	s := newTestServer(t)
 	general := s.store.RoomDisplayNameToID("general")
-	priv := seedKeyedUser(t, s, "dave", "Dave", false, []string{"general"})
+	priv := seedKeyedUser(t, s, testutil.UserID("dave"), "Dave", false, []string{"general"})
 	groupID := store.GenerateID("group_")
-	if err := s.store.CreateGroup(groupID, "dave", []string{"dave", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(groupID, testutil.UserID("dave"), []string{testutil.UserID("dave"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	seedRoomMsg(t, s, general, "m_react_wrong_ctx", "dave")
-	seedRoomReaction(t, s, general, "m_react_wrong_ctx", "react_wrong_ctx", "dave")
-	dave := testClientFor("dave", "dev_dave_unreact_wrong_ctx")
+	seedRoomMsg(t, s, general, testutil.MsgID("m_react_wrong_ctx"), testutil.UserID("dave"))
+	seedRoomReaction(t, s, general, testutil.MsgID("m_react_wrong_ctx"), testutil.ReactionID("wrong_ctx"), testutil.UserID("dave"))
+	dave := testClientFor(testutil.UserID("dave"), "dev_dave_unreact_wrong_ctx")
 	registerClient(s, dave)
 
 	// The reaction lives in the room, but the request is signed/sent for a group.
-	sendUnreact(s, dave, signedUnreact("group", groupID, "react_wrong_ctx", priv))
+	sendUnreact(s, dave, signedUnreact("group", groupID, testutil.ReactionID("wrong_ctx"), priv))
 
-	if !roomReactionExists(t, s, general, "react_wrong_ctx") {
+	if !roomReactionExists(t, s, general, testutil.ReactionID("wrong_ctx")) {
 		t.Error("wrong-context unreact must not delete the reaction")
 	}
 }
@@ -324,21 +325,21 @@ func TestHandleUnreact_RejectsWrongContextBeforeDelete(t *testing.T) {
 func TestHandleUnreact_RejectsZeroAndMultiContext(t *testing.T) {
 	s := newTestServer(t)
 	general := s.store.RoomDisplayNameToID("general")
-	priv := seedKeyedUser(t, s, "dave", "Dave", false, []string{"general"})
-	seedRoomMsg(t, s, general, "m_react_ctx_shape", "dave")
-	seedRoomReaction(t, s, general, "m_react_ctx_shape", "react_ctx_shape", "dave")
-	dave := testClientFor("dave", "dev_dave_unreact_ctx_shape")
+	priv := seedKeyedUser(t, s, testutil.UserID("dave"), "Dave", false, []string{"general"})
+	seedRoomMsg(t, s, general, testutil.MsgID("m_react_ctx_shape"), testutil.UserID("dave"))
+	seedRoomReaction(t, s, general, testutil.MsgID("m_react_ctx_shape"), testutil.ReactionID("ctx_shape"), testutil.UserID("dave"))
+	dave := testClientFor(testutil.UserID("dave"), "dev_dave_unreact_ctx_shape")
 	registerClient(s, dave)
 
-	zero := signedUnreact("room", general, "react_ctx_shape", priv)
+	zero := signedUnreact("room", general, testutil.ReactionID("ctx_shape"), priv)
 	zero.Room = ""
 	sendUnreact(s, dave, zero)
 
-	multi := signedUnreact("room", general, "react_ctx_shape", priv)
+	multi := signedUnreact("room", general, testutil.ReactionID("ctx_shape"), priv)
 	multi.Group = store.GenerateID("group_")
 	sendUnreact(s, dave, multi)
 
-	if !roomReactionExists(t, s, general, "react_ctx_shape") {
+	if !roomReactionExists(t, s, general, testutil.ReactionID("ctx_shape")) {
 		t.Error("zero/multi-context unreact must not delete the reaction")
 	}
 }
@@ -384,27 +385,27 @@ func onlyHistoryResult(t *testing.T, frames []json.RawMessage) protocol.HistoryR
 func TestSync_BundlesActorProfiles(t *testing.T) {
 	s := newTestServer(t)
 	groupID := store.GenerateID("group_")
-	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(groupID, testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 	// A post-join message from alice (a seeded user with a resolvable key) at a
 	// future TS, so it is visible to bob's catch-up.
 	postTS := time.Now().Unix() + 3600
 	if _, err := s.store.InsertGroupMessage(groupID, store.StoredMessage{
-		ID: "m_bundle", Sender: "alice", TS: postTS, Payload: "p",
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("wa"), "bob": testutil.WrappedKey("wb")},
+		ID: testutil.MsgID("m_bundle"), Sender: testutil.UserID("alice"), TS: postTS, Payload: "p",
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("wa"), testutil.UserID("bob"): testutil.WrappedKey("wb")},
 	}); err != nil {
 		t.Fatalf("insert group message: %v", err)
 	}
 
-	bob := testClientFor("bob", "dev_bob_bundle")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_bundle")
 	s.syncGroup(bob.Client, groupID, 0, 100)
 
 	frames := bob.messages()
 	profileIdx, batchIdx := -1, -1
 	for i, raw := range frames {
 		var p protocol.Profile
-		if json.Unmarshal(raw, &p) == nil && p.Type == "profile" && p.User == "alice" {
+		if json.Unmarshal(raw, &p) == nil && p.Type == "profile" && p.User == testutil.UserID("alice") {
 			profileIdx = i
 		}
 		var b protocol.SyncBatch

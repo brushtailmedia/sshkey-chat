@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // -------- quotaBlockedMessage --------
@@ -257,18 +258,18 @@ func TestPruneOldQuotaRows_RunsWhenEnabled(t *testing.T) {
 	s.cfg.Server.Server.Quotas.User.RetentionDays = 7
 
 	// Seed an old row and a new row.
-	s.store.IncrementDailyUploadBytes("usr_alice", "2020-01-01", 1000, false)
-	s.store.IncrementDailyUploadBytes("usr_alice", todayUTC(), 2000, false)
+	s.store.IncrementDailyUploadBytes(testutil.UserID("alice"), "2020-01-01", 1000, false)
+	s.store.IncrementDailyUploadBytes(testutil.UserID("alice"), todayUTC(), 2000, false)
 
 	s.pruneOldQuotaRows()
 
 	// Old row gone.
-	_, _, exists, _ := s.store.GetDailyUploadRow("usr_alice", "2020-01-01")
+	_, _, exists, _ := s.store.GetDailyUploadRow(testutil.UserID("alice"), "2020-01-01")
 	if exists {
 		t.Error("ancient row should have been pruned")
 	}
 	// New row preserved.
-	_, _, exists, _ = s.store.GetDailyUploadRow("usr_alice", todayUTC())
+	_, _, exists, _ = s.store.GetDailyUploadRow(testutil.UserID("alice"), todayUTC())
 	if !exists {
 		t.Error("today's row should be preserved")
 	}
@@ -286,14 +287,14 @@ func TestPruneOldQuotaRows_RunsWhenEnabled(t *testing.T) {
 func TestIsQuotaExempt_GateOffOverridesDBFlag(t *testing.T) {
 	s := newSchedulerTestServer(t)
 	// Default config: Enabled=true, AllowExemptUsers=false.
-	if err := s.store.InsertUser("usr_alice", "ssh-ed25519 AAAAfake-alice", "Alice"); err != nil {
+	if err := s.store.InsertUser(testutil.UserID("alice"), "ssh-ed25519 AAAAfake-alice", "Alice"); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
-	if err := s.store.SetUserQuotaExempt("usr_alice", true); err != nil {
+	if err := s.store.SetUserQuotaExempt(testutil.UserID("alice"), true); err != nil {
 		t.Fatalf("set exempt: %v", err)
 	}
 	// Sanity: DB does say exempt = 1.
-	dbExempt, _ := s.store.IsUserQuotaExempt("usr_alice")
+	dbExempt, _ := s.store.IsUserQuotaExempt(testutil.UserID("alice"))
 	if !dbExempt {
 		t.Fatal("test setup: store should report exempt=true")
 	}
@@ -305,7 +306,7 @@ func TestIsQuotaExempt_GateOffOverridesDBFlag(t *testing.T) {
 	if quota.AllowExemptUsers {
 		t.Fatal("test setup: default config should have AllowExemptUsers=false")
 	}
-	if s.isQuotaExempt(quota, "usr_alice") {
+	if s.isQuotaExempt(quota, testutil.UserID("alice")) {
 		t.Error("isQuotaExempt should return false when AllowExemptUsers=false, even with DB flag set")
 	}
 }
@@ -313,10 +314,10 @@ func TestIsQuotaExempt_GateOffOverridesDBFlag(t *testing.T) {
 func TestIsQuotaExempt_GateOnHonorsDBFlag(t *testing.T) {
 	s := newSchedulerTestServer(t)
 	s.cfg.Server.Server.Quotas.User.AllowExemptUsers = true
-	if err := s.store.InsertUser("usr_alice", "ssh-ed25519 AAAAfake-alice", "Alice"); err != nil {
+	if err := s.store.InsertUser(testutil.UserID("alice"), "ssh-ed25519 AAAAfake-alice", "Alice"); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
-	if err := s.store.SetUserQuotaExempt("usr_alice", true); err != nil {
+	if err := s.store.SetUserQuotaExempt(testutil.UserID("alice"), true); err != nil {
 		t.Fatalf("set exempt: %v", err)
 	}
 
@@ -324,7 +325,7 @@ func TestIsQuotaExempt_GateOnHonorsDBFlag(t *testing.T) {
 	if !quota.AllowExemptUsers {
 		t.Fatal("test setup: AllowExemptUsers should be true after override")
 	}
-	if !s.isQuotaExempt(quota, "usr_alice") {
+	if !s.isQuotaExempt(quota, testutil.UserID("alice")) {
 		t.Error("isQuotaExempt should return true when AllowExemptUsers=true AND DB flag is set")
 	}
 }
@@ -332,13 +333,13 @@ func TestIsQuotaExempt_GateOnHonorsDBFlag(t *testing.T) {
 func TestIsQuotaExempt_GateOnButDBFlagFalse(t *testing.T) {
 	s := newSchedulerTestServer(t)
 	s.cfg.Server.Server.Quotas.User.AllowExemptUsers = true
-	if err := s.store.InsertUser("usr_alice", "ssh-ed25519 AAAAfake-alice", "Alice"); err != nil {
+	if err := s.store.InsertUser(testutil.UserID("alice"), "ssh-ed25519 AAAAfake-alice", "Alice"); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
 	// User exists but quota_exempt = 0 (default after InsertUser).
 
 	quota := s.parsedQuota()
-	if s.isQuotaExempt(quota, "usr_alice") {
+	if s.isQuotaExempt(quota, testutil.UserID("alice")) {
 		t.Error("isQuotaExempt should return false when DB flag is unset, regardless of gate")
 	}
 }
@@ -354,7 +355,7 @@ func TestIsQuotaExempt_GateOffSkipsStoreRead(t *testing.T) {
 	s := newSchedulerTestServer(t)
 	// Default config: AllowExemptUsers=false.
 	quota := s.parsedQuota()
-	if s.isQuotaExempt(quota, "usr_does_not_exist") {
+	if s.isQuotaExempt(quota, testutil.UserID("does_not_exist")) {
 		t.Error("isQuotaExempt should return false for unknown user under gate-off")
 	}
 }

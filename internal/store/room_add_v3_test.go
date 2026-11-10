@@ -6,6 +6,8 @@ package store
 import (
 	"errors"
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestAddRoomMemberIfMissing_ReportsInsert(t *testing.T) {
@@ -18,20 +20,20 @@ func TestAddRoomMemberIfMissing_ReportsInsert(t *testing.T) {
 	roomID := st.RoomDisplayNameToID("general")
 
 	// First add: a genuinely new row → inserted == true.
-	inserted, err := st.AddRoomMemberIfMissing(roomID, "usr_alice", 0)
+	inserted, err := st.AddRoomMemberIfMissing(roomID, testutil.UserID("alice"), 0)
 	if err != nil {
 		t.Fatalf("first add: %v", err)
 	}
 	if !inserted {
 		t.Error("first AddRoomMemberIfMissing should report inserted=true")
 	}
-	if !st.IsRoomMemberByID(roomID, "usr_alice") {
+	if !st.IsRoomMemberByID(roomID, testutil.UserID("alice")) {
 		t.Error("alice should be a member after insert")
 	}
 
 	// Second add: row already exists → inserted == false (the proof the
 	// helper uses to gate live side effects).
-	inserted, err = st.AddRoomMemberIfMissing(roomID, "usr_alice", 0)
+	inserted, err = st.AddRoomMemberIfMissing(roomID, testutil.UserID("alice"), 0)
 	if err != nil {
 		t.Fatalf("second add: %v", err)
 	}
@@ -47,18 +49,18 @@ func TestRecordPendingAddToRoom_DuplicateReturnsErrAlreadyQueued(t *testing.T) {
 	}
 	defer st.Close()
 
-	if err := st.RecordPendingAddToRoom("usr_alice", "rm_general", "os:1000"); err != nil {
+	if err := st.RecordPendingAddToRoom(testutil.UserID("alice"), testutil.RoomID("rm_general"), "os:1000"); err != nil {
 		t.Fatalf("first enqueue: %v", err)
 	}
 	// Duplicate (user, room) trips the unique index → benign sentinel, not a
 	// raw driver error.
-	err = st.RecordPendingAddToRoom("usr_alice", "rm_general", "os:2000")
+	err = st.RecordPendingAddToRoom(testutil.UserID("alice"), testutil.RoomID("rm_general"), testutil.UserID("os:2000"))
 	if !errors.Is(err, ErrAlreadyQueued) {
 		t.Fatalf("duplicate enqueue should return ErrAlreadyQueued, got %v", err)
 	}
 
 	// A different (user, room) still enqueues normally.
-	if err := st.RecordPendingAddToRoom("usr_bob", "rm_general", "os:1000"); err != nil {
+	if err := st.RecordPendingAddToRoom(testutil.UserID("bob"), testutil.RoomID("rm_general"), "os:1000"); err != nil {
 		t.Fatalf("distinct enqueue should succeed: %v", err)
 	}
 

@@ -7,11 +7,12 @@ import (
 
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestHandleSetStatus_HappyPath(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_status")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_status")
 
 	raw, _ := json.Marshal(protocol.SetStatus{
 		Type: "set_status",
@@ -25,7 +26,7 @@ func TestHandleSetStatus_HappyPath(t *testing.T) {
 	}
 
 	var got string
-	err := s.store.DataDB().QueryRow(`SELECT status_text FROM profiles WHERE user = ?`, "alice").Scan(&got)
+	err := s.store.DataDB().QueryRow(`SELECT status_text FROM profiles WHERE user = ?`, testutil.UserID("alice")).Scan(&got)
 	if err != nil {
 		t.Fatalf("query status_text: %v", err)
 	}
@@ -36,7 +37,7 @@ func TestHandleSetStatus_HappyPath(t *testing.T) {
 
 func TestHandleSetStatus_SecondWriteReplacesExistingValue(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_status_replace")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_status_replace")
 
 	first, _ := json.Marshal(protocol.SetStatus{Type: "set_status", Text: "heads down"})
 	second, _ := json.Marshal(protocol.SetStatus{Type: "set_status", Text: "available"})
@@ -44,7 +45,7 @@ func TestHandleSetStatus_SecondWriteReplacesExistingValue(t *testing.T) {
 	s.handleSetStatus(alice.Client, second)
 
 	var got string
-	err := s.store.DataDB().QueryRow(`SELECT status_text FROM profiles WHERE user = ?`, "alice").Scan(&got)
+	err := s.store.DataDB().QueryRow(`SELECT status_text FROM profiles WHERE user = ?`, testutil.UserID("alice")).Scan(&got)
 	if err != nil {
 		t.Fatalf("query status_text: %v", err)
 	}
@@ -58,7 +59,7 @@ func TestHandleSetStatus_SecondWriteReplacesExistingValue(t *testing.T) {
 // accepted.
 func TestHandleSetStatus_OverLongRejected(t *testing.T) {
 	s := newTestServer(t)
-	alice := testClientFor("alice", "dev_alice_status_toolong")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_status_toolong")
 
 	long := strings.Repeat("x", maxStatusTextBytes+1)
 	raw, _ := json.Marshal(protocol.SetStatus{Type: "set_status", Text: long})
@@ -69,7 +70,7 @@ func TestHandleSetStatus_OverLongRejected(t *testing.T) {
 	}
 	var stored string
 	// No row written (sql.ErrNoRows → err != nil) is the pass condition.
-	if err := s.store.DataDB().QueryRow(`SELECT status_text FROM profiles WHERE user = ?`, "alice").Scan(&stored); err == nil {
+	if err := s.store.DataDB().QueryRow(`SELECT status_text FROM profiles WHERE user = ?`, testutil.UserID("alice")).Scan(&stored); err == nil {
 		t.Errorf("over-long status_text must not be stored, got %q", stored)
 	}
 
@@ -77,7 +78,7 @@ func TestHandleSetStatus_OverLongRejected(t *testing.T) {
 	atCap := strings.Repeat("y", maxStatusTextBytes)
 	raw2, _ := json.Marshal(protocol.SetStatus{Type: "set_status", Text: atCap})
 	s.handleSetStatus(alice.Client, raw2)
-	if err := s.store.DataDB().QueryRow(`SELECT status_text FROM profiles WHERE user = ?`, "alice").Scan(&stored); err != nil {
+	if err := s.store.DataDB().QueryRow(`SELECT status_text FROM profiles WHERE user = ?`, testutil.UserID("alice")).Scan(&stored); err != nil {
 		t.Fatalf("status at cap should be stored: %v", err)
 	}
 	if stored != atCap {

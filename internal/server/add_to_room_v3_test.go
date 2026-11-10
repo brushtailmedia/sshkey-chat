@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // v3FrameType returns the "type" field of a captured wire frame.
@@ -30,21 +31,21 @@ func TestProcessPendingAddToRoom_EmitsRoomAddedToAndExcludesSelf(t *testing.T) {
 	s := newTestServer(t)
 	engID := s.store.RoomDisplayNameToID("engineering")
 
-	if err := s.store.AddRoomMember(engID, "bob", 0); err != nil {
+	if err := s.store.AddRoomMember(engID, testutil.UserID("bob"), 0); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
-	if err := s.store.RecordPendingAddToRoom("bob", engID, "os:1000"); err != nil {
+	if err := s.store.RecordPendingAddToRoom(testutil.UserID("bob"), engID, "os:1000"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	// Seed an epoch so the rotation-trigger path is clean.
-	if err := s.store.StoreEpochKey(engID, 1, "alice", "wk_e1_alice"); err != nil {
+	if err := s.store.StoreEpochKey(engID, 1, testutil.UserID("alice"), "wk_e1_alice"); err != nil {
 		t.Fatalf("seed epoch: %v", err)
 	}
 	s.epochs.getOrCreate(engID, 1)
 
-	alice := testClientFor("alice", "dev_alice") // existing engineering member
-	bob1 := testClientFor("bob", "dev_bob1")
-	bob2 := testClientFor("bob", "dev_bob2")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice") // existing engineering member
+	bob1 := testClientFor(testutil.UserID("bob"), "dev_bob1")
+	bob2 := testClientFor(testutil.UserID("bob"), "dev_bob2")
 	s.mu.Lock()
 	s.clients["dev_alice"] = alice.Client
 	s.clients["dev_bob1"] = bob1.Client
@@ -69,7 +70,7 @@ func TestProcessPendingAddToRoom_EmitsRoomAddedToAndExcludesSelf(t *testing.T) {
 				if err := json.Unmarshal(raw, &ev); err != nil {
 					t.Fatalf("parse room_event: %v", err)
 				}
-				if ev.Event == "join" && ev.User == "bob" {
+				if ev.Event == "join" && ev.User == testutil.UserID("bob") {
 					sawSelfJoin = true
 				}
 			}
@@ -94,7 +95,7 @@ func TestProcessPendingAddToRoom_EmitsRoomAddedToAndExcludesSelf(t *testing.T) {
 			}
 			found := false
 			for _, m := range addedTo.Members {
-				if m == "bob" {
+				if m == testutil.UserID("bob") {
 					found = true
 				}
 			}
@@ -111,7 +112,7 @@ func TestProcessPendingAddToRoom_EmitsRoomAddedToAndExcludesSelf(t *testing.T) {
 		switch v3FrameType(t, raw) {
 		case "room_event":
 			var ev protocol.RoomEvent
-			if err := json.Unmarshal(raw, &ev); err == nil && ev.Event == "join" && ev.User == "bob" {
+			if err := json.Unmarshal(raw, &ev); err == nil && ev.Event == "join" && ev.User == testutil.UserID("bob") {
 				aliceSawJoin = true
 			}
 		case "room_added_to":
@@ -131,18 +132,18 @@ func TestProcessPendingAddToRoom_EmitsRoomAddedToAndExcludesSelf(t *testing.T) {
 func TestProcessPendingAddToRoom_SkipsRetiredRoom(t *testing.T) {
 	s := newTestServer(t)
 	engID := s.store.RoomDisplayNameToID("engineering")
-	if err := s.store.AddRoomMember(engID, "bob", 0); err != nil {
+	if err := s.store.AddRoomMember(engID, testutil.UserID("bob"), 0); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
-	if err := s.store.RecordPendingAddToRoom("bob", engID, "os:1000"); err != nil {
+	if err := s.store.RecordPendingAddToRoom(testutil.UserID("bob"), engID, "os:1000"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	if err := s.store.SetRoomRetired(engID, "os:1000", ""); err != nil {
 		t.Fatalf("retire room: %v", err)
 	}
 
-	bob := testClientFor("bob", "dev_bob")
-	alice := testClientFor("alice", "dev_alice")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice")
 	s.mu.Lock()
 	s.clients["dev_bob"] = bob.Client
 	s.clients["dev_alice"] = alice.Client
@@ -165,22 +166,22 @@ func TestProcessPendingAddToRoom_SkipsRetiredRoom(t *testing.T) {
 func TestProcessPendingAddToRoom_SkipsRetiredUser(t *testing.T) {
 	s := newTestServer(t)
 	engID := s.store.RoomDisplayNameToID("engineering")
-	if err := s.store.AddRoomMember(engID, "bob", 0); err != nil {
+	if err := s.store.AddRoomMember(engID, testutil.UserID("bob"), 0); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
-	if err := s.store.RecordPendingAddToRoom("bob", engID, "os:1000"); err != nil {
+	if err := s.store.RecordPendingAddToRoom(testutil.UserID("bob"), engID, "os:1000"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	if err := s.store.SetUserRetired("bob", "test_policy"); err != nil {
+	if err := s.store.SetUserRetired(testutil.UserID("bob"), "test_policy"); err != nil {
 		t.Fatalf("retire user: %v", err)
 	}
 	// Confirm bob is still a member, so the retired-user guard is what fires.
-	if !s.store.IsRoomMemberByID(engID, "bob") {
+	if !s.store.IsRoomMemberByID(engID, testutil.UserID("bob")) {
 		t.Fatal("precondition: bob should still be a room member after SetUserRetired")
 	}
 
-	bob := testClientFor("bob", "dev_bob")
-	alice := testClientFor("alice", "dev_alice")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice")
 	s.mu.Lock()
 	s.clients["dev_bob"] = bob.Client
 	s.clients["dev_alice"] = alice.Client

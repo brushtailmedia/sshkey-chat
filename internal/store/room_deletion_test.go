@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // ============================================================================
@@ -21,15 +23,15 @@ func TestRecordRoomDeletion_InsertsRow(t *testing.T) {
 	}
 	defer s.Close()
 
-	if err := s.RecordRoomDeletion("usr_alice", "room_x"); err != nil {
+	if err := s.RecordRoomDeletion(testutil.UserID("alice"), testutil.RoomID("x")); err != nil {
 		t.Fatalf("RecordRoomDeletion: %v", err)
 	}
 
-	ids, err := s.GetDeletedRoomsForUser("usr_alice")
+	ids, err := s.GetDeletedRoomsForUser(testutil.UserID("alice"))
 	if err != nil {
 		t.Fatalf("GetDeletedRoomsForUser: %v", err)
 	}
-	if len(ids) != 1 || ids[0] != "room_x" {
+	if len(ids) != 1 || ids[0] != testutil.RoomID("x") {
 		t.Errorf("expected [room_x], got %v", ids)
 	}
 }
@@ -45,25 +47,25 @@ func TestRecordRoomDeletion_Idempotent(t *testing.T) {
 	}
 	defer s.Close()
 
-	if err := s.RecordRoomDeletion("usr_alice", "room_x"); err != nil {
+	if err := s.RecordRoomDeletion(testutil.UserID("alice"), testutil.RoomID("x")); err != nil {
 		t.Fatalf("first record: %v", err)
 	}
 	const firstAt int64 = 1000
 	if _, err := s.dataDB.Exec(
 		`UPDATE deleted_rooms SET deleted_at = ? WHERE user_id = ? AND room_id = ?`,
-		firstAt, "usr_alice", "room_x",
+		firstAt, testutil.UserID("alice"), testutil.RoomID("x"),
 	); err != nil {
 		t.Fatalf("seed first deleted_at: %v", err)
 	}
 
-	if err := s.RecordRoomDeletion("usr_alice", "room_x"); err != nil {
+	if err := s.RecordRoomDeletion(testutil.UserID("alice"), testutil.RoomID("x")); err != nil {
 		t.Fatalf("second record: %v", err)
 	}
 
 	var secondAt int64
 	if err := s.dataDB.QueryRow(
 		`SELECT deleted_at FROM deleted_rooms WHERE user_id = ? AND room_id = ?`,
-		"usr_alice", "room_x",
+		testutil.UserID("alice"), testutil.RoomID("x"),
 	).Scan(&secondAt); err != nil {
 		t.Fatalf("read second deleted_at: %v", err)
 	}
@@ -86,21 +88,21 @@ func TestGetDeletedRoomsForUser_ReturnsNewestFirst(t *testing.T) {
 	// test flakiness
 	s.dataDB.Exec(
 		`INSERT INTO deleted_rooms (user_id, room_id, deleted_at) VALUES (?, ?, ?)`,
-		"usr_alice", "room_old", int64(1000),
+		testutil.UserID("alice"), testutil.RoomID("old"), int64(1000),
 	)
 	s.dataDB.Exec(
 		`INSERT INTO deleted_rooms (user_id, room_id, deleted_at) VALUES (?, ?, ?)`,
-		"usr_alice", "room_new", int64(2000),
+		testutil.UserID("alice"), testutil.RoomID("new"), int64(2000),
 	)
 
-	ids, err := s.GetDeletedRoomsForUser("usr_alice")
+	ids, err := s.GetDeletedRoomsForUser(testutil.UserID("alice"))
 	if err != nil {
 		t.Fatalf("GetDeletedRoomsForUser: %v", err)
 	}
 	if len(ids) != 2 {
 		t.Fatalf("expected 2 rooms, got %d", len(ids))
 	}
-	if ids[0] != "room_new" || ids[1] != "room_old" {
+	if ids[0] != testutil.RoomID("new") || ids[1] != testutil.RoomID("old") {
 		t.Errorf("expected [room_new, room_old], got %v", ids)
 	}
 }
@@ -115,7 +117,7 @@ func TestGetDeletedRoomsForUser_EmptyForUnknownUser(t *testing.T) {
 	}
 	defer s.Close()
 
-	ids, err := s.GetDeletedRoomsForUser("usr_never_deleted")
+	ids, err := s.GetDeletedRoomsForUser(testutil.UserID("never_deleted"))
 	if err != nil {
 		t.Fatalf("GetDeletedRoomsForUser: %v", err)
 	}
@@ -134,20 +136,20 @@ func TestGetDeletedRoomsForUser_ScopedToUser(t *testing.T) {
 	}
 	defer s.Close()
 
-	if err := s.RecordRoomDeletion("usr_alice", "room_x"); err != nil {
+	if err := s.RecordRoomDeletion(testutil.UserID("alice"), testutil.RoomID("x")); err != nil {
 		t.Fatalf("record alice: %v", err)
 	}
-	if err := s.RecordRoomDeletion("usr_bob", "room_y"); err != nil {
+	if err := s.RecordRoomDeletion(testutil.UserID("bob"), testutil.RoomID("y")); err != nil {
 		t.Fatalf("record bob: %v", err)
 	}
 
-	ids, _ := s.GetDeletedRoomsForUser("usr_alice")
-	if len(ids) != 1 || ids[0] != "room_x" {
+	ids, _ := s.GetDeletedRoomsForUser(testutil.UserID("alice"))
+	if len(ids) != 1 || ids[0] != testutil.RoomID("x") {
 		t.Errorf("alice should only see room_x, got %v", ids)
 	}
 
-	ids, _ = s.GetDeletedRoomsForUser("usr_bob")
-	if len(ids) != 1 || ids[0] != "room_y" {
+	ids, _ = s.GetDeletedRoomsForUser(testutil.UserID("bob"))
+	if len(ids) != 1 || ids[0] != testutil.RoomID("y") {
 		t.Errorf("bob should only see room_y, got %v", ids)
 	}
 }
@@ -162,20 +164,20 @@ func TestClearRoomDeletionsForUser_RemovesAll(t *testing.T) {
 	}
 	defer s.Close()
 
-	s.RecordRoomDeletion("usr_alice", "room_1")
-	s.RecordRoomDeletion("usr_alice", "room_2")
-	s.RecordRoomDeletion("usr_bob", "room_3")
+	s.RecordRoomDeletion(testutil.UserID("alice"), testutil.RoomID("1"))
+	s.RecordRoomDeletion(testutil.UserID("alice"), testutil.RoomID("2"))
+	s.RecordRoomDeletion(testutil.UserID("bob"), testutil.RoomID("3"))
 
-	if err := s.ClearRoomDeletionsForUser("usr_alice"); err != nil {
+	if err := s.ClearRoomDeletionsForUser(testutil.UserID("alice")); err != nil {
 		t.Fatalf("ClearRoomDeletionsForUser: %v", err)
 	}
 
-	ids, _ := s.GetDeletedRoomsForUser("usr_alice")
+	ids, _ := s.GetDeletedRoomsForUser(testutil.UserID("alice"))
 	if len(ids) != 0 {
 		t.Errorf("alice should have 0 deletions after clear, got %v", ids)
 	}
 
-	ids, _ = s.GetDeletedRoomsForUser("usr_bob")
+	ids, _ = s.GetDeletedRoomsForUser(testutil.UserID("bob"))
 	if len(ids) != 1 {
 		t.Errorf("bob's deletions should be untouched, got %v", ids)
 	}
@@ -194,22 +196,22 @@ func TestRecordRoomDeletionIfMissing(t *testing.T) {
 	defer s.Close()
 
 	// First call inserts.
-	inserted, err := s.RecordRoomDeletionIfMissing("usr_alice", "room_x")
+	inserted, err := s.RecordRoomDeletionIfMissing(testutil.UserID("alice"), testutil.RoomID("x"))
 	if err != nil || !inserted {
 		t.Fatalf("first call want (true,nil), got (%v,%v)", inserted, err)
 	}
-	if ids, _ := s.GetDeletedRoomsForUser("usr_alice"); len(ids) != 1 || ids[0] != "room_x" {
+	if ids, _ := s.GetDeletedRoomsForUser(testutil.UserID("alice")); len(ids) != 1 || ids[0] != testutil.RoomID("x") {
 		t.Errorf("want [room_x], got %v", ids)
 	}
 
 	// Repeat call does NOT insert (the already-deleted signal).
-	inserted, err = s.RecordRoomDeletionIfMissing("usr_alice", "room_x")
+	inserted, err = s.RecordRoomDeletionIfMissing(testutil.UserID("alice"), testutil.RoomID("x"))
 	if err != nil || inserted {
 		t.Fatalf("repeat call want (false,nil), got (%v,%v)", inserted, err)
 	}
 
 	// Scoped: a different (user, room) inserts fresh.
-	if inserted, _ := s.RecordRoomDeletionIfMissing("usr_bob", "room_x"); !inserted {
+	if inserted, _ := s.RecordRoomDeletionIfMissing(testutil.UserID("bob"), testutil.RoomID("x")); !inserted {
 		t.Error("different user should insert fresh")
 	}
 
@@ -217,15 +219,15 @@ func TestRecordRoomDeletionIfMissing(t *testing.T) {
 	// sleep needed — seed a known timestamp then confirm it survives.
 	s.dataDB.Exec(
 		`INSERT OR REPLACE INTO deleted_rooms (user_id, room_id, deleted_at) VALUES (?, ?, ?)`,
-		"usr_carol", "room_z", int64(1000),
+		testutil.UserID("carol"), testutil.RoomID("z"), int64(1000),
 	)
-	if inserted, _ := s.RecordRoomDeletionIfMissing("usr_carol", "room_z"); inserted {
+	if inserted, _ := s.RecordRoomDeletionIfMissing(testutil.UserID("carol"), testutil.RoomID("z")); inserted {
 		t.Error("existing row should not re-insert")
 	}
 	var at int64
 	s.dataDB.QueryRow(
 		`SELECT deleted_at FROM deleted_rooms WHERE user_id = ? AND room_id = ?`,
-		"usr_carol", "room_z",
+		testutil.UserID("carol"), testutil.RoomID("z"),
 	).Scan(&at)
 	if at != 1000 {
 		t.Errorf("deleted_at should be preserved at 1000, got %d", at)
@@ -260,7 +262,7 @@ func TestRecordRoomDeletionIfMissing_ConcurrentSingleInsert(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func(i int) {
 			defer wg.Done()
-			results[i], errs[i] = s.RecordRoomDeletionIfMissing("usr_alice", "room_concurrent")
+			results[i], errs[i] = s.RecordRoomDeletionIfMissing(testutil.UserID("alice"), testutil.RoomID("concurrent"))
 		}(i)
 	}
 	wg.Wait()
@@ -275,7 +277,7 @@ func TestRecordRoomDeletionIfMissing_ConcurrentSingleInsert(t *testing.T) {
 		t.Errorf("exactly one concurrent insert should win, got %d", inserts)
 	}
 	// The row must exist afterward regardless of contention.
-	if ids, _ := s.GetDeletedRoomsForUser("usr_alice"); len(ids) != 1 {
+	if ids, _ := s.GetDeletedRoomsForUser(testutil.UserID("alice")); len(ids) != 1 {
 		t.Errorf("the row must exist after concurrent attempts, got %v", ids)
 	}
 }
@@ -289,15 +291,15 @@ func TestClearRoomDeletion_RemovesSpecificRow(t *testing.T) {
 	}
 	defer s.Close()
 
-	s.RecordRoomDeletion("usr_alice", "room_1")
-	s.RecordRoomDeletion("usr_alice", "room_2")
+	s.RecordRoomDeletion(testutil.UserID("alice"), testutil.RoomID("1"))
+	s.RecordRoomDeletion(testutil.UserID("alice"), testutil.RoomID("2"))
 
-	if err := s.ClearRoomDeletion("usr_alice", "room_1"); err != nil {
+	if err := s.ClearRoomDeletion(testutil.UserID("alice"), testutil.RoomID("1")); err != nil {
 		t.Fatalf("ClearRoomDeletion: %v", err)
 	}
 
-	ids, _ := s.GetDeletedRoomsForUser("usr_alice")
-	if len(ids) != 1 || ids[0] != "room_2" {
+	ids, _ := s.GetDeletedRoomsForUser(testutil.UserID("alice"))
+	if len(ids) != 1 || ids[0] != testutil.RoomID("2") {
 		t.Errorf("expected [room_2], got %v", ids)
 	}
 }
@@ -316,12 +318,12 @@ func TestPruneOldRoomDeletions_RemovesStaleRows(t *testing.T) {
 	// Old row (10,000 seconds ago)
 	s.dataDB.Exec(
 		`INSERT INTO deleted_rooms (user_id, room_id, deleted_at) VALUES (?, ?, ?)`,
-		"usr_alice", "room_old", now-10000,
+		testutil.UserID("alice"), testutil.RoomID("old"), now-10000,
 	)
 	// Fresh row (100 seconds ago)
 	s.dataDB.Exec(
 		`INSERT INTO deleted_rooms (user_id, room_id, deleted_at) VALUES (?, ?, ?)`,
-		"usr_alice", "room_fresh", now-100,
+		testutil.UserID("alice"), "room_fresh", now-100,
 	)
 
 	// Prune anything older than 5000 seconds
@@ -333,7 +335,7 @@ func TestPruneOldRoomDeletions_RemovesStaleRows(t *testing.T) {
 		t.Errorf("expected 1 row pruned, got %d", pruned)
 	}
 
-	ids, _ := s.GetDeletedRoomsForUser("usr_alice")
+	ids, _ := s.GetDeletedRoomsForUser(testutil.UserID("alice"))
 	if len(ids) != 1 || ids[0] != "room_fresh" {
 		t.Errorf("expected [room_fresh], got %v", ids)
 	}
@@ -355,10 +357,10 @@ func TestRecordAndConsumePendingRoomRetirement(t *testing.T) {
 	}
 	defer s.Close()
 
-	if err := s.RecordPendingRoomRetirement("room_1", "usr_admin", "team disbanded"); err != nil {
+	if err := s.RecordPendingRoomRetirement(testutil.RoomID("1"), testutil.UserID("admin"), "team disbanded"); err != nil {
 		t.Fatalf("record 1: %v", err)
 	}
-	if err := s.RecordPendingRoomRetirement("room_2", "usr_admin", ""); err != nil {
+	if err := s.RecordPendingRoomRetirement(testutil.RoomID("2"), testutil.UserID("admin"), ""); err != nil {
 		t.Fatalf("record 2: %v", err)
 	}
 
@@ -375,10 +377,10 @@ func TestRecordAndConsumePendingRoomRetirement(t *testing.T) {
 	for _, p := range pending {
 		byRoom[p.RoomID] = p
 	}
-	if p, ok := byRoom["room_1"]; !ok {
+	if p, ok := byRoom[testutil.RoomID("1")]; !ok {
 		t.Error("room_1 missing from consumed list")
 	} else {
-		if p.RetiredBy != "usr_admin" {
+		if p.RetiredBy != testutil.UserID("admin") {
 			t.Errorf("room_1 RetiredBy = %q, want usr_admin", p.RetiredBy)
 		}
 		if p.Reason != "team disbanded" {
@@ -388,7 +390,7 @@ func TestRecordAndConsumePendingRoomRetirement(t *testing.T) {
 			t.Error("room_1 QueuedAt should be non-zero")
 		}
 	}
-	if p, ok := byRoom["room_2"]; !ok {
+	if p, ok := byRoom[testutil.RoomID("2")]; !ok {
 		t.Error("room_2 missing from consumed list")
 	} else {
 		if p.Reason != "" {
@@ -444,7 +446,7 @@ func TestDeleteRoomRecord_RemovesRowAndFile(t *testing.T) {
 	// Seed a room, a member, and a cached DB handle (which creates
 	// the per-room file).
 	seedTestRoom(t, s, roomID, "cleanup", "")
-	seedRoomMember(t, s, roomID, "usr_alice")
+	seedRoomMember(t, s, roomID, testutil.UserID("alice"))
 
 	// Trigger creation of the per-room file by calling RoomDB
 	if _, err := s.RoomDB(roomID); err != nil {
@@ -454,7 +456,7 @@ func TestDeleteRoomRecord_RemovesRowAndFile(t *testing.T) {
 	// Seed an epoch key row (in data.db) referencing the room
 	s.dataDB.Exec(
 		`INSERT INTO epoch_keys (room, epoch, user, wrapped_key) VALUES (?, ?, ?, ?)`,
-		roomID, int64(1), "usr_alice", "wrapped",
+		roomID, int64(1), testutil.UserID("alice"), "wrapped",
 	)
 
 	dbPath := filepath.Join(s.dir, "room-"+roomID+".db")
@@ -548,14 +550,14 @@ func TestDeleteRoomRecord_PreservesDeletedRoomsSidecar(t *testing.T) {
 
 	roomID := GenerateID("room_")
 	seedTestRoom(t, s, roomID, "lastmember", "")
-	seedRoomMember(t, s, roomID, "usr_alice")
+	seedRoomMember(t, s, roomID, testutil.UserID("alice"))
 
 	// Simulate handleDeleteRoom ordering: sidecar FIRST, then leave
 	// + cleanup cascade
-	if err := s.RecordRoomDeletion("usr_alice", roomID); err != nil {
+	if err := s.RecordRoomDeletion(testutil.UserID("alice"), roomID); err != nil {
 		t.Fatalf("RecordRoomDeletion: %v", err)
 	}
-	if err := s.RemoveRoomMember(roomID, "usr_alice"); err != nil {
+	if err := s.RemoveRoomMember(roomID, testutil.UserID("alice")); err != nil {
 		t.Fatalf("RemoveRoomMember: %v", err)
 	}
 	if err := s.DeleteRoomRecord(roomID); err != nil {
@@ -564,7 +566,7 @@ func TestDeleteRoomRecord_PreservesDeletedRoomsSidecar(t *testing.T) {
 
 	// The sidecar row MUST survive the cleanup cascade — offline
 	// devices of alice need to learn about the delete on reconnect
-	ids, err := s.GetDeletedRoomsForUser("usr_alice")
+	ids, err := s.GetDeletedRoomsForUser(testutil.UserID("alice"))
 	if err != nil {
 		t.Fatalf("GetDeletedRoomsForUser: %v", err)
 	}
@@ -595,7 +597,7 @@ func TestDeleteRoomRecord_OpportunisticPrune(t *testing.T) {
 	oldTime := time.Now().Unix() - (2 * 365 * 24 * 60 * 60)
 	s.dataDB.Exec(
 		`INSERT INTO deleted_rooms (user_id, room_id, deleted_at) VALUES (?, ?, ?)`,
-		"usr_old", "room_ancient", oldTime,
+		testutil.UserID("old"), "room_ancient", oldTime,
 	)
 
 	// Seed and delete a different room (which triggers the
@@ -607,7 +609,7 @@ func TestDeleteRoomRecord_OpportunisticPrune(t *testing.T) {
 	}
 
 	// The old row should be gone
-	ids, _ := s.GetDeletedRoomsForUser("usr_old")
+	ids, _ := s.GetDeletedRoomsForUser(testutil.UserID("old"))
 	if len(ids) != 0 {
 		t.Errorf("ancient deleted_rooms row should be pruned, got %v", ids)
 	}

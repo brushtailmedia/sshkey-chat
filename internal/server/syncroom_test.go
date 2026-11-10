@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // Phase 12 Chunk 5 — sendRetiredRooms and sendDeletedRooms tests.
@@ -17,7 +18,7 @@ import (
 // rooms exist.
 func TestSendRetiredRooms_None(t *testing.T) {
 	s := newTestServer(t)
-	cc := testClientFor("bob", "dev_bob_1")
+	cc := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 
 	s.sendRetiredRooms(cc.Client)
 	if msgs := cc.messages(); len(msgs) != 0 {
@@ -33,7 +34,7 @@ func TestSendRetiredRooms_DeliversListForMember(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 	retireRoomForTest(t, s, generalID)
 
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.sendRetiredRooms(bob.Client)
 
 	msgs := bob.messages()
@@ -68,7 +69,7 @@ func TestSendRetiredRooms_FiltersNonMembers(t *testing.T) {
 	retireRoomForTest(t, s, engineeringID)
 
 	// Bob is NOT a member of engineering, so he shouldn't see it
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.sendRetiredRooms(bob.Client)
 
 	msgs := bob.messages()
@@ -77,7 +78,7 @@ func TestSendRetiredRooms_FiltersNonMembers(t *testing.T) {
 	}
 
 	// Alice IS a member, she should see it
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.sendRetiredRooms(alice.Client)
 
 	aliceMsgs := alice.messages()
@@ -94,7 +95,7 @@ func TestSendRetiredRooms_FiltersUsersWhoLeftBefore(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	// Bob leaves general BEFORE it's retired
-	if err := s.store.RemoveRoomMember(generalID, "bob"); err != nil {
+	if err := s.store.RemoveRoomMember(generalID, testutil.UserID("bob")); err != nil {
 		t.Fatalf("RemoveRoomMember: %v", err)
 	}
 
@@ -103,7 +104,7 @@ func TestSendRetiredRooms_FiltersUsersWhoLeftBefore(t *testing.T) {
 
 	// Bob should NOT see the retirement in his catchup list — he left
 	// before the retirement happened
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.sendRetiredRooms(bob.Client)
 
 	if msgs := bob.messages(); len(msgs) != 0 {
@@ -111,7 +112,7 @@ func TestSendRetiredRooms_FiltersUsersWhoLeftBefore(t *testing.T) {
 	}
 
 	// Carol is still a member, she should see it
-	carol := testClientFor("carol", "dev_carol_1")
+	carol := testClientFor(testutil.UserID("carol"), "dev_carol_1")
 	s.sendRetiredRooms(carol.Client)
 	if msgs := carol.messages(); len(msgs) != 1 {
 		t.Errorf("carol (still member) should see 1 retired room, got %d", len(msgs))
@@ -126,7 +127,7 @@ func TestSendRetiredRooms_FiltersUsersWhoLeftBefore(t *testing.T) {
 // no deletion records.
 func TestSendDeletedRooms_None(t *testing.T) {
 	s := newTestServer(t)
-	cc := testClientFor("bob", "dev_bob_1")
+	cc := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 
 	s.sendDeletedRooms(cc.Client)
 	if msgs := cc.messages(); len(msgs) != 0 {
@@ -144,7 +145,7 @@ func TestSendDeletedRooms_DeliversListAfterDelete(t *testing.T) {
 	generalID := s.store.RoomDisplayNameToID("general")
 
 	// Device A runs /delete
-	deviceA := testClientFor("bob", "dev_bob_A")
+	deviceA := testClientFor(testutil.UserID("bob"), "dev_bob_A")
 	s.mu.Lock()
 	s.clients["dev_bob_A"] = deviceA.Client
 	s.mu.Unlock()
@@ -152,7 +153,7 @@ func TestSendDeletedRooms_DeliversListAfterDelete(t *testing.T) {
 	s.handleDeleteRoom(deviceA.Client, raw)
 
 	// Device B was offline — simulate its handshake calling sendDeletedRooms
-	deviceB := testClientFor("bob", "dev_bob_B")
+	deviceB := testClientFor(testutil.UserID("bob"), "dev_bob_B")
 	s.sendDeletedRooms(deviceB.Client)
 
 	msgs := deviceB.messages()
@@ -177,19 +178,19 @@ func TestSendDeletedRooms_ScopedToUser(t *testing.T) {
 	s := newTestServer(t)
 
 	// alice records a deletion for some room
-	if err := s.store.RecordRoomDeletion("alice", "room_x"); err != nil {
+	if err := s.store.RecordRoomDeletion(testutil.UserID("alice"), testutil.RoomID("x")); err != nil {
 		t.Fatalf("RecordRoomDeletion: %v", err)
 	}
 
 	// Bob should see nothing
-	bob := testClientFor("bob", "dev_bob_1")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	s.sendDeletedRooms(bob.Client)
 	if msgs := bob.messages(); len(msgs) != 0 {
 		t.Errorf("bob should see 0 deletions, got %d messages", len(msgs))
 	}
 
 	// Alice should see her deletion
-	alice := testClientFor("alice", "dev_alice_1")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_1")
 	s.sendDeletedRooms(alice.Client)
 	aliceMsgs := alice.messages()
 	if len(aliceMsgs) != 1 {
@@ -197,7 +198,7 @@ func TestSendDeletedRooms_ScopedToUser(t *testing.T) {
 	}
 	var list protocol.DeletedRoomsList
 	json.Unmarshal(aliceMsgs[0], &list)
-	if len(list.Rooms) != 1 || list.Rooms[0] != "room_x" {
+	if len(list.Rooms) != 1 || list.Rooms[0] != testutil.RoomID("x") {
 		t.Errorf("expected [room_x], got %v", list.Rooms)
 	}
 }
@@ -213,7 +214,7 @@ func TestSendDeletedRooms_SurvivesLastMemberCleanup(t *testing.T) {
 	// engineering has only alice per the seed
 	engineeringID := s.store.RoomDisplayNameToID("engineering")
 
-	deviceA := testClientFor("alice", "dev_alice_A")
+	deviceA := testClientFor(testutil.UserID("alice"), "dev_alice_A")
 	s.mu.Lock()
 	s.clients["dev_alice_A"] = deviceA.Client
 	s.mu.Unlock()
@@ -228,7 +229,7 @@ func TestSendDeletedRooms_SurvivesLastMemberCleanup(t *testing.T) {
 
 	// Device B reconnects and runs sendDeletedRooms — must still see
 	// engineering in the list despite the cleanup
-	deviceB := testClientFor("alice", "dev_alice_B")
+	deviceB := testClientFor(testutil.UserID("alice"), "dev_alice_B")
 	s.sendDeletedRooms(deviceB.Client)
 
 	msgs := deviceB.messages()

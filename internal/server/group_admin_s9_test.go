@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestGroupAdmin_ConcurrentDemote_NeverZeroAdmins guards the audit-S9 fix: the
@@ -19,20 +20,20 @@ import (
 // Run with -race to also catch data races on the shared admin state.
 func TestGroupAdmin_ConcurrentDemote_NeverZeroAdmins(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("grp_s9", "alice", []string{"alice", "bob"}, "S9"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("grp_s9"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "S9"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	if err := s.store.SetGroupMemberAdmin("grp_s9", "bob", true); err != nil {
+	if err := s.store.SetGroupMemberAdmin(testutil.GroupID("grp_s9"), testutil.UserID("bob"), true); err != nil {
 		t.Fatalf("promote bob: %v", err)
 	}
-	if n, _ := s.store.CountGroupAdmins("grp_s9"); n != 2 {
+	if n, _ := s.store.CountGroupAdmins(testutil.GroupID("grp_s9")); n != 2 {
 		t.Fatalf("setup: admins = %d, want 2", n)
 	}
 
-	aliceC := testClientFor("alice", "dev_alice_s9")
-	bobC := testClientFor("bob", "dev_bob_s9")
-	demoteBob, _ := json.Marshal(protocol.DemoteGroupAdmin{Type: "demote_group_admin", Group: "grp_s9", User: "bob"})
-	demoteAlice, _ := json.Marshal(protocol.DemoteGroupAdmin{Type: "demote_group_admin", Group: "grp_s9", User: "alice"})
+	aliceC := testClientFor(testutil.UserID("alice"), "dev_alice_s9")
+	bobC := testClientFor(testutil.UserID("bob"), "dev_bob_s9")
+	demoteBob, _ := json.Marshal(protocol.DemoteGroupAdmin{Type: "demote_group_admin", Group: testutil.GroupID("grp_s9"), User: testutil.UserID("bob")})
+	demoteAlice, _ := json.Marshal(protocol.DemoteGroupAdmin{Type: "demote_group_admin", Group: testutil.GroupID("grp_s9"), User: testutil.UserID("alice")})
 
 	// Start barrier so both handlers contend on the guard simultaneously,
 	// maximizing the race window (which the mutex must close).
@@ -44,7 +45,7 @@ func TestGroupAdmin_ConcurrentDemote_NeverZeroAdmins(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	if n, _ := s.store.CountGroupAdmins("grp_s9"); n < 1 {
+	if n, _ := s.store.CountGroupAdmins(testutil.GroupID("grp_s9")); n < 1 {
 		t.Fatalf("group left with %d admins — the last-admin guard was raced to zero (S9)", n)
 	}
 }

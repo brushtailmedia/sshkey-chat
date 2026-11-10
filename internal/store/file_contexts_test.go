@@ -2,6 +2,8 @@ package store
 
 import (
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestInsertFileContext_HappyPath verifies basic round-trip on the
@@ -14,18 +16,18 @@ func TestInsertFileContext_HappyPath(t *testing.T) {
 	}
 	defer s.Close()
 
-	if err := s.InsertFileContext("file_abc", FileContextRoom, "room_general", 12345); err != nil {
+	if err := s.InsertFileContext(testutil.FileID("abc"), FileContextRoom, "room_general", 12345); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
-	got, err := s.GetFileContext("file_abc")
+	got, err := s.GetFileContext(testutil.FileID("abc"))
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	if got == nil {
 		t.Fatal("expected binding, got nil")
 	}
-	if got.FileID != "file_abc" || got.ContextType != "room" || got.ContextID != "room_general" || got.TS != 12345 {
+	if got.FileID != testutil.FileID("abc") || got.ContextType != "room" || got.ContextID != "room_general" || got.TS != 12345 {
 		t.Errorf("got %+v, wanted file_abc/room/room_general/12345", got)
 	}
 }
@@ -40,7 +42,7 @@ func TestGetFileContext_Missing(t *testing.T) {
 	}
 	defer s.Close()
 
-	got, err := s.GetFileContext("file_never_uploaded")
+	got, err := s.GetFileContext(testutil.FileID("never_uploaded"))
 	if err != nil {
 		t.Errorf("expected nil err on missing, got %v", err)
 	}
@@ -62,7 +64,7 @@ func TestInsertFileContext_RejectsInvalidType(t *testing.T) {
 	defer s.Close()
 
 	for _, bad := range []string{"rooms", "Room", "", "dm_", "channel"} {
-		err := s.InsertFileContext("file_x", bad, "ctx_x", 1)
+		err := s.InsertFileContext(testutil.FileID("x"), bad, "ctx_x", 1)
 		if err == nil {
 			t.Errorf("expected error for invalid context_type %q, got nil", bad)
 		}
@@ -80,10 +82,10 @@ func TestInsertFileContext_RejectsEmptyIDs(t *testing.T) {
 	}
 	defer s.Close()
 
-	if err := s.InsertFileContext("", FileContextRoom, "room_x", 1); err == nil {
+	if err := s.InsertFileContext("", FileContextRoom, testutil.RoomID("x"), 1); err == nil {
 		t.Error("expected error for empty file_id")
 	}
-	if err := s.InsertFileContext("file_x", FileContextRoom, "", 1); err == nil {
+	if err := s.InsertFileContext(testutil.FileID("x"), FileContextRoom, "", 1); err == nil {
 		t.Error("expected error for empty context_id")
 	}
 }
@@ -100,15 +102,15 @@ func TestInsertFileContext_Idempotent(t *testing.T) {
 	}
 	defer s.Close()
 
-	if err := s.InsertFileContext("file_idem", FileContextGroup, "group_x", 100); err != nil {
+	if err := s.InsertFileContext(testutil.FileID("idem"), FileContextGroup, "group_x", 100); err != nil {
 		t.Fatalf("first insert: %v", err)
 	}
 	// Second insert with DIFFERENT ts — should be ignored (first write wins).
-	if err := s.InsertFileContext("file_idem", FileContextGroup, "group_x", 200); err != nil {
+	if err := s.InsertFileContext(testutil.FileID("idem"), FileContextGroup, "group_x", 200); err != nil {
 		t.Fatalf("second insert: %v", err)
 	}
 
-	got, err := s.GetFileContext("file_idem")
+	got, err := s.GetFileContext(testutil.FileID("idem"))
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -133,7 +135,7 @@ func TestDeleteFileContextsByContext(t *testing.T) {
 			t.Fatalf("insert %s: %v", fid, err)
 		}
 	}
-	if err := s.InsertFileContext("file_other", FileContextRoom, "room_alive", 1); err != nil {
+	if err := s.InsertFileContext(testutil.FileID("other"), FileContextRoom, "room_alive", 1); err != nil {
 		t.Fatalf("insert other: %v", err)
 	}
 
@@ -152,7 +154,7 @@ func TestDeleteFileContextsByContext(t *testing.T) {
 		}
 	}
 	// The untouched file still has its binding.
-	if got, _ := s.GetFileContext("file_other"); got == nil {
+	if got, _ := s.GetFileContext(testutil.FileID("other")); got == nil {
 		t.Error("file_other binding should survive unrelated cascade")
 	}
 }
@@ -188,19 +190,19 @@ func TestDeleteFileContextByFileID(t *testing.T) {
 	}
 	defer s.Close()
 
-	if err := s.InsertFileContext("file_del", FileContextDM, "dm_x", 1); err != nil {
+	if err := s.InsertFileContext(testutil.FileID("del"), FileContextDM, "dm_x", 1); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	if err := s.DeleteFileContextByFileID("file_del"); err != nil {
+	if err := s.DeleteFileContextByFileID(testutil.FileID("del")); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	got, _ := s.GetFileContext("file_del")
+	got, _ := s.GetFileContext(testutil.FileID("del"))
 	if got != nil {
 		t.Errorf("expected nil after delete, got %+v", got)
 	}
 
 	// Idempotent — second call on already-deleted should succeed.
-	if err := s.DeleteFileContextByFileID("file_del"); err != nil {
+	if err := s.DeleteFileContextByFileID(testutil.FileID("del")); err != nil {
 		t.Errorf("second delete should be no-op, got %v", err)
 	}
 	// Empty file_id no-ops (defensive).
@@ -224,11 +226,11 @@ func TestFileHasRemainingBindings(t *testing.T) {
 	}
 	defer s.Close()
 
-	if err := s.InsertFileContext("file_solo", FileContextRoom, "room_x", 1); err != nil {
+	if err := s.InsertFileContext(testutil.FileID("solo"), FileContextRoom, testutil.RoomID("x"), 1); err != nil {
 		t.Fatalf("insert solo: %v", err)
 	}
 
-	has, err := s.FileHasRemainingBindings("file_solo")
+	has, err := s.FileHasRemainingBindings(testutil.FileID("solo"))
 	if err != nil {
 		t.Fatalf("has (bound): %v", err)
 	}
@@ -236,10 +238,10 @@ func TestFileHasRemainingBindings(t *testing.T) {
 		t.Error("expected bindings remain while file_solo is active")
 	}
 
-	if err := s.DeleteFileContextByFileID("file_solo"); err != nil {
+	if err := s.DeleteFileContextByFileID(testutil.FileID("solo")); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	has, err = s.FileHasRemainingBindings("file_solo")
+	has, err = s.FileHasRemainingBindings(testutil.FileID("solo"))
 	if err != nil {
 		t.Fatalf("has (unbound): %v", err)
 	}
@@ -248,7 +250,7 @@ func TestFileHasRemainingBindings(t *testing.T) {
 	}
 
 	// Unknown file — no bindings.
-	has, err = s.FileHasRemainingBindings("file_unknown")
+	has, err = s.FileHasRemainingBindings(testutil.FileID("unknown"))
 	if err != nil {
 		t.Fatalf("has (unknown): %v", err)
 	}
@@ -270,15 +272,15 @@ func TestOrphanedFileHashes(t *testing.T) {
 	defer s.Close()
 
 	// Write three file_hashes rows; bind only two in file_contexts.
-	for _, fid := range []string{"file_bound_a", "file_bound_b", "file_orphan"} {
+	for _, fid := range []string{testutil.FileID("bound_a"), testutil.FileID("bound_b"), "file_orphan"} {
 		if err := s.StoreFileHash(fid, "blake2b-256:"+fid, 100); err != nil {
 			t.Fatalf("store hash %s: %v", fid, err)
 		}
 	}
-	if err := s.InsertFileContext("file_bound_a", FileContextRoom, "room_x", 1); err != nil {
+	if err := s.InsertFileContext(testutil.FileID("bound_a"), FileContextRoom, testutil.RoomID("x"), 1); err != nil {
 		t.Fatalf("bind a: %v", err)
 	}
-	if err := s.InsertFileContext("file_bound_b", FileContextRoom, "room_x", 1); err != nil {
+	if err := s.InsertFileContext(testutil.FileID("bound_b"), FileContextRoom, testutil.RoomID("x"), 1); err != nil {
 		t.Fatalf("bind b: %v", err)
 	}
 
@@ -307,15 +309,15 @@ func TestFileContexts_DistinctTypesSameID(t *testing.T) {
 	}
 	defer s.Close()
 
-	if err := s.InsertFileContext("file_a", FileContextRoom, "shared_id", 1); err != nil {
+	if err := s.InsertFileContext(testutil.FileID("a"), FileContextRoom, "shared_id", 1); err != nil {
 		t.Fatalf("insert a: %v", err)
 	}
-	if err := s.InsertFileContext("file_b", FileContextGroup, "shared_id", 2); err != nil {
+	if err := s.InsertFileContext(testutil.FileID("b"), FileContextGroup, "shared_id", 2); err != nil {
 		t.Fatalf("insert b: %v", err)
 	}
 
-	a, _ := s.GetFileContext("file_a")
-	b, _ := s.GetFileContext("file_b")
+	a, _ := s.GetFileContext(testutil.FileID("a"))
+	b, _ := s.GetFileContext(testutil.FileID("b"))
 	if a == nil || b == nil {
 		t.Fatalf("both should resolve: a=%v b=%v", a, b)
 	}
@@ -328,10 +330,10 @@ func TestFileContexts_DistinctTypesSameID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cascade: %v", err)
 	}
-	if len(ids) != 1 || ids[0] != "file_a" {
+	if len(ids) != 1 || ids[0] != testutil.FileID("a") {
 		t.Errorf("expected cascade to return [file_a], got %v", ids)
 	}
-	if got, _ := s.GetFileContext("file_b"); got == nil {
+	if got, _ := s.GetFileContext(testutil.FileID("b")); got == nil {
 		t.Error("file_b should survive room cascade")
 	}
 }

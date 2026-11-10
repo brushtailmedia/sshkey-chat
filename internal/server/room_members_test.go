@@ -14,9 +14,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // TestHandleRoomMembers_PrivacyResponsesIdentical verifies that
@@ -30,16 +32,16 @@ func TestHandleRoomMembers_PrivacyResponsesIdentical(t *testing.T) {
 	}
 
 	// Case 1: unknown room (room ID does not exist in rooms.db).
-	probe1 := testClientFor("bob", "dev_bob_1")
+	probe1 := testClientFor(testutil.UserID("bob"), "dev_bob_1")
 	raw1, _ := json.Marshal(protocol.RoomMembers{
 		Type: "room_members",
-		Room: "room_does_not_exist",
+		Room: testutil.RoomID("does_not_exist"),
 	})
 	s.handleRoomMembers(probe1.Client, raw1)
 
 	// Case 2: room exists, probing client is not a member.
 	// dave is not seeded as a member of general; bob and carol are.
-	probe2 := testClientFor("dave", "dev_dave_1")
+	probe2 := testClientFor(testutil.UserID("dave"), "dev_dave_1")
 	raw2, _ := json.Marshal(protocol.RoomMembers{
 		Type: "room_members",
 		Room: generalID,
@@ -76,7 +78,7 @@ func TestSendRoomList_EmitsFullMemberIDsStableOrder(t *testing.T) {
 		t.Fatal("seed failed")
 	}
 
-	first := testClientFor("bob", "dev_bob_room_list_1")
+	first := testClientFor(testutil.UserID("bob"), "dev_bob_room_list_1")
 	s.sendRoomList(first.Client)
 	firstMsgs := first.messages()
 	if len(firstMsgs) != 1 {
@@ -97,12 +99,13 @@ func TestSendRoomList_EmitsFullMemberIDsStableOrder(t *testing.T) {
 	if room.ID != generalID {
 		t.Fatalf("room ID = %q, want %q", room.ID, generalID)
 	}
-	wantMembers := []string{"alice", "bob", "carol"}
+	wantMembers := []string{testutil.UserID("alice"), testutil.UserID("bob"), testutil.UserID("carol")}
+	sort.Strings(wantMembers)
 	if !reflect.DeepEqual(room.Members, wantMembers) {
 		t.Fatalf("room_list members = %v, want %v", room.Members, wantMembers)
 	}
 
-	second := testClientFor("bob", "dev_bob_room_list_2")
+	second := testClientFor(testutil.UserID("bob"), "dev_bob_room_list_2")
 	s.sendRoomList(second.Client)
 	secondMsgs := second.messages()
 	if len(secondMsgs) != 1 {
@@ -126,7 +129,7 @@ func TestHandleRoomMembers_MemberHappyPath(t *testing.T) {
 	// Valid corrID: "corr_" + 21 nanoid chars (see protocol/corrid.go).
 	const validCorrID = "corr_abcdefghijklmnopqrstu"
 
-	probe := testClientFor("bob", "dev_bob_member")
+	probe := testClientFor(testutil.UserID("bob"), "dev_bob_member")
 	raw, _ := json.Marshal(protocol.RoomMembers{
 		Type:   "room_members",
 		Room:   generalID,

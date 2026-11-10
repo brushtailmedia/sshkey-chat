@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestComputeIdleWatchdogCadence_ShortTimeout(t *testing.T) {
@@ -48,7 +50,7 @@ func TestComputeIdleWatchdogCadence_BelowMin(t *testing.T) {
 func TestRunIdleWatchdog_DisabledWhenTimeoutZero(t *testing.T) {
 	s := newTestServer(t)
 	ch := &noopChannel{}
-	c := &Client{Channel: ch, UserID: "alice", DeviceID: "dev_x"}
+	c := &Client{Channel: ch, UserID: testutil.UserID("alice"), DeviceID: "dev_x"}
 
 	done := make(chan struct{})
 	defer close(done)
@@ -79,7 +81,7 @@ func TestRunIdleWatchdog_ClosesChannelOnStaleness(t *testing.T) {
 	s.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	ch := &noopChannel{}
-	c := &Client{Channel: ch, UserID: "alice", DeviceID: "dev_idle"}
+	c := &Client{Channel: ch, UserID: testutil.UserID("alice"), DeviceID: "dev_idle"}
 	// Pre-stamp LastActivity to a timestamp well past the timeout
 	// so the very first tick sees staleness.
 	c.LastActivity.Store(time.Now().Unix() - 10)
@@ -108,7 +110,7 @@ func TestRunIdleWatchdog_FreshActivityPreventsClose(t *testing.T) {
 	s.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	ch := &noopChannel{}
-	c := &Client{Channel: ch, UserID: "alice", DeviceID: "dev_active"}
+	c := &Client{Channel: ch, UserID: testutil.UserID("alice"), DeviceID: "dev_active"}
 
 	// Keep the client "active" for the duration of the watchdog run.
 	// stop signals the refresher to exit.
@@ -154,7 +156,7 @@ func TestRunIdleWatchdog_StampsZeroLastActivityAsGrace(t *testing.T) {
 	s.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	ch := &noopChannel{}
-	c := &Client{Channel: ch, UserID: "alice", DeviceID: "dev_fresh"}
+	c := &Client{Channel: ch, UserID: testutil.UserID("alice"), DeviceID: "dev_fresh"}
 	// LastActivity starts at zero (struct zero value).
 
 	done := make(chan struct{})
@@ -176,7 +178,7 @@ func TestRunIdleWatchdog_ExitsOnDone(t *testing.T) {
 	s.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	ch := &noopChannel{}
-	c := &Client{Channel: ch, UserID: "alice", DeviceID: "dev_exit"}
+	c := &Client{Channel: ch, UserID: testutil.UserID("alice"), DeviceID: "dev_exit"}
 	c.LastActivity.Store(time.Now().Unix()) // fresh, watchdog won't fire
 
 	done := make(chan struct{})
@@ -206,7 +208,7 @@ func TestRunIdleWatchdog_ConcurrentLastActivityStores(t *testing.T) {
 	s.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	ch := &noopChannel{}
-	c := &Client{Channel: ch, UserID: "alice", DeviceID: "dev_race"}
+	c := &Client{Channel: ch, UserID: testutil.UserID("alice"), DeviceID: "dev_race"}
 	c.LastActivity.Store(time.Now().Unix())
 
 	done := make(chan struct{})

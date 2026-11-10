@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestProcessPendingAddToRoom_HappyPath(t *testing.T) {
@@ -12,27 +13,27 @@ func TestProcessPendingAddToRoom_HappyPath(t *testing.T) {
 	engineeringID := s.store.RoomDisplayNameToID("engineering")
 
 	// Precondition: bob is not in engineering.
-	if s.store.IsRoomMemberByID(engineeringID, "bob") {
+	if s.store.IsRoomMemberByID(engineeringID, testutil.UserID("bob")) {
 		t.Fatal("precondition: bob should not be in engineering")
 	}
 
 	// Simulate CLI add: membership first, then queue row.
-	if err := s.store.AddRoomMember(engineeringID, "bob", 0); err != nil {
+	if err := s.store.AddRoomMember(engineeringID, testutil.UserID("bob"), 0); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
-	if err := s.store.RecordPendingAddToRoom("bob", engineeringID, "os:1000"); err != nil {
+	if err := s.store.RecordPendingAddToRoom(testutil.UserID("bob"), engineeringID, "os:1000"); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
 	// Seed an existing epoch for the active room; bob deliberately has
 	// no wrapped key for this epoch (the bug case).
-	if err := s.store.StoreEpochKey(engineeringID, 1, "alice", "wk_e1_alice"); err != nil {
+	if err := s.store.StoreEpochKey(engineeringID, 1, testutil.UserID("alice"), "wk_e1_alice"); err != nil {
 		t.Fatalf("seed epoch key: %v", err)
 	}
 	s.epochs.getOrCreate(engineeringID, 1)
 
 	// Keep only alice online so rotation trigger target is deterministic.
-	alice := testClientFor("alice", "dev_alice_join")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_join")
 	s.mu.Lock()
 	s.clients["dev_alice_join"] = alice.Client
 	s.mu.Unlock()
@@ -68,7 +69,7 @@ func TestProcessPendingAddToRoom_HappyPath(t *testing.T) {
 			if err := json.Unmarshal(raw, &ev); err != nil {
 				t.Fatalf("parse room_event: %v", err)
 			}
-			if ev.Event == "join" && ev.User == "bob" && ev.Room == engineeringID {
+			if ev.Event == "join" && ev.User == testutil.UserID("bob") && ev.Room == engineeringID {
 				sawJoin = true
 			}
 		case "epoch_trigger":
@@ -99,11 +100,11 @@ func TestProcessPendingAddToRoom_HappyPath(t *testing.T) {
 	rotateRaw, _ := json.Marshal(rotate)
 	s.handleEpochRotate(alice.Client, rotateRaw)
 
-	got, err := s.store.GetEpochKey(engineeringID, trigger.NewEpoch, "bob")
+	got, err := s.store.GetEpochKey(engineeringID, trigger.NewEpoch, testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("get epoch key for bob: %v", err)
 	}
-	if got != "wk_bob" {
+	if got != "wk_"+testutil.UserID("bob") {
 		t.Fatalf("bob wrapped key = %q, want wk_bob", got)
 	}
 }
@@ -116,22 +117,22 @@ func TestTriggerPostConnectRoomRotations_MissingMemberKey(t *testing.T) {
 	// Keep bob's existing "general" membership from triggering the
 	// initial-epoch path so this test isolates missing_member_key on
 	// engineering.
-	if err := s.store.StoreEpochKey(generalID, 2, "bob", "wk_g2_bob"); err != nil {
+	if err := s.store.StoreEpochKey(generalID, 2, testutil.UserID("bob"), "wk_g2_bob"); err != nil {
 		t.Fatalf("seed general epoch key: %v", err)
 	}
 
 	// Active room with existing epoch/key for alice only.
-	if err := s.store.StoreEpochKey(engineeringID, 3, "alice", "wk_e3_alice"); err != nil {
+	if err := s.store.StoreEpochKey(engineeringID, 3, testutil.UserID("alice"), "wk_e3_alice"); err != nil {
 		t.Fatalf("seed epoch key: %v", err)
 	}
 	s.epochs.getOrCreate(engineeringID, 3)
 
 	// Simulate add-to-room having already committed membership.
-	if err := s.store.AddRoomMember(engineeringID, "bob", 0); err != nil {
+	if err := s.store.AddRoomMember(engineeringID, testutil.UserID("bob"), 0); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
 
-	bob := testClientFor("bob", "dev_bob_join")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_join")
 	s.triggerPostConnectRoomRotations(bob.Client)
 
 	msgs := bob.messages()

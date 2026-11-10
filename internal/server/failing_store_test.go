@@ -52,9 +52,9 @@ func TestHandleSend_DBFailure_AbortsBroadcastAndRespondsInternal(t *testing.T) {
 		t.Fatal("general room not seeded")
 	}
 
-	alice := testClientFor("alice", "dev_alice_failsend")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_failsend")
 	// Alice must be a room member to pass the membership gate.
-	if err := s.store.AddRoomMember(generalID, "alice", 0); err != nil {
+	if err := s.store.AddRoomMember(generalID, testutil.UserID("alice"), 0); err != nil {
 		t.Fatalf("AddRoomMember: %v", err)
 	}
 
@@ -94,7 +94,7 @@ func TestHandleSendGroup_DBFailure_AbortsBroadcastAndRespondsInternal(t *testing
 	s := newTestServer(t)
 
 	groupID := store.GenerateID("group_")
-	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "FailGroup"); err != nil {
+	if err := s.store.CreateGroup(groupID, testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "FailGroup"); err != nil {
 		t.Fatalf("CreateGroup: %v", err)
 	}
 
@@ -107,8 +107,8 @@ func TestHandleSendGroup_DBFailure_AbortsBroadcastAndRespondsInternal(t *testing
 		t.Fatalf("drop messages: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_failgroup")
-	bob := testClientFor("bob", "dev_bob_failgroup")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_failgroup")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_failgroup")
 	s.clients[alice.DeviceID] = alice.Client
 	s.clients[bob.DeviceID] = bob.Client
 
@@ -116,8 +116,8 @@ func TestHandleSendGroup_DBFailure_AbortsBroadcastAndRespondsInternal(t *testing
 		Type:  "send_group",
 		Group: groupID,
 		WrappedKeys: map[string]string{
-			"alice": testutil.WrappedKey("wrapped_for_alice"),
-			"bob":   testutil.WrappedKey("wrapped_for_bob"),
+			testutil.UserID("alice"): testutil.WrappedKey("wrapped_for_alice"),
+			testutil.UserID("bob"):   testutil.WrappedKey("wrapped_for_bob"),
 		},
 		Payload:   "dGVzdA==",
 		Signature: "c2ln",
@@ -145,7 +145,7 @@ func TestHandleSendGroup_DBFailure_AbortsBroadcastAndRespondsInternal(t *testing
 func TestHandleSendDM_DBFailure_AbortsBroadcastAndRespondsInternal(t *testing.T) {
 	s := newTestServer(t)
 
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("CreateOrGetDirectMessage: %v", err)
 	}
@@ -159,8 +159,8 @@ func TestHandleSendDM_DBFailure_AbortsBroadcastAndRespondsInternal(t *testing.T)
 		t.Fatalf("drop messages: %v", err)
 	}
 
-	alice := testClientFor("alice", "dev_alice_faildm")
-	bob := testClientFor("bob", "dev_bob_faildm")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_faildm")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_faildm")
 	s.clients[alice.DeviceID] = alice.Client
 	s.clients[bob.DeviceID] = bob.Client
 
@@ -168,8 +168,8 @@ func TestHandleSendDM_DBFailure_AbortsBroadcastAndRespondsInternal(t *testing.T)
 		Type: "send_dm",
 		DM:   dm.ID,
 		WrappedKeys: map[string]string{
-			"alice": testutil.WrappedKey("wrapped_for_alice"),
-			"bob":   testutil.WrappedKey("wrapped_for_bob"),
+			testutil.UserID("alice"): testutil.WrappedKey("wrapped_for_alice"),
+			testutil.UserID("bob"):   testutil.WrappedKey("wrapped_for_bob"),
 		},
 		Payload:   "dGVzdA==",
 		Signature: "c2ln",
@@ -217,8 +217,8 @@ func TestHandleEpochRotate_StoreBatchFailure_AbortsAndClearsRotation(t *testing.
 	s := newTestServer(t)
 
 	generalID := s.store.RoomDisplayNameToID("general")
-	alice := testClientFor("alice", "dev_alice_failepoch")
-	if err := s.store.AddRoomMember(generalID, "alice", 0); err != nil {
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_failepoch")
+	if err := s.store.AddRoomMember(generalID, testutil.UserID("alice"), 0); err != nil {
 		t.Fatalf("AddRoomMember: %v", err)
 	}
 
@@ -286,7 +286,7 @@ func TestHandleEpochRotate_StoreBatchFailure_AbortsAndClearsRotation(t *testing.
 func TestHandleSetProfile_UserDBWriteFailure_AbortsBroadcastAndRespondsInternal(t *testing.T) {
 	s := newTestServer(t)
 
-	alice := testClientFor("alice", "dev_alice_setprofile_fail")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_setprofile_fail")
 	s.clients[alice.DeviceID] = alice.Client
 
 	raw, _ := json.Marshal(protocol.SetProfile{

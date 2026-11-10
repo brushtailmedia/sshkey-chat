@@ -7,6 +7,7 @@ import (
 	"github.com/brushtailmedia/sshkey-chat/internal/counters"
 	"github.com/brushtailmedia/sshkey-chat/internal/protocol"
 	"github.com/brushtailmedia/sshkey-chat/internal/store"
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 // Read receipts are membership-gated, mirroring handleTyping (audit S5). A
@@ -35,8 +36,8 @@ func assertOneReadMsg(t *testing.T, cc *captureClient, wantUser, wantRoom, wantG
 func TestHandleRead_NonMemberRoom_SilentDropSignal(t *testing.T) {
 	s := newTestServer(t)
 	engID := s.store.RoomDisplayNameToID("engineering")
-	bob := testClientFor("bob", "dev_bob_read_nm_room") // bob is NOT in engineering
-	raw, _ := json.Marshal(protocol.Read{Type: "read", Room: engID, LastRead: "msg_x"})
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_read_nm_room") // bob is NOT in engineering
+	raw, _ := json.Marshal(protocol.Read{Type: "read", Room: engID, LastRead: testutil.MsgID("x")})
 	s.handleRead(bob.Client, raw)
 
 	if got := s.counters.Get(counters.SignalNonMemberContext, "dev_bob_read_nm_room"); got != 1 {
@@ -46,18 +47,18 @@ func TestHandleRead_NonMemberRoom_SilentDropSignal(t *testing.T) {
 		t.Errorf("non-member read must be silent-dropped, got %d wire msg(s)", len(msgs))
 	}
 	// Storage pollution prevented: no read_positions row written.
-	if pos, _ := s.store.GetReadPosition("bob", "dev_bob_read_nm_room", engID, "", ""); pos != "" {
+	if pos, _ := s.store.GetReadPosition(testutil.UserID("bob"), "dev_bob_read_nm_room", engID, "", ""); pos != "" {
 		t.Errorf("non-member read must not write a read position, got %q", pos)
 	}
 }
 
 func TestHandleRead_NonMemberGroup_SilentDropSignal(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("group_read_nm", "alice", []string{"alice"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("read_nm"), testutil.UserID("alice"), []string{testutil.UserID("alice")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	carol := testClientFor("carol", "dev_carol_read_nm_grp") // not in group_read_nm
-	raw, _ := json.Marshal(protocol.Read{Type: "read", Group: "group_read_nm", LastRead: "msg_x"})
+	carol := testClientFor(testutil.UserID("carol"), "dev_carol_read_nm_grp") // not in group_read_nm
+	raw, _ := json.Marshal(protocol.Read{Type: "read", Group: testutil.GroupID("read_nm"), LastRead: testutil.MsgID("x")})
 	s.handleRead(carol.Client, raw)
 
 	if got := s.counters.Get(counters.SignalNonMemberContext, "dev_carol_read_nm_grp"); got != 1 {
@@ -70,12 +71,12 @@ func TestHandleRead_NonMemberGroup_SilentDropSignal(t *testing.T) {
 
 func TestHandleRead_NonPartyDM_SilentDropSignal(t *testing.T) {
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create dm: %v", err)
 	}
-	carol := testClientFor("carol", "dev_carol_read_nm_dm") // not a party to the DM
-	raw, _ := json.Marshal(protocol.Read{Type: "read", DM: dm.ID, LastRead: "msg_x"})
+	carol := testClientFor(testutil.UserID("carol"), "dev_carol_read_nm_dm") // not a party to the DM
+	raw, _ := json.Marshal(protocol.Read{Type: "read", DM: dm.ID, LastRead: testutil.MsgID("x")})
 	s.handleRead(carol.Client, raw)
 
 	if got := s.counters.Get(counters.SignalNonMemberContext, "dev_carol_read_nm_dm"); got != 1 {
@@ -90,15 +91,15 @@ func TestHandleRead_EmptyAndAmbiguousContext_MalformedSignal(t *testing.T) {
 	s := newTestServer(t)
 	genID := s.store.RoomDisplayNameToID("general")
 
-	empty := testClientFor("alice", "dev_alice_read_empty")
-	raw, _ := json.Marshal(protocol.Read{Type: "read", LastRead: "msg_x"}) // no context
+	empty := testClientFor(testutil.UserID("alice"), "dev_alice_read_empty")
+	raw, _ := json.Marshal(protocol.Read{Type: "read", LastRead: testutil.MsgID("x")}) // no context
 	s.handleRead(empty.Client, raw)
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_read_empty"); got != 1 {
 		t.Errorf("empty-context read: SignalMalformedFrame = %d, want 1", got)
 	}
 
-	ambig := testClientFor("alice", "dev_alice_read_ambig")
-	raw2, _ := json.Marshal(protocol.Read{Type: "read", Room: genID, DM: "dm_x", LastRead: "msg_x"}) // two contexts
+	ambig := testClientFor(testutil.UserID("alice"), "dev_alice_read_ambig")
+	raw2, _ := json.Marshal(protocol.Read{Type: "read", Room: genID, DM: testutil.DMID("x"), LastRead: testutil.MsgID("x")}) // two contexts
 	s.handleRead(ambig.Client, raw2)
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_read_ambig"); got != 1 {
 		t.Errorf("ambiguous-context read: SignalMalformedFrame = %d, want 1", got)
@@ -125,13 +126,13 @@ func TestHandleRead_MemberRoom_WritesPositionAndRelaysToOwnOtherDevicesOnly(t *t
 	s := newTestServer(t)
 	genID := s.store.RoomDisplayNameToID("general")
 
-	aliceA := testClientFor("alice", "dev_alice_read_a")
-	aliceB := testClientFor("alice", "dev_alice_read_b")
-	bob := testClientFor("bob", "dev_bob_read_member")                // member of general
-	outsider := testClientFor("mallory", "dev_mallory_read_outsider") // not a member
+	aliceA := testClientFor(testutil.UserID("alice"), "dev_alice_read_a")
+	aliceB := testClientFor(testutil.UserID("alice"), "dev_alice_read_b")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_read_member")                // member of general
+	outsider := testClientFor(testutil.UserID("mallory"), "dev_mallory_read_outsider") // not a member
 	registerClients(s, aliceA, aliceB, bob, outsider)
 
-	raw, _ := json.Marshal(protocol.Read{Type: "read", Room: genID, LastRead: "msg_42"})
+	raw, _ := json.Marshal(protocol.Read{Type: "read", Room: genID, LastRead: testutil.MsgID("42")})
 	s.handleRead(aliceA.Client, raw)
 
 	if got := s.counters.Get(counters.SignalNonMemberContext, "dev_alice_read_a"); got != 0 {
@@ -140,13 +141,13 @@ func TestHandleRead_MemberRoom_WritesPositionAndRelaysToOwnOtherDevicesOnly(t *t
 	if got := s.counters.Get(counters.SignalMalformedFrame, "dev_alice_read_a"); got != 0 {
 		t.Errorf("authorized member read must NOT fire SignalMalformedFrame, got %d", got)
 	}
-	if pos, _ := s.store.GetReadPosition("alice", "dev_alice_read_a", genID, "", ""); pos != "msg_42" {
+	if pos, _ := s.store.GetReadPosition(testutil.UserID("alice"), "dev_alice_read_a", genID, "", ""); pos != testutil.MsgID("42") {
 		t.Errorf("read position = %q, want msg_42", pos)
 	}
 	if msgs := aliceA.messages(); len(msgs) != 0 {
 		t.Fatalf("sender device received %d read messages, want 0", len(msgs))
 	}
-	assertOneReadMsg(t, aliceB, "alice", genID, "", "", "msg_42")
+	assertOneReadMsg(t, aliceB, testutil.UserID("alice"), genID, "", "", testutil.MsgID("42"))
 	if msgs := bob.messages(); len(msgs) != 0 {
 		t.Fatalf("other member received %d read messages, want 0 (Part 3: own devices only)", len(msgs))
 	}
@@ -158,27 +159,27 @@ func TestHandleRead_MemberRoom_WritesPositionAndRelaysToOwnOtherDevicesOnly(t *t
 // The group variant of the test above: same recipient set.
 func TestHandleRead_MemberGroup_RelaysToOwnOtherDevicesOnly(t *testing.T) {
 	s := newTestServer(t)
-	const groupID = "group_read_relay"
-	if err := s.store.CreateGroup(groupID, "alice", []string{"alice", "bob"}, "Read relay"); err != nil {
+	var groupID = testutil.GroupID("read_relay")
+	if err := s.store.CreateGroup(groupID, testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Read relay"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	aliceA := testClientFor("alice", "dev_alice_gread_a")
-	aliceB := testClientFor("alice", "dev_alice_gread_b")
-	bob := testClientFor("bob", "dev_bob_gread_member")
-	outsider := testClientFor("mallory", "dev_mallory_gread_outsider")
+	aliceA := testClientFor(testutil.UserID("alice"), "dev_alice_gread_a")
+	aliceB := testClientFor(testutil.UserID("alice"), "dev_alice_gread_b")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_gread_member")
+	outsider := testClientFor(testutil.UserID("mallory"), "dev_mallory_gread_outsider")
 	registerClients(s, aliceA, aliceB, bob, outsider)
 
-	raw, _ := json.Marshal(protocol.Read{Type: "read", Group: groupID, LastRead: "msg_g7"})
+	raw, _ := json.Marshal(protocol.Read{Type: "read", Group: groupID, LastRead: testutil.MsgID("g7")})
 	s.handleRead(aliceA.Client, raw)
 
-	if pos, _ := s.store.GetReadPosition("alice", "dev_alice_gread_a", "", groupID, ""); pos != "msg_g7" {
+	if pos, _ := s.store.GetReadPosition(testutil.UserID("alice"), "dev_alice_gread_a", "", groupID, ""); pos != testutil.MsgID("g7") {
 		t.Errorf("read position = %q, want msg_g7", pos)
 	}
 	if msgs := aliceA.messages(); len(msgs) != 0 {
 		t.Fatalf("sender device received %d read messages, want 0", len(msgs))
 	}
-	assertOneReadMsg(t, aliceB, "alice", "", groupID, "", "msg_g7")
+	assertOneReadMsg(t, aliceB, testutil.UserID("alice"), "", groupID, "", testutil.MsgID("g7"))
 	if msgs := bob.messages(); len(msgs) != 0 {
 		t.Fatalf("other group member received %d read messages, want 0 (Part 3: own devices only)", len(msgs))
 	}
@@ -191,28 +192,28 @@ func TestHandleRead_MemberGroup_RelaysToOwnOtherDevicesOnly(t *testing.T) {
 // sender's other devices AND the peer's devices, and nobody else.
 func TestHandleRead_DM_StillReachesThePeer(t *testing.T) {
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage("dm_read_relay", "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(testutil.DMID("read_relay"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
 
-	aliceA := testClientFor("alice", "dev_alice_dread_a")
-	aliceB := testClientFor("alice", "dev_alice_dread_b")
-	bob := testClientFor("bob", "dev_bob_dread_peer")
-	outsider := testClientFor("mallory", "dev_mallory_dread_outsider")
+	aliceA := testClientFor(testutil.UserID("alice"), "dev_alice_dread_a")
+	aliceB := testClientFor(testutil.UserID("alice"), "dev_alice_dread_b")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_dread_peer")
+	outsider := testClientFor(testutil.UserID("mallory"), "dev_mallory_dread_outsider")
 	registerClients(s, aliceA, aliceB, bob, outsider)
 
-	raw, _ := json.Marshal(protocol.Read{Type: "read", DM: dm.ID, LastRead: "msg_d3"})
+	raw, _ := json.Marshal(protocol.Read{Type: "read", DM: dm.ID, LastRead: testutil.MsgID("d3")})
 	s.handleRead(aliceA.Client, raw)
 
-	if pos, _ := s.store.GetReadPosition("alice", "dev_alice_dread_a", "", "", dm.ID); pos != "msg_d3" {
+	if pos, _ := s.store.GetReadPosition(testutil.UserID("alice"), "dev_alice_dread_a", "", "", dm.ID); pos != testutil.MsgID("d3") {
 		t.Errorf("read position = %q, want msg_d3", pos)
 	}
 	if msgs := aliceA.messages(); len(msgs) != 0 {
 		t.Fatalf("sender device received %d read messages, want 0", len(msgs))
 	}
-	assertOneReadMsg(t, aliceB, "alice", "", "", dm.ID, "msg_d3")
-	assertOneReadMsg(t, bob, "alice", "", "", dm.ID, "msg_d3")
+	assertOneReadMsg(t, aliceB, testutil.UserID("alice"), "", "", dm.ID, testutil.MsgID("d3"))
+	assertOneReadMsg(t, bob, testutil.UserID("alice"), "", "", dm.ID, testutil.MsgID("d3"))
 	if msgs := outsider.messages(); len(msgs) != 0 {
 		t.Fatalf("non-party received %d read messages, want 0", len(msgs))
 	}
@@ -223,11 +224,11 @@ func TestHandleRead_DM_StillReachesThePeer(t *testing.T) {
 func TestHandleRead_SingleDevice_NoRelay(t *testing.T) {
 	s := newTestServer(t)
 	genID := s.store.RoomDisplayNameToID("general")
-	alice := testClientFor("alice", "dev_alice_solo")
-	bob := testClientFor("bob", "dev_bob_solo_member")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_solo")
+	bob := testClientFor(testutil.UserID("bob"), "dev_bob_solo_member")
 	registerClients(s, alice, bob)
 
-	raw, _ := json.Marshal(protocol.Read{Type: "read", Room: genID, LastRead: "msg_1"})
+	raw, _ := json.Marshal(protocol.Read{Type: "read", Room: genID, LastRead: testutil.MsgID("1")})
 	s.handleRead(alice.Client, raw)
 
 	if msgs := alice.messages(); len(msgs) != 0 {
@@ -244,17 +245,17 @@ func TestHandleRead_SingleDevice_NoRelay(t *testing.T) {
 func TestHandleRead_RetiredRoomMember_Allowed(t *testing.T) {
 	s := newTestServer(t)
 	genID := s.store.RoomDisplayNameToID("general")
-	if err := s.store.SetRoomRetired(genID, "alice", "test"); err != nil {
+	if err := s.store.SetRoomRetired(genID, testutil.UserID("alice"), "test"); err != nil {
 		t.Fatalf("retire room: %v", err)
 	}
-	alice := testClientFor("alice", "dev_alice_read_retired") // member, room retired
-	raw, _ := json.Marshal(protocol.Read{Type: "read", Room: genID, LastRead: "msg_99"})
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_read_retired") // member, room retired
+	raw, _ := json.Marshal(protocol.Read{Type: "read", Room: genID, LastRead: testutil.MsgID("99")})
 	s.handleRead(alice.Client, raw)
 
 	if got := s.counters.Get(counters.SignalNonMemberContext, "dev_alice_read_retired"); got != 0 {
 		t.Errorf("member read in a retired room must be allowed (no drop), got SignalNonMemberContext=%d", got)
 	}
-	if pos, _ := s.store.GetReadPosition("alice", "dev_alice_read_retired", genID, "", ""); pos != "msg_99" {
+	if pos, _ := s.store.GetReadPosition(testutil.UserID("alice"), "dev_alice_read_retired", genID, "", ""); pos != testutil.MsgID("99") {
 		t.Errorf("read position in retired room = %q, want msg_99 (reading still allowed)", pos)
 	}
 }

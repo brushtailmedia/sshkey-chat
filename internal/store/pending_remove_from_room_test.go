@@ -6,6 +6,8 @@ package store
 
 import (
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-chat/internal/testutil"
 )
 
 func TestConsumePendingRemoveFromRooms_Empty(t *testing.T) {
@@ -33,7 +35,7 @@ func TestRecordPendingRemoveFromRoom_RoundTrip(t *testing.T) {
 	}
 	defer st.Close()
 
-	if err := st.RecordPendingRemoveFromRoom("usr_alice", "rm_general", "removed", "os:1000"); err != nil {
+	if err := st.RecordPendingRemoveFromRoom(testutil.UserID("alice"), testutil.RoomID("rm_general"), "removed", "os:1000"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
@@ -42,10 +44,10 @@ func TestRecordPendingRemoveFromRoom_RoundTrip(t *testing.T) {
 		t.Fatalf("expected 1 row, got %d", len(got))
 	}
 	row := got[0]
-	if row.UserID != "usr_alice" {
+	if row.UserID != testutil.UserID("alice") {
 		t.Errorf("UserID = %q, want usr_alice", row.UserID)
 	}
-	if row.RoomID != "rm_general" {
+	if row.RoomID != testutil.RoomID("rm_general") {
 		t.Errorf("RoomID = %q, want rm_general", row.RoomID)
 	}
 	if row.Reason != "removed" {
@@ -67,8 +69,8 @@ func TestConsumePendingRemoveFromRooms_DeletesRows(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.RecordPendingRemoveFromRoom("usr_alice", "rm_a", "removed", "os:1000")
-	st.RecordPendingRemoveFromRoom("usr_bob", "rm_b", "removed", "os:1000")
+	st.RecordPendingRemoveFromRoom(testutil.UserID("alice"), testutil.RoomID("rm_a"), "removed", "os:1000")
+	st.RecordPendingRemoveFromRoom(testutil.UserID("bob"), testutil.RoomID("rm_b"), "removed", "os:1000")
 
 	first, _ := st.ConsumePendingRemoveFromRooms()
 	if len(first) != 2 {
@@ -89,9 +91,9 @@ func TestRecordPendingRemoveFromRoom_PreservesOrder(t *testing.T) {
 	}
 	defer st.Close()
 
-	users := []string{"usr_a", "usr_b", "usr_c"}
+	users := []string{testutil.UserID("a"), testutil.UserID("b"), "usr_c"}
 	for _, u := range users {
-		st.RecordPendingRemoveFromRoom(u, "rm_shared", "removed", "os:1000")
+		st.RecordPendingRemoveFromRoom(u, testutil.RoomID("rm_shared"), "removed", "os:1000")
 	}
 
 	got, _ := st.ConsumePendingRemoveFromRooms()

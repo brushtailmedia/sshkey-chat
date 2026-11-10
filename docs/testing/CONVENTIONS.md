@@ -37,7 +37,7 @@ This document is the prescriptive test policy for `sshkey-chat` only.
 
 ## SQL and Error Assertions
 
-- SQL in tests must use parameter placeholders (`?`), never `fmt.Sprintf` SQL construction.
+- SQL values in tests must use parameter placeholders (`?`). Identifier construction requires a narrow drift-guard allowlist and an explanation in `docs/security/sql_audit.md`; the read-only S3 snapshot helper quotes schema-derived table names.
 - Error assertions must use `errors.Is` / `errors.As` (never string-match on `err.Error()`).
 
 ## CorrID and Protocol Assertions
@@ -70,4 +70,38 @@ No open deferrals remain after the 2026-04-24 deferred-items pass.
 
 - Launch-gate behavior is covered by the new `cmd/sshkey-server/auto_revoke_integration_test.go` suite (including representative-flow counter checks).
 - B.5 and B.6 integration scenarios now have concrete `cmd/sshkey-server` coverage (`auto_revoke_integration_test.go`, `upload_quota_integration_test.go`).
-- Current CI minimums include: `internal/server` 66.0, `internal/store` 58.0, `internal/protocol` 75.0.
+- Current CI minimums include: `internal/server` 70.0, `internal/store` 58.0, `internal/protocol` 75.0.
+
+## Identifier Fixtures
+
+Use the pure `internal/testutil` builders for ordinary IDs: `UserID`, `RoomID`,
+`GroupID`, `DMID`, `MsgID`, `ReactionID`, `FileID`, and `UploadID`. A readable
+label such as `testutil.MsgID("alice-edit")` produces a stable prefixed ID with
+21 nanoid characters. `DeviceID` is also available; existing device fixtures and
+handshake enforcement belong to the device-session work, not this migration.
+Both repositories use SHA-256 of the label and map the first 21 digest bytes
+modulo 64 through `0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-`.
+Matching hard-coded vectors cover every builder, empty labels and Unicode labels.
+
+`Signature(label)` and `Payload(label, size)` are opaque size fixtures. They do
+not promise a valid signature or decryptable ciphertext. Use actual generated
+keys, signing and encryption in cryptographic verification and end-to-end tests.
+
+The fixture lint parses Go syntax and checks selected typed ID fields, concrete
+message IDs, member/file slices, known store constructor arguments, ID-named
+variables, raw JSON, constant concatenations and supported formatting calls.
+Runtime-producing calls and variables are not whole-program data-flow checked.
+Unsupported constructed strings in recognized ID positions are reported for
+review. Non-ID fields (display names, SSH login hints, protocol type names and
+trusted system actors) are outside the ID rule. Optional empty fields retain
+their protocol semantics. Parse/read failures and an empty scan fail the guard.
+
+Keep intentional malformed test input and its rejection assertions unchanged.
+Attach `// malformed: <specific reason>` to the same source line as that input;
+a bare marker, an unrelated comment or a marker on another line does not exempt
+it. The lint's own regression corpus locks these rules. Do not replace a negative
+fixture with a valid builder to make the guard pass.
+
+The server guard scans `internal/server`, `internal/store` and
+`cmd/sshkey-server` test files for `usr_`, `room_`, `group_`, `dm_`, `msg_`,
+`react_`, `file_` and `up_`. Device IDs are deliberately excluded.

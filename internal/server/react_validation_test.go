@@ -25,17 +25,17 @@ func reactHasErrorCode(msgs []json.RawMessage, code string) bool {
 // users who aren't members.
 func TestHandleReact_GroupWrappedKeysMismatchRejected(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("grp_react", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("grp_react"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	alice := testClientFor("alice", "dev_alice_react")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_react")
 
 	raw, _ := json.Marshal(protocol.React{
 		Type:  "react",
-		ID:    "msg_x",
-		Group: "grp_react",
+		ID:    testutil.MsgID("x"),
+		Group: testutil.GroupID("grp_react"),
 		WrappedKeys: map[string]string{
-			"alice": testutil.WrappedKey("k"), "bob": testutil.WrappedKey("k"), "carol": testutil.WrappedKey("k"), // carol is NOT a member
+			testutil.UserID("alice"): testutil.WrappedKey("k"), testutil.UserID("bob"): testutil.WrappedKey("k"), testutil.UserID("carol"): testutil.WrappedKey("k"), // carol is NOT a member
 		},
 		Payload:   "p",
 		Signature: "sig",
@@ -50,18 +50,18 @@ func TestHandleReact_GroupWrappedKeysMismatchRejected(t *testing.T) {
 // S7: a 1:1 DM reaction must carry exactly the two parties' wrapped keys.
 func TestHandleReact_DMWrappedKeysMismatchRejected(t *testing.T) {
 	s := newTestServer(t)
-	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), "alice", "bob")
+	dm, err := s.store.CreateOrGetDirectMessage(store.GenerateID("dm_"), testutil.UserID("alice"), testutil.UserID("bob"))
 	if err != nil {
 		t.Fatalf("create dm: %v", err)
 	}
-	alice := testClientFor("alice", "dev_alice_react_dm")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_react_dm")
 
 	// Only one party present → must be rejected.
 	raw, _ := json.Marshal(protocol.React{
 		Type:        "react",
-		ID:          "msg_x",
+		ID:          testutil.MsgID("x"),
 		DM:          dm.ID,
-		WrappedKeys: map[string]string{"alice": testutil.WrappedKey("k")},
+		WrappedKeys: map[string]string{testutil.UserID("alice"): testutil.WrappedKey("k")},
 		Payload:     "p",
 		Signature:   "sig",
 	})
@@ -77,15 +77,15 @@ func TestHandleReact_DMWrappedKeysMismatchRejected(t *testing.T) {
 // never a key leak). It must NOT trip the wrapped_keys validation.
 func TestHandleReact_GroupEmptyWrappedKeysTolerated(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.store.CreateGroup("grp_react2", "alice", []string{"alice", "bob"}, "Test"); err != nil {
+	if err := s.store.CreateGroup(testutil.GroupID("grp_react2"), testutil.UserID("alice"), []string{testutil.UserID("alice"), testutil.UserID("bob")}, "Test"); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	alice := testClientFor("alice", "dev_alice_react2")
+	alice := testClientFor(testutil.UserID("alice"), "dev_alice_react2")
 
 	raw, _ := json.Marshal(protocol.React{
 		Type:      "react",
-		ID:        "msg_x",
-		Group:     "grp_react2",
+		ID:        testutil.MsgID("x"),
+		Group:     testutil.GroupID("grp_react2"),
 		Payload:   "p",
 		Signature: "sig",
 	}) // no wrapped_keys
