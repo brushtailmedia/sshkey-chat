@@ -70,6 +70,7 @@ retired-room-upload-start-fix.md
 stale-deleted-room-readd-fix.md
 docs/security/*
 docs/planning/*
+docs/planning/
 
 # OS
 .DS_Store

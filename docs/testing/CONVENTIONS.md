@@ -17,6 +17,23 @@ This document is the prescriptive test policy for `sshkey-chat` only.
 - `store-level`: use real SQLite DB files under `t.TempDir()`.
 - `failure-injection`: use `failingStore` where write-path error handling must be asserted.
 
+## Reachability and Absence Checks
+
+- New code is proven through a production entry point. A new verb, frame
+  field, config value or stored column needs at least one test that reaches
+  it the way production does: through `handleMessage` (the dispatch) at
+  handler level, or over the wire in `cmd/sshkey-server`. A direct call to a
+  new handler or helper shows that it works, not that anything calls it. A
+  changed behaviour of a handler that is already dispatched may be tested by
+  calling that handler. A new config value needs a test that sets it and
+  observes the behaviour that reads it; a parsing test does not cover a value
+  nothing reads.
+- An absence assertion needs a positive control. A check that something did
+  not happen (no frame, no stored row, no counter, no log record) counts only
+  beside a case in which the same check finds that thing: a sibling case, an
+  earlier step of the same test, or a well-shaped control row. Without one, a
+  wrong type name, a wrong path or a dead channel passes as absence.
+
 ## Privacy Regression Pattern
 
 - Membership-sensitive handlers must have `Test<Handler>_PrivacyResponsesIdentical` tests.

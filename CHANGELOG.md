@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Changed
+- **Testing conventions: reachability and absence checks (2026-11-12).** New
+  code needs at least one test through a production entry point
+  (`handleMessage` or the wire suite in `cmd/sshkey-server`); a direct call
+  to a new function does not show that anything calls it. An assertion that
+  something did not happen needs a positive control beside it. Documentation
+  only; no test or runtime change.
 - **Failed-unpin row-preservation regression (2026-11-11).** Keep an existing
   pin in a real temporary store while a SQLite trigger rejects deletion. Assert
   the original row/metadata survive, the caller receives the internal error and
