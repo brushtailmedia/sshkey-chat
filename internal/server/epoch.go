@@ -339,15 +339,15 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 		return
 	}
 
-	// Phase 17 Step 4c: envelope cap on wrapped_keys. Bounded by the
-	// configured max group-member count (a room with N members
-	// legitimately carries N wrapped keys; anything larger is either
-	// a client bug or a DoS). Check happens before the epoch validation
-	// walk below so we don't allocate the wrappedSet map from attacker-
-	// sized input.
-	if !s.checkWrappedKeysCap(c, msg.WrappedKeys, "epoch_rotate") {
-		return
-	}
+	// No wrapped_keys cap on a rotation. Rooms have no member limit, so
+	// the group cap (checkWrappedKeysCap) does not apply here: a room with
+	// N members carries N wrapped keys, whatever [groups] max_members
+	// says. The keys are held to the room's own member list by the
+	// exact-match check below, which answers stale_member_list and counts
+	// no misbehaviour signal, because a member joining or leaving while
+	// the rotation is in flight produces the same mismatch honestly. The
+	// size of the frame is bounded by the decoder's line limit
+	// (protocol.MaxInboundLineBytes), not by a member count.
 
 	if !s.validateIDOrReject(c, "epoch_rotate", msg.Room, "room_", func() { s.respondError(c, "", protocol.ErrEpochConflict, "Conflict detected — please try again", 0) }) {
 		return

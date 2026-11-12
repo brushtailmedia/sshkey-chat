@@ -8,7 +8,9 @@ package server
 //     explicitly via s.cfg so the default doesn't leak into assertions.
 //   - file_ids[] element fails ValidateNanoID → SignalInvalidNanoID, invalid_file_id wire code.
 //   - wrapped_keys map > max_members → SignalWrappedKeysOverCap, wrapped_keys_over_cap wire code.
-//     Applied at handleSendGroup, handleEditGroup, handleEpochRotate, handleReact (group context).
+//     Applied at handleSendGroup, handleEditGroup, handleReact, handleSendDM, handleEditDM.
+//   - a room's epoch_rotate is NOT under that cap: rooms have no member limit, and the
+//     keys are held to the room's own member list (stale_member_list, no signal).
 //
 // Caps are enforced BEFORE any DB round-trip — the cheaper check
 // protects the more expensive membership / context lookup from
@@ -212,24 +214,105 @@ func TestHandleEditGroup_WrappedKeysOverCapRejected(t *testing.T) {
 	}
 }
 
-func TestHandleEpochRotate_WrappedKeysOverCapRejected(t *testing.T) {
-	s := newTestServer(t)
+// pendingRotationAboveGroupCap sets [groups] max_members below the size of
+// the seeded room general, puts a rotation in flight for it and returns the
+// room, its members and the pending epoch. Rooms have no member limit, so
+// the group cap must not reach a room's epoch_rotate.
+func pendingRotationAboveGroupCap(t *testing.T, s *Server) (room string, members []string, epoch int64) {
+	t.Helper()
+	const groupCap = 2
 	s.cfg.Lock()
-	s.cfg.Server.Groups.MaxMembers = 2
+	s.cfg.Server.Groups.MaxMembers = groupCap
 	s.cfg.Unlock()
 
-	alice := testClientFor(testutil.UserID("alice"), "dev_alice_epoch_wkcap")
-	msg := protocol.EpochRotate{
-		Type:        "epoch_rotate",
-		Room:        store.GenerateID("room_"),
-		Epoch:       1,
-		WrappedKeys: genWrappedKeys(5),
+	room = s.store.RoomDisplayNameToID("general")
+	members = s.store.GetRoomMemberIDsByRoomID(room)
+	if len(members) <= groupCap {
+		t.Fatalf("general has %d members; this case needs more than the group cap (%d)", len(members), groupCap)
 	}
-	raw, _ := json.Marshal(msg)
+	s.epochs.getOrCreate(room, 0)
+	epoch = s.epochs.startRotation(room, func() {})
+	if epoch == 0 {
+		t.Fatal("startRotation returned 0")
+	}
+	return room, members, epoch
+}
+
+func TestHandleEpochRotate_RoomAboveGroupCapRotates(t *testing.T) {
+	s := newTestServer(t)
+	room, members, epoch := pendingRotationAboveGroupCap(t, s)
+
+	const device = "dev_alice_room_over_cap"
+	alice := testClientFor(testutil.UserID("alice"), device)
+	wk := make(map[string]string, len(members))
+	for _, m := range members {
+		wk[m] = testutil.WrappedKey(m)
+	}
+	raw, _ := json.Marshal(protocol.EpochRotate{
+		Type:        "epoch_rotate",
+		Room:        room,
+		Epoch:       epoch,
+		WrappedKeys: wk,
+		MemberHash:  "SHA256:deadbeef",
+		MemberSig:   "c2lnbmF0dXJl", // opaque to the server
+	})
 	s.handleEpochRotate(alice.Client, raw)
 
-	if got := s.counters.Get(counters.SignalWrappedKeysOverCap, "dev_alice_epoch_wkcap"); got != 1 {
-		t.Errorf("SignalWrappedKeysOverCap = %d, want 1", got)
+	frames := alice.messages()
+	var confirmed protocol.EpochConfirmed
+	if len(frames) == 1 {
+		_ = json.Unmarshal(frames[0], &confirmed)
+	}
+	if confirmed.Type != "epoch_confirmed" || confirmed.Room != room || confirmed.Epoch != epoch {
+		t.Errorf("frames to the rotating member = %s, want exactly one epoch_confirmed for room %s epoch %d", frames, room, epoch)
+	}
+	if got, err := s.store.GetCurrentEpoch(room); err != nil || got != epoch {
+		t.Errorf("stored current epoch = %d (err %v), want %d", got, err, epoch)
+	}
+	for _, m := range members {
+		if got, err := s.store.GetEpochKey(room, epoch, m); err != nil || got != wk[m] {
+			t.Errorf("stored key for %s: err %v, matches the key sent = %v", m, err, got == wk[m])
+		}
+	}
+	if got := s.counters.Get(counters.SignalWrappedKeysOverCap, device); got != 0 {
+		t.Errorf("SignalWrappedKeysOverCap = %d, want 0: a room's rotation is not under the group cap", got)
+	}
+}
+
+func TestHandleEpochRotate_KeysBeyondTheRoomAreStaleNotASignal(t *testing.T) {
+	s := newTestServer(t)
+	room, members, epoch := pendingRotationAboveGroupCap(t, s)
+
+	const device = "dev_alice_room_extra_keys"
+	alice := testClientFor(testutil.UserID("alice"), device)
+	wk := make(map[string]string, len(members)+2)
+	for _, m := range append(members, testutil.UserID("outsider1"), testutil.UserID("outsider2")) {
+		wk[m] = testutil.WrappedKey(m)
+	}
+	raw, _ := json.Marshal(protocol.EpochRotate{
+		Type:        "epoch_rotate",
+		Room:        room,
+		Epoch:       epoch,
+		WrappedKeys: wk,
+		MemberHash:  "SHA256:deadbeef",
+		MemberSig:   "c2lnbmF0dXJl", // opaque to the server
+	})
+	s.handleEpochRotate(alice.Client, raw)
+
+	// The refusal is followed by a fresh epoch_trigger to the same member
+	// (the existing retry); the refusal is the only error.
+	frames := alice.messages()
+	if codes := errorCodes(frames); len(codes) != 1 || codes[0] != protocol.ErrStaleMemberList {
+		t.Errorf("error codes = %v, want only %s", codes, protocol.ErrStaleMemberList)
+	}
+	if n := countEnvelopeType(t, frames, "epoch_confirmed"); n != 0 {
+		t.Errorf("a rotation with keys beyond the room's members was confirmed")
+	}
+	if got, err := s.store.GetCurrentEpoch(room); err != nil || got != 0 {
+		t.Errorf("stored current epoch = %d (err %v), want 0: nothing may be stored", got, err)
+	}
+	if got := s.counters.Get(counters.SignalWrappedKeysOverCap, device); got != 0 {
+		t.Errorf("SignalWrappedKeysOverCap = %d, want 0: a key-count mismatch in a room is not misbehaviour", got)
 	}
 }
 

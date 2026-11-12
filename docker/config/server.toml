@@ -265,15 +265,16 @@ max_per_user = 10
 
 [groups]
 # Hard cap on group-DM membership. Enforced at create_group and
-# add_to_group; also the upper bound on the wrapped_keys envelope size the
-# server will accept, and the member count the group frame budget is sized
-# for (16 KB body + 160 bytes per possible member). Default 100: a group is
-# a conversation where everyone is addressed by name, and 100 is the
-# product's size rule for every per-person signal (typing in rooms, below,
-# uses the same number). At 100 members each send carries ~15 KB of
-# per-message wrapped-key material and ~10 ms of per-member crypto.
-# Advertised to clients in server_hello. Smaller deployments can tune
-# down; larger deployments with hardware to match can tune up.
+# add_to_group; also the most wrapped keys a group or DM frame may carry,
+# and the member count the group frame budget is sized for (16 KB body +
+# 160 bytes per possible member). Default 100: a group is a conversation
+# where everyone is addressed by name, and 100 is the product's size rule
+# for every per-person signal (typing in rooms, below, uses the same
+# number). At 100 members each send carries ~15 KB of per-message
+# wrapped-key material and ~10 ms of per-member crypto. Advertised to
+# clients in server_hello. Smaller deployments can tune down; larger
+# deployments with hardware to match can tune up. Rooms have no member
+# limit and are not bound by this setting.
 max_members = 100
 
 # ----------------------------------------------------------------------

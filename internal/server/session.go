@@ -2214,18 +2214,18 @@ func (s *Server) checkFileIDsCapAndShape(c *Client, fileIDs []string, verb strin
 	return true
 }
 
-// checkWrappedKeysCap enforces the Phase 17 Step 4c envelope cap on
-// wrapped_keys — bounded by [server.groups].max_members from Step 4d.
-// Returns true if within limit; returns false after emitting rejection
-// + client error. Caller MUST return on false.
+// checkWrappedKeysCap enforces the envelope cap on wrapped_keys for
+// group and DM verbs: at most [groups] max_members entries. Returns
+// true if within the limit; returns false after emitting the rejection
+// and the client error. Caller MUST return on false.
 //
-// DM context is already bounded by the `len(wrapped_keys) == 2`
-// equality check in handleSendDM/handleEditDM — this helper is the
-// unified cap for group-context handlers (handleSendGroup,
-// handleEditGroup, handleEpochRotate, handleCreateGroup) where the
-// current membership check was the only bound (membership == exact
-// set match) but short-circuit semantics don't actually bound the
-// map entry count on the wire.
+// Callers: handleSendGroup, handleEditGroup, handleReact, handleSendDM
+// and handleEditDM (the DM handlers also require exactly two entries).
+// A room's epoch rotation is deliberately NOT a caller: rooms have no
+// member limit, and handleEpochRotate holds the keys to the room's own
+// member list instead. The group cap must not be applied there: it
+// would stop every room with more members than the cap from rotating
+// and count a signal against the member the server had asked.
 func (s *Server) checkWrappedKeysCap(c *Client, wrappedKeys map[string]string, verb string) bool {
 	maxMembers := s.groupMaxMembers()
 	if len(wrappedKeys) > maxMembers {

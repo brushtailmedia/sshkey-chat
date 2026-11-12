@@ -197,9 +197,11 @@ const DefaultRoomTypingMaxMembers = 100
 // GroupsSection governs per-group policy knobs. Phase 17 Step 4d.
 //
 // MaxMembers is the hard cap on group-DM membership — enforced at
-// create_group and add_to_group, and is the upper bound on the
-// wrapped_keys envelope size (a 10M-entry map that passes the
-// per-member ECDH check would otherwise exhaust memory). Default
+// create_group and add_to_group, and is the most wrapped_keys entries a
+// group or DM frame may carry (a 10M-entry map that passes the
+// per-member ECDH check would otherwise exhaust memory). It does not
+// bound rooms: a room has no member limit, and its key rotation is held
+// to the room's own member list. Default
 // DefaultMaxGroupMembers (100), advertised to clients in server_hello. At
 // 100 members each send carries ~15 KB of wrapped-key material on the wire
 // (about 155 bytes per member) and costs ~10 ms of crypto; the server
