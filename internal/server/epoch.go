@@ -287,8 +287,25 @@ func (s *Server) triggerPostConnectRoomRotations(c *Client) {
 	}
 }
 
-// triggerEpochRotation sends an epoch_trigger to a client and handles the response.
+// triggerEpochRotation asks a client to rotate a room's key: it marks the
+// rotation as pending and sends that client an epoch_trigger with the room's
+// members. The answer arrives as an epoch_rotate (handleEpochRotate). It does
+// nothing for a client that is not a current member of the room.
 func (s *Server) triggerEpochRotation(c *Client, roomID string, reason string) {
+	// The server only ever asks a current member of the room to rotate.
+	// Every request is sent from here, so this one check holds for all of
+	// them, including a caller whose own check is a moment old (a member
+	// removed between being picked and being asked). Nothing is armed for
+	// anyone else: no pending rotation, no timer, no member list sent.
+	if !s.store.IsRoomMemberByID(roomID, c.UserID) {
+		s.logger.Warn("epoch rotation not requested: client is not a member of the room",
+			"room", roomID,
+			"user", c.UserID,
+			"trigger", reason,
+		)
+		return
+	}
+
 	newEpoch := s.epochs.startRotation(roomID, func() {
 		// Timeout callback — rotation wasn't completed in 5 seconds.
 		// Cancel and let the next sender pick it up via checkRotationNeeded.
@@ -350,6 +367,24 @@ func (s *Server) handleEpochRotate(c *Client, raw json.RawMessage) {
 	// (protocol.MaxInboundLineBytes), not by a member count.
 
 	if !s.validateIDOrReject(c, "epoch_rotate", msg.Room, "room_", func() { s.respondError(c, "", protocol.ErrEpochConflict, "Conflict detected — please try again", 0) }) {
+		return
+	}
+
+	// Only a current member of the room may answer a rotation; any current
+	// member may, whoever was asked. This is the first check after the room
+	// id's shape, ahead of the pending state and the stale-list retry, so
+	// someone outside the room gets one answer whatever the room's state
+	// and is never sent the member list. The answer is the one a member
+	// gets when nothing is pending. The attempt counts as
+	// non_member_context; an honest client reaches this only by leaving or
+	// being removed between a request and its answer.
+	// shortcut: every refused answer counts, so a member removed while
+	// several requests to them are outstanding counts once per request;
+	// revisit when rotation requests are sent once per room at a time.
+	if !s.store.IsRoomMemberByID(msg.Room, c.UserID) {
+		s.rejectAndLog(c, counters.SignalNonMemberContext, "epoch_rotate",
+			"not-a-member of room="+msg.Room, nil)
+		s.respondError(c, "", protocol.ErrEpochConflict, "Conflict detected — please try again", 0)
 		return
 	}
 
